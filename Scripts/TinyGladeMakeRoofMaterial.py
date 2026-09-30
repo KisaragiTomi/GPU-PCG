@@ -4,14 +4,18 @@ Source: `D:/MyProject/Tiny Glade/tmp/shaders/_nani_instanced_roof.raster.hlsl_b9
 (excerpt + SHA-256 in Docs/TinyGlade/evidence/roof-shader-20260912.txt). TG's "chipped, worn"
 tiles are entirely this shading; roof_tile has no damaged geometry variants.
 
-Vertex shader (WPO): two of TG's per-vertex steps, applied after the instance transform (vs_main.glsl).
+Vertex shader (WPO): TG's resize, lift and wobble, applied after the instance transform (vs_main.glsl).
+  resize       2026-09-30: recover the template from UV0 / Colour.R, use the actual instance scale to
+               repeat TG's sign-based deformation, and subtract the scaled nominal bake. Bevels and
+               flared ends retain their thickness-based size on half tiles and narrow ridge slabs.
   lift         template y > .1 (the wide, down-slope end) rises 6 cm along the tile normal, 2 cm on 10% of
                tiles (rand(seed*1664525 + roof id) > .9) (:176-209). The mesh bake already holds BAKED_LIFT_CM
-               of it, the WPO adds the per-tile remainder (+3 or -1 cm).
+               of it. The correction accounts for the instance scale; hip slabs and middle ridge slabs
+               have no lift, matching is_main_roof_body. Ridge endpoints and slope tiles retain it.
   wobble       +-3 cm horizontally: clamp((value_noise3(world_m * .4) - .5) * 2.5, -.5, .5) * 6 cm (:296-557),
                sampled at the lifted world position. The same field moves every TG building shader (walls,
                bricks, plaster, windows, planks, ivy, spire).
-  |WPO| <= 3 + |(3, 3)| = 7.3 cm; the tile cull sphere in Shaders/Private/CSHouseTile.usf is widened by 8 cm.
+  The material and tile cull sphere allow 32 cm WPO, including the bevel correction.
 
   NOT ported, on purpose (user decision 2026-09-15 after seeing both on screen). TG's tile VS also has:
   eave flare   :213      local z += (1 - smoothstep(0, 0.8 m, h)) * 0.115 m
@@ -48,6 +52,14 @@ Pixel shader, per pixel (VS varyings C3/C4/C6/C9/C10 are evaluated per pixel her
                gradient of the tile-top height (correlation with roof_tile_damage = -0.95 on both axes), hence
                the minus signs; the metre-scaled frame makes the relief about 1.5x the texture's raw xy.
 
+Masked clipping: each slope tile carries its nearest face-bisector plane through the existing two-float
+instance custom-data stream (normal angle + 4, world plane constant). Pixel discard trims crossed tile
+ends at the hip; a single narrow slab covers the joint. Custom-data kind 0 = unlifted cap, -1 = lifted
+ridge endpoint, >0 = clipped/lifted body. The mask also runs in Nanite / VSM rasterization.
+Evaluate the signed distance at the displaced vertex and interpolate that scalar into the mask. In the
+tested UE 5.7 Nanite/VSM path, recomputing it from pixel WorldPosition cut the visible tile but left an
+uncut triangular shadow; sharing the vertex distance removes that mismatch.
+
 TG palette ids (roof_color_ids -> texture array layer; UI icons in extracted/textures/color_icon):
   id  layer / look     RoofWearColorScale  RoofWearWeight   (wear texture)
   0   red (default)    1.35                1.0              layer01
@@ -61,7 +73,8 @@ TG palette ids (roof_color_ids -> texture array layer; UI icons in extracted/tex
   8   ochre            1.35                1.0              layer01
   9   light blue       0.9                 0.5              layer01
   10  purple           0.9                 0.5              layer07
-`MI_TinyGladeRoof_Turquoise` is palette 3. RoofBrightness is the only UE adaptation (TG's own
+`MI_TinyGladeRoof_Turquoise` is palette 3; `MI_TinyGladeRoof_Grey` is palette 7, selected for the
+user-confirmed 2026-09-29 reference. RoofBrightness is the UE adaptation (TG's own
 lighting differs); theme/snow, highlight and dormer holes are not ported.
 """
 import importlib.util
@@ -73,6 +86,7 @@ MEL=unreal.MaterialEditingLibrary
 
 PALETTES = {
     'Turquoise': dict(layer=3, wear_layer=1, scale=0.9, weight=0.5),
+    'Grey': dict(layer=7, wear_layer=1, scale=1.35, weight=1.0),
 }
 
 
@@ -238,17 +252,47 @@ struct FTGRoofWpo
         }
         return Sum;
     }
+    float3 Deform(float3 Tpl, float3 Size)
+    {
+        float3 Half = Size * float3(0.50597 * 0.95, 0.5, 0.5);
+        float3 Limit = Half * float3(3.5892038, 3.7037039, 3.7037039);
+        float Common = max(min(max(Half.x, max(Half.y, Half.z)), min(Limit.x, min(Limit.y, Limit.z))), 1e-5);
+        float3 P = Tpl * float3(1.9764018, 2.0, 2.0) * Common - (Common - Half) * sign(Tpl);
+        P.xy = -P.xy;
+        return P;
+    }
 };
 FTGRoofWpo Tg;
-// lift: template y > 0.1 rises 6 cm along the tile normal (2 cm on 10% of tiles); the bake holds @BakedLiftCm@ cm.
-float Lift = (Tg.Rand(Tg.Seed(Rnd) * 1664525u + 1u) > 0.9) ? 2.0 : 6.0;
-float3 Offset = normalize(TileUp) * ((TplXY.y > 0.1) ? Lift - @BakedLiftCm@ : 0.0);
+// TG resizes the template using signs, preserving bevel thickness when a half tile or narrow hip slab is used.
+// A nonuniform instance scale alone stretches the bevel and turns narrow hip slabs into wedges.
+float3 X = LocalX;
+float3 Y = LocalY;
+float3 Z = LocalZ;
+float3 Scale = max(float3(length(X), length(Y), length(Z)), 1e-5);
+float3 Tpl = float3(TplXY, VColor.r - 0.5);
+float3 Nominal = float3(45.0,64.0,10.0);
+float3 Baked = Tg.Deform(Tpl, Nominal);
+Baked.z += TplXY.y > 0.1 ? @BakedLiftCm@ : 0.0;
+float3 Resized = Tg.Deform(Tpl, Nominal * Scale);
+// ClipKind > 0: slope tile; -1: first/last horizontal ridge slab; 0: the other caps, no lifted end.
+float Lift = ClipKind != 0.0 ? ((Tg.Rand(Tg.Seed(Rnd) * 1664525u + 1u) > 0.9) ? 2.0 : 6.0) : 0.0;
+Resized.z += TplXY.y > 0.1 ? Lift : 0.0;
+float3 Delta = Resized - Baked * Scale;
+float3 Offset = X / Scale.x * Delta.x + Y / Scale.y * Delta.y + Z / Scale.z * Delta.z;
 // wobble: TG's shared hand-made field, +-3 cm horizontally, sampled at the lifted position. TG's eave flare and
 // roof rise sit between these two steps and are left out on purpose (module doc).
 float3 Metres = (WorldPos + Offset) * 0.01;                   // TG is y-up: tg(x, y, z) = ue(x, z, y)
 float2 Wobble = clamp((Tg.ValueNoise3(float3(Metres.x, Metres.z, Metres.y) * 0.4) - 0.5) * 2.5, -0.5, 0.5) * 6.0;
 Offset.xy += Wobble;                                          // TG x -> ue x, TG z -> ue y
 return Offset;
+'''
+
+# Slope tiles end on their nearest roof-face bisector. Evaluate before view-specific pixel/shadow setup.
+# Data is generated by CSHouseTile::BuildPlan and carried by the existing two-float custom-data stream.
+CLIP_DISTANCE_HLSL = '''
+if (ClipData.x <= 0.0) return -1.0;
+float Angle = ClipData.x - 4.0;
+return dot(float2(cos(Angle), sin(Angle)), (WorldPos + Offset).xy) + ClipData.y;
 '''
 
 
@@ -262,12 +306,11 @@ def build(name='M_TinyGladeRoof',save=True):
         if not MEL.get_num_material_expressions(mat): break
         MEL.delete_all_material_expressions(mat)
     assert not MEL.get_num_material_expressions(mat)
-    # |WPO| <= 3 cm lift (along the normal) + |(3, 3)| cm wobble = 7.3 cm, per axis <= 3 + 3 = 6 cm. Engine proxies
-    # that pass this value clamp WPO per axis with it (static mesh / Nanite; our instanced proxy passes 0 = no
-    # clamp), so it must stay above the bound.
+    # Reserve extra displacement for the sign-based bevel correction on nonuniformly scaled tiles.
+    # Nanite clamps by this value; the tile producer's conservative cull sphere uses the same 32 cm.
     for k,v in dict(used_with_instanced_static_meshes=True,used_with_nanite=True,two_sided=False,tangent_space_normal=False,
-        blend_mode=unreal.BlendMode.BLEND_OPAQUE,shading_model=unreal.MaterialShadingModel.MSM_DEFAULT_LIT,
-        max_world_position_offset_displacement=8.0).items():mat.set_editor_property(k,v)
+        blend_mode=unreal.BlendMode.BLEND_MASKED,shading_model=unreal.MaterialShadingModel.MSM_DEFAULT_LIT,
+        max_world_position_offset_displacement=32.0).items():mat.set_editor_property(k,v)
     def node(cls,**props):
         n=MEL.create_material_expression(mat,getattr(unreal,cls),0,0)
         for k,v in props.items(): n.set_editor_property(k,v)
@@ -296,6 +339,10 @@ def build(name='M_TinyGladeRoof',save=True):
         'roof_tile_damage must be the linear greyscale import (run TinyGladeFixBc4Textures.py first)'
     wp=node('MaterialExpressionWorldPosition');nws=node('MaterialExpressionVertexNormalWS')
     uv=node('MaterialExpressionTextureCoordinate',coordinate_index=0);vc=node('MaterialExpressionVertexColor')
+    clip_kind=node('MaterialExpressionPerInstanceCustomData',data_index=0,const_default_value=0.0)
+    clip_d=node('MaterialExpressionPerInstanceCustomData',data_index=1,const_default_value=0.0)
+    clip_pair=node('MaterialExpressionAppendVector')
+    link(clip_kind,clip_pair,'A');link(clip_d,clip_pair,'B')
     # Per-instance seed, two-path contract of CSGpuInstancedMeshComponent.h: PerInstanceRandom + VertexColor.A.
     rnd=custom('return PerInstance + saturate(VColorA);',
         {'PerInstance':node('MaterialExpressionPerInstanceRandom'),'VColorA':(vc,'A')},'FLOAT1','TG roof tile seed')
@@ -313,14 +360,21 @@ def build(name='M_TinyGladeRoof',save=True):
     normal=custom(NORMAL_HLSL,{'WorldPos':wp,'NormalWS':nws,'Rnd':rnd,'TplXY':uv,'VColor':vc,
         'TileNormal':texture('TileNormal','roof_tile_normal','NORMAL'),
         'Strength':scalar('TileNormalStrength',1.0)},'FLOAT3','TG roof world normal')
-    up=node('MaterialExpressionConstant3Vector',constant=unreal.LinearColor(0.0,0.0,1.0,0.0))
-    tile_up=node('MaterialExpressionTransform',transform_source_type=unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL,
-        transform_type=unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
-    link(up,tile_up,'')
-    wpo=custom(wpo_hlsl(),{'WorldPos':wp,'Rnd':rnd,'TplXY':uv,'TileUp':tile_up},
-        'FLOAT3','TG roof lift / wobble (WPO)')
+    axes={}
+    for name,value in [('LocalX',(1,0,0)),('LocalY',(0,1,0)),('LocalZ',(0,0,1))]:
+        axis=node('MaterialExpressionConstant3Vector',constant=unreal.LinearColor(*value,0.0))
+        transformed=node('MaterialExpressionTransform',transform_source_type=unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL,
+            transform_type=unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+        link(axis,transformed,'')
+        axes[name]=transformed
+    wpo=custom(wpo_hlsl(),dict(WorldPos=wp,Rnd=rnd,TplXY=uv,VColor=vc,ClipKind=clip_kind,**axes),
+        'FLOAT3','TG roof sign-resize / lift / wobble (WPO)')
+    distance=custom(CLIP_DISTANCE_HLSL,{'WorldPos':wp,'Offset':wpo,'ClipData':clip_pair},'FLOAT1','TG roof signed clip distance at displaced vertex')
+    clip_interp=node('MaterialExpressionVertexInterpolator')
+    link(distance,clip_interp,'VS')
+    mask=custom('return Distance < 0.0 ? 1.0 : 0.0;',{'Distance':clip_interp},'FLOAT1','TG roof hip clipping')
     for n,prop in [(base,'BASE_COLOR'),(normal,'NORMAL'),(rough,'ROUGHNESS'),(scalar('RoofSpecular',.5),'SPECULAR'),
-                   (wpo,'WORLD_POSITION_OFFSET')]:
+                   (wpo,'WORLD_POSITION_OFFSET'),(mask,'OPACITY_MASK')]:
         assert MEL.connect_material_property(n,'',getattr(unreal.MaterialProperty,'MP_'+prop)),prop
     MEL.layout_material_expressions(mat);MEL.recompile_material(mat)
     if save:

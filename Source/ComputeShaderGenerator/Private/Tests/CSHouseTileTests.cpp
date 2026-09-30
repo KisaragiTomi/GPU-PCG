@@ -511,24 +511,128 @@ bool FCSHouseTileRidgeCapsTest::RunTest(const FString& Parameters)
 		CSHouseTile::MaxTilesBound(Roof, WithCaps), Capped.Num()),
 		CSHouseTile::MaxTilesBound(Roof, WithCaps) >= Capped.Num());
 
-	// Each cap cell has two sloped leaves. Their upper edges meet and the lifted
-	// downslope ends face away from the ridge; no upturned end can run along it.
-	TestEqual(TEXT("ridge cells have paired leaves"), CapCount % 2, 0);
-	for (int32 Index = Plain.Num(); Index + 1 < Capped.Num(); Index += 2)
+	// TG hip caps are one narrow slab along the bisector, not two wide leaves across it.
+	TArray<const CSHouseTile::FRecord*> Hips, Slabs;
+	for (int32 Index = Plain.Num(); Index < Capped.Num(); ++Index)
 	{
-		const auto& A = Capped[Index];
-		const auto& B = Capped[Index + 1];
-		const FVector3f CrestA = A.WorldPos + A.AxisX * (A.SizeX * 0.5f - 2.0f);
-		const FVector3f CrestB = B.WorldPos + B.AxisX * (B.SizeX * 0.5f - 2.0f);
-		TestTrue(TEXT("the two leaves share a sealed crest"), CrestA.Equals(CrestB, 0.02f));
-		TestTrue(TEXT("unlifted ends point uphill"), A.AxisX.Z > 0.0f && B.AxisX.Z > 0.0f);
-		TestTrue(TEXT("cap normals follow their adjacent roof faces"), FMath::IsNearlyEqual(A.AxisZ.Z, Roof.CosPitch(), 0.001f));
+		if (Capped[Index].AxisZ.Z > 0.999f) Slabs.Add(&Capped[Index]);
+		else Hips.Add(&Capped[Index]);
+	}
+	TestEqual(TEXT("four hips, each with five slabs for this 600x400 fixture"), Hips.Num(), 20);
+	for (const CSHouseTile::FRecord* H : Hips)
+	{
+		TestTrue(TEXT("hip slab width stays 25 cm independent of tile pitch"), FMath::IsNearlyEqual(H->SizeY, 25.0f, 0.01f));
+		TestTrue(TEXT("hip normal bisects the adjacent face normals"), H->AxisZ.Z > Roof.CosPitch() + 0.01f);
+		TestTrue(TEXT("hip slab length axis runs uphill along the hip"), FMath::Abs(H->AxisX.Z) > 0.1f);
+		TestEqual(TEXT("hip slabs have no tile-end lift or clipping"), H->ClipPlane.X, 0.0f);
+	}
+
+	// ⓔ 水平屋脊（TG `assemble_rectangular_roof`，2026-09-29）：600 × 400 的脊从 (−100, 0) 到 (100, 0)，
+	//    分点 round(200 / 62.5) = 3 个 ⇒ 两块平躺的板，长轴沿脊、骑在脊上，按段长 × 1.4 首尾相压盖满整条脊。
+	const float RidgeZ = CSHouseRoof_RidgeZ(Roof);
+	TestEqual(TEXT("the level ridge carries one flat slab per piece"), Slabs.Num(), 2);
+	float SlabMin = TNumericLimits<float>::Max(), SlabMax = TNumericLimits<float>::Lowest();
+	for (const CSHouseTile::FRecord* S : Slabs)
+	{
+		TestTrue(TEXT("a ridge slab lies along the ridge"), FMath::Abs(S->AxisX.X) > 0.999f);
+		TestTrue(TEXT("a ridge slab sits on the ridge line"), FMath::Abs(S->WorldPos.Y) < 0.01f && S->WorldPos.Z >= RidgeZ - 0.01f);
+		SlabMin = FMath::Min(SlabMin, S->WorldPos.X - S->SizeX * 0.5f);
+		SlabMax = FMath::Max(SlabMax, S->WorldPos.X + S->SizeX * 0.5f);
+	}
+	TestTrue(FString::Printf(TEXT("the slabs cover the whole ridge (%.1f .. %.1f)"), SlabMin, SlabMax), SlabMin <= -100.0f && SlabMax >= 100.0f);
+	if (Slabs.Num() == 2)
+	{
+		const CSHouseTile::FRecord* Lo = Slabs[0]->WorldPos.X < Slabs[1]->WorldPos.X ? Slabs[0] : Slabs[1];
+		const CSHouseTile::FRecord* Hi = Lo == Slabs[0] ? Slabs[1] : Slabs[0];
+		TestTrue(TEXT("neighbouring ridge slabs overlap"), Lo->WorldPos.X + Lo->SizeX * 0.5f > Hi->WorldPos.X - Hi->SizeX * 0.5f);
+	}
+
+	// 回归用户截图里的斜脊被盖住：真实资产厚 13 cm / 中心 Z=1.5，材质去掉烘焙翘端后
+	// 盖瓦只有 10 cm 基础板厚，坡面瓦另抬端 6 cm。检查最终顶面，不能只断言实例中心在脊线上。
+	for (const float Pitch : { 20.0f, 35.0f, 55.0f })
+	{
+		FCSRoofDesc ActualRoof = Roof;
+		ActualRoof.Pitch = Pitch;
+		CSHouseTile::FParams Actual;
+		Actual.RowPitch = Actual.ColumnPitch = 45.0f;
+		Actual.Axes.UpSlope = 1;
+		Actual.Axes.AlongRow = 0;
+		Actual.Axes.NativeSize = FVector3f(49.7064f, 64.0f, 13.0f);
+		Actual.Axes.NativeCentre = FVector3f(0.0f, 0.0f, 1.5f);
+		TArray<CSHouseTile::FRecord> ActualTiles;
+		CSHouseTile::BuildPlan(ActualRoof, FTransform::Identity, Actual, ActualTiles);
+		int32 Checked = 0, Buried = 0, Floating = 0;
+		const double BodyTop = Actual.StandOff + Actual.LiftJitter - 1.5 + 5.0 + 6.0;
+		double LowestRidgeTop = TNumericLimits<double>::Max();
+		double HighestHipTop = TNumericLimits<double>::Lowest();
+		for (const CSHouseTile::FRecord& R : ActualTiles)
+		{
+			if (R.ClipPlane.X > 0.0f) continue;
+			const FVector HalfSlab = FVector(R.AxisZ) * (5.0 * R.SizeZ / 13.0);
+			const FVector Top = FVector(R.WorldPos) + HalfSlab;
+			if (R.AxisZ.Z > 0.999f)
+			{
+				LowestRidgeTop = FMath::Min(LowestRidgeTop, Top.Z);
+				continue;
+			}
+			++Checked;
+			HighestHipTop = FMath::Max(HighestHipTop, Top.Z + FMath::Abs(double(R.AxisY.Z)) * R.SizeY * 0.5);
+			const FVector Bottom = FVector(R.WorldPos) - HalfSlab;
+			const double TopAboveRoof = (Top.Z - CSHouseRoof_EvalZ(ActualRoof, FVector2D(Top.X, Top.Y))) * ActualRoof.CosPitch();
+			const double BottomAboveRoof = (Bottom.Z - CSHouseRoof_EvalZ(ActualRoof, FVector2D(Bottom.X, Bottom.Y))) * ActualRoof.CosPitch();
+			if (TopAboveRoof <= BodyTop) ++Buried;
+			if (BottomAboveRoof >= BodyTop) ++Floating;
+		}
+		TestTrue(TEXT("clearance check includes all four hips"), Checked >= 4);
+		TestEqual(FString::Printf(TEXT("%.0f degree hip tops clear the raised body tiles"), Pitch), Buried, 0);
+		TestEqual(FString::Printf(TEXT("%.0f degree hip bases still overlap the tile layer"), Pitch), Floating, 0);
+		TestTrue(FString::Printf(TEXT("%.0f degree horizontal ridge covers the hip endpoints"), Pitch), LowestRidgeTop > HighestHipTop);
 	}
 
 	return true;
 }
 
 // -----------------------------------------------------------------------------
+// 裁剪面随位置/yaw变换；保留本坡，切掉穿过角脊的部分。无需扩大盖瓦去遮交叉瓦端。
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCSHouseTileClipPlanesTest,
+	"PCGPlugins.ComputeShaderGenerator.House.TileClipPlanes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSHouseTileClipPlanesTest::RunTest(const FString& Parameters)
+{
+	const FCSRoofDesc Roof = CSHouseTileTest_MakeRoof(600.0, 400.0);
+	const CSHouseTile::FParams Params = CSHouseTileTest_MakeParams();
+	const FTransform Moved(FRotator(0.0, 73.0, 0.0), FVector(12345.0, -6789.0, 91.0));
+	TArray<CSHouseTile::FRecord> Local, World;
+	CSHouseTile::BuildPlan(Roof, FTransform::Identity, Params, Local);
+	CSHouseTile::BuildPlan(Roof, Moved, Params, World);
+	TestEqual(TEXT("moving a roof preserves tile count"), Local.Num(), World.Num());
+	int32 Invalid = 0, LostCentre = 0, WrongTransform = 0, NoCut = 0;
+	for (int32 I = 0; I < Local.Num(); ++I)
+	{
+		const auto Eval = [](const CSHouseTile::FRecord& R, const FVector& P)
+		{
+			const double Angle = double(R.ClipPlane.X) - 4.0;
+			return FMath::Cos(Angle) * P.X + FMath::Sin(Angle) * P.Y + double(R.ClipPlane.Y);
+		};
+		const auto& L = Local[I];
+		const auto& W = World[I];
+		if (L.ClipPlane.X <= 0.0f || W.ClipPlane.X <= 0.0f) ++Invalid;
+		const double Distance = Eval(L, FVector(L.WorldPos));
+		if (Distance > 0.01) ++LostCentre;
+		if (!FMath::IsNearlyEqual(Distance, Eval(W, FVector(W.WorldPos)), 0.02)) ++WrongTransform;
+		const double Angle = double(L.ClipPlane.X) - 4.0;
+		const FVector Across = FVector(L.WorldPos) + FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.0) * (2.0 - Distance);
+		if (Eval(L, Across) < 1.99 || Eval(W, Moved.TransformPosition(Across)) < 1.97) ++NoCut;
+	}
+	TestEqual(TEXT("all slope tiles carry a clip plane"), Invalid, 0);
+	TestEqual(TEXT("clipping retains the tile centre"), LostCentre, 0);
+	TestEqual(TEXT("clip distance is invariant under house yaw and translation"), WrongTransform, 0);
+	TestEqual(TEXT("the opposite side of each hip is discarded"), NoCut, 0);
+	return true;
+}
+
 // ⑨ 折线屋面（footprint 3e）：六边形 / 不规则五边形上，瓦照样贴面、铺满每个坡面、装得进上界
 // -----------------------------------------------------------------------------
 

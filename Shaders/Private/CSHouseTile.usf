@@ -11,11 +11,12 @@
 // 哈希算出来）。取 `InterlockedAdd` 的槽位当随机源的后果是"改一下坡度整片屋顶变色"，
 // 而且**不会有任何断言报红** —— S1 已经栽过一次。
 //
-// 记录 = 4 个 float4（`CSHouseTile::FRecord`，CPU 侧同一份定义）：
+// 记录 = 5 个 float4（`CSHouseTile_Flatten`）：
 //   [0] 世界位置 xyz | 逐实例随机 [0,1)
 //   [1] 世界方向 xyz（单位）→ 瓦网格**局部 +X** | 该轴上的世界尺寸 cm
 //   [2] 同上 → 局部 +Y | 尺寸 cm
 //   [3] 同上 → 局部 +Z | 尺寸 cm
+//   [4] 裁剪平面编码角 / 世界平面常数 / 0 / 0，见 FRecord::ClipPlane。
 //
 // 尺寸走"世界 cm"而不是倍率：`FPaletteBuffers::BlockSize` 填 **1/网格自身尺寸**（与藤蔓那条
 // 同一个手法），于是记录里写多少 cm 画出来就是多少 cm —— 逐排改尺寸不必回头动 BlockSize。
@@ -31,10 +32,11 @@
 #define THREADGROUPSIZE_X 64
 #endif
 
-StructuredBuffer<float4> TileRecords;    // 4 个 float4 / 实例
+StructuredBuffer<float4> TileRecords;    // 5 个 float4 / 实例
 
 RWBuffer<float4> RWTileInstances;        // 5 个 float4 / 实例
 RWBuffer<uint>   RWTileCounter;          // [0] = 活跃实例数
+RWBuffer<float>  RWTileCustomData;       // 平面角 + 4 / 平面常数，共用 2-float 实例通道
 
 float4x4 TileWorldToComponent;
 float3   TileBaseSphereCentre;           // 基础网格局部包围球心（未缩放）
@@ -44,10 +46,10 @@ uint     TileRecordCount;
 uint     TileMaxInstances;
 
 // `M_TinyGladeRoof` 的 WPO 在剔除之后才推顶点（`Scripts/TinyGladeMakeRoofMaterial.py` 文件头）：
-// 沿瓦法线的瓦端补抬 ≤ 3 cm + 水平抖动每轴 ±3 cm ⇒ |位移| ≤ 3 + |(3, 3)| = 7.3 cm（屋面起伏与檐口起翘
-// 按用户 09-15 裁决不移植）。剔除 pass 看不见 WPO，球不放大的话抬起的瓦端在视锥边缘会整块闪掉。
+// 除瓦端抬升与水平抖动外，还按模板符号补偿半瓦 / 窄脊的倒角宽度，预留 32 cm 与材质一致。
+// 屋面起伏与檐口起翘按用户 09-15 裁决不移植。剔除 pass 看不见 WPO，球不放大会让视锥边缘瓦片闪掉。
 // 常量而不是参数：改它不动 FParameters，旧 DLL 也照常绑定。
-static const float TileWpoReach = 8.0f;
+static const float TileWpoReach = 32.0f;
 
 [numthreads(THREADGROUPSIZE_X, 1, 1)]
 void PackHouseTileCS(uint3 DispatchThreadId : SV_DispatchThreadID)
@@ -59,11 +61,14 @@ void PackHouseTileCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	// 组件永远不会替我们清 counter，所以这一句是必需的而不是优化。
 	if (Index == 0u) RWTileCounter[0] = min(TileRecordCount, TileMaxInstances);
 
-	const uint Rec = Index * 4u;
+	const uint Rec = Index * 5u;
 	const float4 R0 = TileRecords[Rec + 0u];
 	const float4 R1 = TileRecords[Rec + 1u];
 	const float4 R2 = TileRecords[Rec + 2u];
 	const float4 R3 = TileRecords[Rec + 3u];
+	const float4 R4 = TileRecords[Rec + 4u];
+	RWTileCustomData[Index * CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS] = R4.x;
+	RWTileCustomData[Index * CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS + 1u] = R4.y;
 
 	const float3 WorldPos = R0.xyz;
 	const float Random01 = R0.w;

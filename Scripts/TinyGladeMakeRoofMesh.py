@@ -3,8 +3,17 @@
 Input topology is copied verbatim from roof_tile.json (20 vertices, 30 triangles; the
 36-triangle file is roof_tile_backface, roof_tile_lod1 is a plain cube). TG has exactly one
 visible tile shape: chips and wear are shading (roof_tile_damage / roof_tile_normal atlas),
-not geometry variants. The native VS uses sign-based resizing, not uniform box scaling.
-Nominal row dimensions and the 3 cm lap lift below adapt that deformation to our 16.9 cm rows.
+not geometry variants. The native VS uses sign-based resizing, not uniform box scaling:
+the bevel and the wide-end flare are sized by the tile's *thickness*, not by its width.
+
+SCALE_T_CM is TG's own per-tile scale_t (2026-09-29, tiny-glade.exe + PDB,
+system_roof::utils::assemble_rectangular_roof, evidence in Docs/TinyGlade/Roof_TerraceAndRidge.md):
+  width  = row length / max(ceil(2 * row length m), 3)      -> <= 50 cm, typically ~45
+  length = (0.8 + 0.4 * rand) * row spacing / 0.7           -> row spacing ~45 cm, so ~64 cm
+  depth  = 0.1 m, a literal constant
+Baking at that nominal size keeps the instance scale near 1, so the 2.2 cm bevel and the 3.2 cm
+per-side flare that open TG's wedge gaps survive. (Until 2026-09-29 this baked 28 x 27 x 3 cm to fit
+16.9 cm rows: a third of TG's depth, bevel 0.66 cm, flare 1 cm - a thin flat plate.)
 No source asset, LOD proxy or backface mesh is overwritten.
 
 What M_TinyGladeRoof reads from this mesh (TG `_nani_instanced_roof` VS varyings):
@@ -30,6 +39,9 @@ MESH = '/PCGPlugins/HouseTest/SM_TinyGladeRoofTile'
 # Down-slope tile-end lift baked into the vertices (TG: 6 cm, 2 cm on 10% of tiles, applied in its VS).
 # M_TinyGladeRoof's WPO adds the per-tile remainder on top of this, so it reads the constant from here.
 BAKED_LIFT_CM = 3.0
+# TG scale_t (width across the row, length down the slope, depth) in cm at its nominal row: see the module doc.
+# Resulting bounds: 49.7 x 64 x 13 cm (10 cm slab + the baked lift) = ACSHouseActor's RoofTileThickness 13.
+SCALE_T_CM = (45.0, 64.0, 10.0)
 
 
 def build(material):
@@ -38,8 +50,9 @@ def build(material):
     original = data['Vertex_Position']['buffer']
     indices = data['indices']['buffer']
     assert len(original) == 20 and len(indices) == 90, (len(original), len(indices))
-    # Native VS: max(min(max(scale), min(scale * normalization)), epsilon).
-    half = (14.0, 13.52, 1.5)
+    # Native VS (_nani_instanced_roof vs_main.glsl:149-172): half = scale_t * (0.50597, 0.5, 0.5) with x * 0.95,
+    # common = max(min(max(half), min(half * normalization)), epsilon).
+    half = (SCALE_T_CM[0] * 0.50597 * 0.95, SCALE_T_CM[1] * 0.5, SCALE_T_CM[2] * 0.5)
     common = max(min(max(half), min(a*b for a,b in zip(half,(3.5892038,3.7037039,3.7037039)))), 1e-5)
     positions = []
     for v in original:

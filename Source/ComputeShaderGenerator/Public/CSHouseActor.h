@@ -130,7 +130,7 @@ enum class ECSHousePart : uint8
  *
  * ⚠️ **这是一份显式列表，不是"按剩余墙面自动填窗"的规则。** Tiny Glade 的窗 100% 是玩家
  * 手放的（`ui_place_decorator` → 光标射线 → `DecoratorDst{Wall|Roof|…}`），全仓找不到任何
- * 读墙长去分配窗位的系统（`Docs/TinyGlade/TinyGlade_模块对照与进度.md（卷二）` 第二节）。本项目还没有放置 UI，
+ * 读墙长去分配窗位的系统（`Docs/TinyGlade/Progress_ModuleComparison.md（卷二）` 第二节）。本项目还没有放置 UI，
  * 而「门洞触发规则」是唯一没拍板的一条 —— 所以窗的来源就停在这份列表上：属性面板、
  * Blueprint、测试脚本都往这里填，将来的 `ACSWindowMarker` 也只是多一个填表的人。
  * **不要在这里发明触发规则。**
@@ -197,7 +197,7 @@ struct COMPUTESHADERGENERATOR_API FCSHouseWindow
 // `ECSVineSeason`（叶子的季节）2026-09-22 挪到了 `CSWallBase.h`：墙的基类要用，房子与样条墙同一个枚举。
 
 /**
- * Tiny Glade 式房屋（TinyGladeHouse_Plan.md D4/D6/D9 的"房子×地面交互"纵切片）。
+ * Tiny Glade 式房屋（Plan_House.md D4/D6/D9 的"房子×地面交互"纵切片）。
  *
  * 声明式重求值：任何唤醒（移动 / 改参 / 地面 OnGroundChanged 直推）都走同一条
  * ReevaluateSite() —— ① 落座：房底 Z = max(footprint 全域地面高度) + HeightOffset，
@@ -352,10 +352,14 @@ public:
 	 * ⚠️ **不给的话瓦是一米厚的方块。** TG 的 `roof_tile` 原件实测 **1.188 × 1.0 × 1.0 m** ——
 	 * 它是个**单位块**，真实厚度由 TG 的逐实例缩放压出来（`_nani_instanced_roof` 的 VS 里那个
 	 * `scale_t`）。我们这边平面内两轴按排距缩了、法线轴却一直取原生 100 cm，屋顶因此看着像
-	 * 堆了一层砖。默认 6 cm ≈ 真实瓦片的厚度量级。
+	 * 堆了一层砖。
+	 *
+	 * 默认 13 = `SM_TinyGladeRoofTile` 包围盒的法线向尺寸（TG 板厚 0.1 m + 烘焙进去的 3 cm 瓦端抬升），
+	 * 即按 1:1 画。0.1 m 是 `assemble_rectangular_roof` 写进 `scale_t.z` 的字面常数（2026-09-29 逆向，
+	 * `Roof_TerraceAndRidge.md`「屋面瓦资产」）；此前的 6 cm 配的是 3 cm 板厚的旧烘焙，只有 TG 的三成。
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile", meta = (ClampMin = "0.0", ClampMax = "100.0"))
-	float RoofTileThickness = 6.0f;
+	float RoofTileThickness = 13.0f;
 
 	/**
 	 * 每片瓦画多大的**总系数**，只乘在平面内两轴上。
@@ -369,9 +373,11 @@ public:
 	/**
 	 * 角斜脊 / 屋脊上盖瓦的尺寸系数。≤ 0 = 不铺脊瓦。
 	 *
-	 * 交汇处两坡的瓦是**对切**的，接缝一眼看得见；两侧盖瓦在共同脊线上相接，法线分别贴合两侧坡面。
-	 * 使用 SM_TinyGladeRoofTile 成对贴两侧坡面，未翘起的上端在脊顶搭接；翘端朝坡下。
-	 * 公共脊线抬一个瓦片包围盒厚度，避免坡面瓦穿出。该收口排布是参考图的 UE 适配。
+	 * 交汇处两坡的瓦是**对切**的，接缝一眼看得见。
+	 * · **角斜脊**：TG 的单排窄板，宽 25 cm、厚度为坡面板厚的 1.8 倍；坡面瓦通过逐实例裁剪面切齐。
+	 *   本系数只缩放水平脊宽度，≤ 0 时禁用全部脊瓦。
+	 * · **水平屋脊**（2026-09-29 起照 TG）：约 62.5 cm 一段、每段一块平躺厚板，宽 40 cm × 本系数（默认 46 cm，
+	 *   在 TG 的 0.4–0.55 m 之间）、长 = 段长 × 1.4、厚 = 坡面瓦的 1.5 倍。
 	 * roof_tile_lod1 / backface 是原版的简化/背面通道，不能当作随机瓦型或专用脊瓦。
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile", meta = (ClampMin = "0.0", ClampMax = "3.0"))
@@ -499,35 +505,58 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Door Leaf", meta = (ClampMin = "-100.0", ClampMax = "100.0"))
 	float DoorLeafInset = 0.0f;
 
-	/** 沿坡向排距 cm。**0 = 由网格自身尺寸与 RowOverlap 反解**（瓦按原尺寸画，排距把它压出重叠）。 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile", meta = (ClampMin = "0.0"))
-	float RoofTileRowPitch = 16.9f;
+	// ⚠️ 下面这组排布默认值是 TG 的真值（2026-09-29 用户贴 TG 实拍「这是正确的屋顶」后逆向
+	// `system_roof::utils::assemble_rectangular_roof`，证据在 `Roof_TerraceAndRidge.md`「屋面瓦资产」）。
+	// 此前的 16.9 / 27.75 / 1.6 / 1.06 是 08-31 配旧网格（118.8 × 100 × 100 的单位块）试出来的密度，
+	// 排数约为 TG 的 2.6 倍。
 
-	/** 排内列距 cm。0 = 同上由网格尺寸反解。 */
+	/**
+	 * 沿坡向排距 cm。**0 = 由网格自身尺寸与 RowOverlap 反解**（瓦按原尺寸画，排距把它压出重叠）。
+	 * TG：排数 = ceil(坡长 / 0.4375 m) − 1，即实际排距 ≈ 44–47 cm；这里按四舍五入等分，45 给出同样的排数。
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile", meta = (ClampMin = "0.0"))
-	float RoofTileColumnPitch = 27.75f;
+	float RoofTileRowPitch = 45.0f;
 
-	/** 瓦画多大 = 实际排距 × 这个系数。> 1 = 上下两排**故意互相压住**（正缝会露出天空）。 */
+	/** 排内列距 cm。0 = 同上由网格尺寸反解。TG：每排 max(ceil(2 × 排长 m), 3) 片**等宽**瓦，即 ≤ 50 cm、平均约 45。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile", meta = (ClampMin = "0.0"))
+	float RoofTileColumnPitch = 45.0f;
+
+	/**
+	 * 瓦画多大 = 实际排距 × 这个系数。> 1 = 上下两排**故意互相压住**（正缝会露出天空）。
+	 * TG：瓦长 = 排距 / 0.7 ⇒ 1.43（再乘 `RoofTileLengthJitter` 的逐片随机）。
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile", meta = (ClampMin = "1.0", ClampMax = "4.0"))
-	float RoofTileRowOverlap = 1.6f;
+	float RoofTileRowOverlap = 1.43f;
 
-	/** 同上，排内左右方向。左右压叠远比上下浅。 */
+	/**
+	 * 同上，排内左右方向。左右压叠远比上下浅。
+	 * TG 的瓦宽 = 列距，VS 再按板厚把宽端外扩 3.2 cm/侧、窄端内收（楔形缝就是它）；包围盒宽 / 列距在 45 cm
+	 * 时 = 49.7 / 45 ⇒ 1.10，此时 `SM_TinyGladeRoofTile` 恰好按 1:1 画。
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile", meta = (ClampMin = "1.0", ClampMax = "2.0"))
-	float RoofTileColumnOverlap = 1.06f;
+	float RoofTileColumnOverlap = 1.10f;
 
 	/** 沿屋面法线抬起 cm。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile", meta = (ClampMin = "0.0"))
 	float RoofTileStandOff = 0.5f;
 
+	/** 逐片等比缩放抖动（比例，平面内两轴一起）。TG 没有这一项（同排瓦等宽），默认 0；长度随机见下一项。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile", meta = (ClampMin = "0.0", ClampMax = "0.5"))
-	float RoofTileScaleJitter = 0.05f;
+	float RoofTileScaleJitter = 0.0f;
+
+	/**
+	 * 逐片**瓦长**抖动（比例，只乘沿坡那一轴）。TG：瓦长 × (0.8 + 0.4 · rand) ⇒ 0.2。
+	 * 瓦以排线为中心，长短不一 ⇒ 同一排的下沿参差不齐 —— 实拍里那种不规整感主要来自它，不是瓦形。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile", meta = (ClampMin = "0.0", ClampMax = "0.5"))
+	float RoofTileLengthJitter = 0.2f;
 
 	/**
 	 * 绕屋面法线的朝向抖动（弧度）。
 	 *
 	 * ⚠️ **默认 0（2026-08-31 用户裁决「每一个元素都有点歪，修复它」）。** 原默认 0.04 rad ≈ 2.3°，
-	 * 在密铺（RowPitch 16.9 / ColumnPitch 27.75）下每片瓦都看得出转了一点，整片屋面读成"歪的"
-	 * 而不是"自然的"。想要一点随机感优先用 `RoofTileScaleJitter` / `LiftJitter`，它们不破坏排列。
+	 * 在当时的密铺（RowPitch 16.9 / ColumnPitch 27.75）下每片瓦都看得出转了一点，整片屋面读成"歪的"
+	 * 而不是"自然的"。TG 也不转（`rotation_quat` 只有坡度与排向）。想要一点随机感用 `RoofTileLengthJitter`。
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile", meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float RoofTileYawJitter = 0.0f;
@@ -540,7 +569,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile")
 	int32 RoofTileSeed = 1;
 
-	/** 自动判定把上坡向与沿排向弄反了就勾上（判定结果每次重建都打在日志里）。 */
+	/**
+	 * 自动判定把上坡向与沿排向弄反了就勾上（判定结果每次重建都打在日志里）。
+	 * 判定把长的那轴给上坡向：09-29 起的 `SM_TinyGladeRoofTile` 长 64 > 宽 49.7，**不勾**才对；
+	 * 旧烘焙宽 > 长，所以 `BP_TinyGladeHouse` 以前勾着它（09-29 已随新网格一起关掉）。
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof Tile")
 	bool bRoofTileSwapAxes = false;
 
@@ -1184,7 +1217,7 @@ public:
 	 * 而倾角是相对竖直的**绝对**偏角 ⇒ 取反一次相邻段就折过 `2·|倾角|`，
 	 * `VineMaxLean` 默认 1.15 时上界是 131.8°，症状是**藤在门洞边缘和墙角上"折断"式急拐**。
 	 * 反编译实证：TG 的 `ivy_grower` 里一次镜像/归零都没有，方向是位置的连续函数
-	 * （见 `Docs/TinyGlade/VineObstacleTurning_20260912.md`）。
+	 * （见 `Docs/TinyGlade/Vine_ObstacleTurning.md`）。
 	 *
 	 * ⚠️ **不要调到比 `VineWander` 小**：游走本身就是每段 ±`VineWander` 的转向，
 	 * 预算更小会连**无障碍处**的形状一起改掉。取 0 = 藤笔直不转、撞上就收尾。

@@ -97,8 +97,8 @@ struct FParams
 	/**
 	 * 角斜脊 / 屋脊上盖瓦的尺寸系数。≤ 0 = 不铺脊瓦。
 	 *
-	 * 使用 SM_TinyGladeRoofTile 成对贴两侧坡面，未翘起的上端在脊顶搭接；翘端朝坡下。
-	 * 公共脊线抬一个瓦片包围盒厚度，避免坡面瓦穿出。该收口排布是参考图的 UE 适配。
+	 * 角斜脊：TG 的单排窄板，宽 25 cm、板厚 18 cm，长轴沿脊；坡面瓦按两坡等距平面裁剪。
+	 * 水平屋脊（2026-09-29 起照 TG）：分段平躺厚板，宽 = 40 cm × 本系数，见 `CSHouseTile.cpp` 的 `CSHouseTile_Ridge*`。
 	 * roof_tile_lod1 / backface 是原版的简化/背面通道，不能当作随机瓦型或专用脊瓦。
 	 */
 	float RidgeCapScale = 1.15f;
@@ -106,6 +106,11 @@ struct FParams
 	float StandOff = 0.5f;
 	/** 逐瓦的尺寸抖动（比例）。 */
 	float ScaleJitter = 0.05f;
+	/**
+	 * 逐瓦的**瓦长**抖动（比例，只乘上坡那一轴）。TG `assemble_rectangular_roof`：瓦长 = 排距 / 0.7 × (0.8 + 0.4 · rand)，
+	 * 即 0.2；瓦以排线为中心，所以同一排的下沿参差。
+	 */
+	float LengthJitter = 0.0f;
 	/** 绕屋面法线的朝向抖动（弧度）。 */
 	float YawJitter = 0.04f;
 	/** 沿屋面法线的高度抖动 cm（TG 的瓦是一片起伏的鳞，不是一张平面）。 */
@@ -128,6 +133,9 @@ struct FRecord
 	float SizeY = 1.0f;
 	FVector3f AxisZ = FVector3f(0.0f, 0.0f, 1.0f);
 	float SizeZ = 1.0f;
+	/** 材质 custom data[0..1]：裁剪平面水平法线角 + 4、世界空间平面常数，保留 n.xy·P.xy + d <= 0。
+	 * 角编码 > 0 为坡面瓦；0 为不裁剪/不抬端的脊板；-1 为只抬端的水平脊首尾板（TG is_main_roof_body）。 */
+	FVector2f ClipPlane = FVector2f::ZeroVector;
 };
 
 /**

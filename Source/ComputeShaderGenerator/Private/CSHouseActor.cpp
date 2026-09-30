@@ -3208,6 +3208,7 @@ CSHouseTile::FParams ACSHouseActor::MakeRoofTileParams() const
 	Params.RidgeCapScale = RoofRidgeCapScale;
 	Params.StandOff = RoofTileStandOff;
 	Params.ScaleJitter = RoofTileScaleJitter;
+	Params.LengthJitter = RoofTileLengthJitter;
 	Params.YawJitter = RoofTileYawJitter;
 	Params.LiftJitter = RoofTileLiftJitter;
 	Params.Seed = RoofTileSeed;
@@ -3305,7 +3306,8 @@ CSShaperSteps::EHandoverResult ACSHouseActor::EnsureRoofTileComponent()
 	const double TileReach = 2.0 * double(FMath::Max(
 		FMath::Max(RoofTileRowPitch, RoofTileColumnPitch),
 		FMath::Max(RoofTileAxes.NativeAlongSlope(), RoofTileAxes.NativeAcrossRow())))
-		* double(FMath::Max(RoofTileRowOverlap, RoofTileColumnOverlap)) * (1.0 + double(RoofTileScaleJitter));
+		* double(FMath::Max(RoofTileRowOverlap, RoofTileColumnOverlap))
+		* (1.0 + double(RoofTileScaleJitter)) * (1.0 + double(RoofTileLengthJitter));
 	// `M_TinyGladeRoof` 的 WPO（瓦端补抬 ≤ 3 cm + 水平抖动每轴 ±3 cm）远小于 TileReach，不另加余量。
 	const double Reach = CSShaperSteps::QuantizeUp(
 		GetFootprint().GetCenteredSpan() * 0.5 + double(RoofOverhang) + TileReach);
@@ -3315,7 +3317,7 @@ CSShaperSteps::EHandoverResult ACSHouseActor::EnsureRoofTileComponent()
 	LocalBounds = CSHouse_BuildBoundsToComponent(GetBuildTransform(), RoofTileComponent, LocalBounds);
 	LocalBounds = CSShaperSteps::MergeHandoverBounds(LocalBounds, RoofTileHandover, bForceFullRebuild);
 	return CSShaperSteps::HandOverInstanceSource(
-		CSShaperSteps::MakeHandoverSource(RoofTileComponent, RoofTileGpuBuffers[0], /*bWithCustomData*/ false),
+		CSShaperSteps::MakeHandoverSource(RoofTileComponent, RoofTileGpuBuffers[0], /*bWithCustomData*/ true),
 		LocalBounds, RoofTileHandover);
 }
 
@@ -3402,7 +3404,7 @@ void ACSHouseActor::RebuildRoofTiles()
 		CSHouse_Q(RoofTileRowOverlap, 0.01), CSHouse_Q(RoofTileColumnOverlap, 0.01),
 		CSHouse_Q(RoofTileThickness, 0.1), CSHouse_Q(RoofTileSizeScale, 0.01),
 		CSHouse_Q(RoofRidgeCapScale, 0.01),
-		CSHouse_Q(RoofTileStandOff, 0.1), CSHouse_Q(RoofTileScaleJitter, 0.01),
+		CSHouse_Q(RoofTileStandOff, 0.1), CSHouse_Q(RoofTileScaleJitter, 0.01), CSHouse_Q(RoofTileLengthJitter, 0.01),
 		CSHouse_Q(RoofTileYawJitter, 0.01), CSHouse_Q(RoofTileLiftJitter, 0.1), RoofTileSeed,
 		// 网格换了（尺寸/轴向跟着变）也要重排 —— 只认指针的话换成同尺寸的另一张瓦不会重排。
 		RoofTileAxes.UpSlope, RoofTileAxes.AlongRow, RoofTileAxes.Normal,
