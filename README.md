@@ -1,8 +1,43 @@
-# PCGPlugins
+# GPU-PCG
+
+GPU procedural content generation (PCG) tools for Unreal Engine 5.7: procedural meshes, terrain, vine growth, shallow water simulation, Nanite HLOD, and Tiny Glade-inspired building tools.
+
+> **Requirements:** Unreal Engine 5.7 built from source · Win64. Research / production prototype.
 
 面向 **Unreal Engine 5.7** 的程序化内容生成（PCG）工具集。插件以 **GPU Compute Shader** 与 **Geometry Script** 为核心，提供 GPU 常驻网格对象层（CSMesh）、GPU 浅水模拟、藤蔓/空间竞争生长（Space Colonization）、Tiny Glade 式交互房屋与地面、体素网格生成、Landscape 与 Foliage 编辑等一系列关卡制作与地形装饰工具。
 
 > **状态**：研究 / 生产原型阶段。当前经过验证、可直接打开运行的测试内容见下方 [可运行的测试场景](#可运行的测试场景)；其余 `Content/` 目录为开发过程资产，未必可靠。
+
+---
+
+[安装 / Quick start](#安装) · [环境要求 / Requirements](#环境要求) · [演示场景 / Demo scenes](#可运行的测试场景) · [核心功能 / Features](#核心功能)
+
+## 功能预览
+
+| Tiny Glade 式样条墙 / Procedural spline wall | GPU 浅水模拟 / Shallow water simulation |
+| --- | --- |
+| ![Procedural spline wall with vine growth in Unreal Engine](Docs/Result/TinyGladeSplineWall_Curve.jpg) | ![GPU shallow water simulation in Unreal Engine](Docs/Result/ShallowWater0.png) |
+
+更多演示包括交互房屋与地面、藤蔓生长和 Nanite HLOD，见 [可运行的测试场景](#可运行的测试场景)。
+
+---
+
+## 安装
+
+1. 在工程根目录（`.uproject` 所在目录）执行以下命令，将仓库克隆到 `Plugins/PCGPlugins`：
+
+   ```shell
+   git clone https://github.com/KisaragiTomi/GPU-PCG.git Plugins/PCGPlugins
+   ```
+
+2. 右键 `.uproject` → **Generate Visual Studio project files**。
+3. 用源码编译的 UE 5.7 打开工程，让编辑器编译插件模块（首次会编译 Shader）。
+4. 在 **Edit → Plugins** 中确认 `PCGPlugins` 已启用（默认 `EnabledByDefault`）。
+5. 在 Content Browser 中开启 **Show Plugin Content**，打开 `PCGPlugins/HouseTest/L_HouseGroundDemo` 查看房屋演示；浅水与藤蔓场景的启动方法见 [可运行的测试场景](#可运行的测试场景)。
+
+> 仓库名为 `GPU-PCG`，UE 插件名仍为 `PCGPlugins`。下载 ZIP 时，也请将解压后的插件目录命名为 `PCGPlugins`。
+
+> Shader 源码位于 [`Shaders/Private`](Shaders/Private)，由 `ComputeShaderGenerator` 启动时经 `AddShaderSourceDirectoryMapping` 映射为 `/Plugin/PCGPlugins/Shaders/Private`；全局 shader 要在引擎编译 shader 之前注册，这也是该模块用 `PostConfigInit` 加载的原因。`.uplugin` 里的 `ShaderArchive` 字段 5.7.4 引擎源码并不读取，不起注册作用。
 
 ---
 
@@ -17,20 +52,6 @@
 | 第三方库 | OpenVDB、IntelTBB、Blosc、zlib（引擎 ThirdParty）；UVAtlas、DirectXMesh（`ProxyLODPlugin` 自带，插件代码不直接调用）；DX12 / `D3D12RHI`（Win64，显存预算查 DXGI 实时预算）。均随引擎提供，无需额外安装 |
 
 之所以需要**源码编译的引擎**：多个模块直接链接引擎渲染层（`Renderer`/`RenderCore`/`RHI`）与 OpenVDB 等 ThirdParty，并使用自定义全局 Shader，Launcher 版引擎无法编译。
-
----
-
-## 安装
-
-1. 将本仓库放入工程的 `Plugins` 目录：
-   ```text
-   <YourProject>/Plugins/PCGPlugins/
-   ```
-2. 右键 `.uproject` → **Generate Visual Studio project files**。
-3. 用源码编译的 UE 5.7 打开工程，让编辑器编译插件模块（首次会编译 Shader）。
-4. 在 **Edit → Plugins** 中确认 `PCGPlugins` 已启用（默认 `EnabledByDefault`）。
-
-> Shader 源码位于 [`Shaders/Private`](Shaders/Private)，由 `ComputeShaderGenerator` 启动时经 `AddShaderSourceDirectoryMapping` 映射为 `/Plugin/PCGPlugins/Shaders/Private`；全局 shader 要在引擎编译 shader 之前注册，这也是该模块用 `PostConfigInit` 加载的原因。`.uplugin` 里的 `ShaderArchive` 字段 5.7.4 引擎源码并不读取，不起注册作用。
 
 ---
 
