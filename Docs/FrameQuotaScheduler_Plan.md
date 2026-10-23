@@ -126,7 +126,7 @@ struct ICSFrameTask
 
 - 任务键带 `After` 列表。地面链写成：涂抹上传之后是石阶和地被；位移之后是岩壳与其余三条。
 - 房子的 11 步内部顺序保留为一个任务的子步骤，因为其中只有 GPU 提交是贵的。
-- `ChangedBounds` 继续携带。`CSSceneDirty3D` 按裁定仍是零代码（`Docs/TinyGlade/TinyGladeHouse_Plan.md` §D3），区域过滤的接缝留着。
+- `ChangedBounds` 继续携带。`CSSceneDirty3D` 按裁定仍是零代码（`Docs/TinyGlade/Plan_House.md` §D3），区域过滤的接缝留着。
 
 ### D6 优先级三档加收尾语义
 
@@ -165,7 +165,7 @@ Session.End();                                            // access state 恢复
 ## 落地顺序
 
 1. 调度器 + 合并 + 优先级 + 游戏线程配额，先接地面家族。用来验证依赖边替代 FIFO，同时删掉收笔阻塞。
-2. 房屋改成只标脏，子系统每帧限量执行（`TinyGlade_结构审查.md` §9 的同一建议）。删掉两处同步兜底。
+2. 房屋改成只标脏，子系统每帧限量执行（`Review_Structure.md` §9 的同一建议）。删掉两处同步兜底。
 3. 编辑会话 + 统一回读泵。藤蔓按迭代步进，体素化按批。
 4. GPU 时间反馈：每个会话步骤打时间戳查询，接 AIMD 调节器。
 5. 收尾债务：布尔的 TDR 切分；`ComputeShaderLandscape.cpp:347` `:453` `:951` 与 `ComputeShaderLandscapeRoad.cpp:360` 没走计数通道的裸 flush。

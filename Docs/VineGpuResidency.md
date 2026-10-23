@@ -6,6 +6,83 @@
 
 ## 现状
 
+### 独立全局距离场吸附入口（2026-10-09）
+
+新增 Blueprint callable `AVineContainer::GenerateVineGPUWithGlobalDistanceField()`。原 `GenerateVineGPU()`
+仍按原有参数选择三角形 / 体素模式，默认行为不变；新入口仍遵守 `VV.bSurfaceAdsorption` 总开关。
+独立的 `FindNearestVineGlobalDistanceField()` 位于 `Shaders/Private/VineGlobalDistanceFieldProjection.ush`，
+原 `FindNearestVoxelSample()` 未改变。四个涉及吸附的 shader 通过独立 permutation 选择新函数。
+
+新入口跳过三角形收集、Nanite 解码、BVH 和表面体素构建。旧表面准备（包括三角剔除参考点）
+只在原入口执行；GDF 吸附分支不再调用 `AddVineTriangleSurfacePasses(nullptr)` 创建空三角缓冲，
+不接收旧表面三角 / 体素输入，也不启用体素调试出口。源点 / 目标点只读取实例变换。
+GDF shader permutation 在预处理阶段排除三角查询代码，编译产物没有三角形 / BVH 资源绑定。
+在匹配本世界的真实渲染视图中，
+直接采样当帧 GDF 的有效 clipmap/page，用有符号距离和同层梯度迭代投影；不跨帧保存 GDF 纹理。
+噪声、初次吸附、最终吸附使用同一 GDF 查询，平滑后再投影一次，再沿法线施加原 `VinesOffset`。
+新增参数只影响此入口：最大投影距离默认 200 cm、收敛容差 1 cm、最大迭代次数 8（上限 32）。
+
+SC 与建网格在该视图的 RDG 图里完成，生成独立 GPU 输出缓冲；完成后通过 `EditMeshAsync` 在 GPU
+复制到 `VineGeometry`，不回读点 / 网格。该模式不分配 128 MiB 三角池；引擎 GDF 自身的流送 / 纹理
+及新增藤蔓输出缓冲属于各自内存开销，不能把它们宣传为受三角池预算约束。
+
+缺页、clipmap 边缘、窄带饱和、无有效梯度、超距离或未收敛的单点返回查询失败，保留该点原位置，
+不会偷偷改用三角形或体素。整个 GDF 不可用时等待匹配世界的视图，10 秒未就绪则报告失败并保留旧藤蔓。
+`Clean` 会使待处理 GDF 请求失效，完成交接前再次检查请求代号。没有渲染视图的环境不能完成此模式。
+GDF 是场景合成距离场，不提供原三角收集路径的 actor tag 筛选；小细节、薄壁和锐角的吸附质量取决于
+实际 GDF 分辨率及覆盖范围。它不是精确三角表面的替代保证。
+
+验证：Rider 首个 `Development_Editor / x64` 配置（无明确活动子项标记）的文件级编译及 UHT 通过；
+复用 UE 已生成的 GDF 声明、引擎采样辅助函数和当前 pass 源码，DXC 编译新旧分支共 8 个入口通过；
+实际投影 HLSL 配解析平面 / 球体采样器，在 D3D11 WARP 上运行的 14 个内外、距离边界、无效样本、
+不收敛和视图平移用例通过。后者验证迭代投影数学，不等于真实 GDF atlas 场景验证。
+2026-10-15 按同一 Rider 配置完成 Editor 目标构建及 DLL 链接，目标项目 D3D12 / SM6 启动已通过
+真实 UE 全局着色器编译和参数绑定，新 GDF 入口可由 Python 反射访问。真实 GDF atlas 场景吸附仍待验证。
+
+> 2026-10-08 三角形吸附试验（2026-10-15 已链接并通过启动时着色器绑定，吸附场景仍待验证）：`FVV::bUseNaniteTriangleSurface`
+> 默认开启。Nanite 资产直接按 `NaniteSurfaceCutError` 解码当前驻留层级；普通静态网格 / 实例和地形
+> 使用原场景收集规则。几何在 GPU 合并为三角汤、建立 LBVH，噪声阶段、初次吸附及最终投影均查询
+> 三角形最近点和几何法线，不再跨面平均体素目标。平滑完成后另做一次三角形重投影。
+>
+> 此模式绕过表面体素构建；下表的体素流程仍是关闭该选项后的对照路径。`bSurfaceAdsorption=false`
+> 仍完整跳过表面准备。默认误差 1 cm；`SurfaceMemoryBudgetMiB` 默认及硬上限均为 128 MiB，
+> Nanite、普通网格 / 实例和地形共用。按本批次实际缓冲布局换算三角容量，包含抽取临时缓冲、
+> 位置汤和 BVH 构建缓冲；超限拒绝生成，不截断表面。未驻留细节会明确报告 Incomplete。
+>
+> 当前仅验证几何路线：Nanite 准备沿用同步 `AppendNaniteCuts`，复制出的 pooled position/index
+> 引用随请求进入后续异步图，不跨帧保存 Nanite 页地址。它不等于运行时 Actor 方案的异步抽取已经完成。
+> 粗截面本身可能偏离显示表面；逐点重投影也不保证相邻线段和整根管截面无穿透。
+>
+> 已验证：三个修改的 C++ 实现通过 Rider Development Editor / x64 文件级编译；两个新增 shader
+> 内核通过 DXC；同一最近点 HLSL 在 D3D11 WARP 执行的 6 个墙面、转角、边界和搜索半径用例通过。
+> 编辑器现有抽取接口实测 `SM_NCH_Rock`：5 / 10 / 20 / 50 cm 分别得到
+> 1134 / 630 / 378 / 126 三角，均 Complete；1 cm 本次驻留状态是 Incomplete，不能当作 1 cm 精度已达标。
+> 当前 `L_TestWorld` 的静态网格没有开启 Nanite，墙角对比会测试普通三角形分支；Nanite 需另用上述资产验证。
+
+### 128 MiB 表面预算与处理顺序（2026-10-08）
+
+预算是**每次生成请求的表面处理新增逻辑 GPU buffer**，不是整个进程显存上限。源网格 render buffers、
+引擎 Nanite 流送页、CPU / readback staging、驱动及 RDG 池缓存、SC 生长和藤蔓输出均不计入。
+每个缓冲向上按 64 KiB 对齐；同一表面图的缓冲累加，不依赖 RDG 生命周期复用来凑预算。
+同步 Nanite 遍历、解码与后续表面图分阶段检查；解码后只保留 position/index，其他流主动延迟释放，不等待 UObject GC。
+
+三角位置是每面 48 B；还需计入 `2N-1` 个 BVH 节点（每节点 32 B）、parent、两份 atomic bounds、
+两份按 `nextPowerOfTwo(N)` 分配的排序数组及 dummy。因此 128 MiB 仅算位置汤 + BVH + 构建临时数据，
+上限为 **872448 面**，不是按 48 B 相除得到的 2796202 面。当前抽取流程还需要额外缓冲：
+
+- 全 Nanite：按每面最多 3 个解码顶点预留 position/index，上述表面图上限为 **654336 面**。
+  层级遍历、cluster 写出计划等另有分配前字节检查，可能更早拒绝；解码后的实际容量还会复检。
+- 单个普通网格：含现有收集器属性流与一张材质映射，上限为 **308565 面**。多实例会增加映射缓冲对齐开销。
+- 全地形：含初始位置 / 法线上传缓冲，上限为 **256682 面**。
+- 混合批次：先扣掉已知普通网格 / 地形收集成本，再换算 Nanite 可用余量；两类不各占一份 128 MiB。
+
+Nanite 计数按层级规模与字节预算分批，随后批量解码。普通网格会逐 request dispatch，并在写出时筛选区域，
+但仍按筛选前面数预分配；最终合并 pass 把无效槽位置零，没有缩容或把空闲容量回收给后续 mesh。
+所以当前**不是逐 mesh 裁剪、压实入池后再处理下一个**。这里的区域处理是保守剔除，不是将跨边界三角形切成新三角形。
+
+本次验证：UHT 及三个修改的 C++ 文件通过 Rider 首个配置 `Development_Editor / x64` 的文件级编译；
+独立执行容量算法，591 组混合容量边界及纯类型边界通过。2026-10-15 已完整链接并在目标项目加载，未进行场景显存峰值测量。
+
 > 2026-09-10 订正：下表「表面体素」「三角形缓存」两行按现状改写；链路现在录在 `AVineContainer::GenerateVineGPU`
 > 走的 `UCSMesh::EditMeshAsync` 图里（`FVineMeshSceneProxy` 已不存在，网格归 `VineGeometry` 这个 `UCSMesh` 所有）。
 
@@ -130,7 +207,6 @@ PathPoints[P].w = CurveLUT(l / (N-1)) · (TargetScale · StartSourceScale · 分
 - 上述核对的**取样噪声底是 half 精度 UV**，只能验到约三位有效数字。要更严格就得在 GPU 上直接回读 `VineUV.CurveV`（当前没有这条通路）。
 - `Save Mesh` 的 local-space 烘焙改用 actor 变换（leaf 被钉在 identity 世界变换上，用其自身组件变换会导致双重偏移），生成的 `AStaticMeshActor` 同样摆在 actor 变换上。该路径在上面的 V 核对里被实际走通了一次（能烘出 StaticMesh 并读回顶点），但摆放位置的正确性仍未核对。
 - `FCSSurfaceVoxelGPUBuffers` 的 `VoxelCount`（真实数）与 `VoxelCapacity`（容量）在 `VineLeaf_BuildVineBuildInput` 的两条分支里取值不一致：GPU-voxel 分支把 `VoxelCount` 也设成容量。`BuildVineVoxelHashCS` 已改为从 `Counter[0]` 读真实数并早退（容量 slack 全是同一个零 cell，插进哈希表会让线性探测退化成 O(slack²) 原子操作，实测直接把 GPU 挂死），但其余 kernel 的 `VoxelCount` 仍是容量，只影响回退路径的松紧，未收敛。
-- `Docs/VisVineGPU_AlgorithmFlow.svg` 与 `Docs/GpuTriangleUnified_Architecture.svg` 仍描述已删除的 `DispatchVVGPU_Voxel` / `BuildDynamicMeshFromGPUVineOutput` 流程，需要重绘。
 
 ## Open Questions
 

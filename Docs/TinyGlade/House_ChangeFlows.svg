@@ -1,0 +1,193 @@
+<svg viewBox="0 0 1480 934" width="1480" height="934" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Microsoft YaHei, sans-serif">
+  <defs>
+    <pattern id="pickable-domain-cross-bg" patternUnits="userSpaceOnUse" width="12" height="12">
+      <rect width="12" height="12" fill="#e0e7ff"/>
+      <path d="M0 6H12" stroke="#4f46e5" stroke-width="1" opacity="0.316770"/>
+      <path d="M6 0V12" stroke="#4f46e5" stroke-width="1" opacity="0.316770"/>
+    </pattern>
+    <pattern id="buffer-owner-stripe-bg" patternUnits="userSpaceOnUse" width="10" height="10">
+      <rect width="10" height="10" fill="#e2e8f0"/>
+      <rect y="1" width="10" height="2" fill="#334155" opacity="0.291429"/>
+      <rect y="6" width="10" height="1.5" fill="#334155" opacity="0.291429"/>
+    </pattern>
+    <pattern id="csmesh-resident-cross-bg" patternUnits="userSpaceOnUse" width="12" height="12">
+      <rect width="12" height="12" fill="#f3e8ff"/>
+      <path d="M0 6H12" stroke="#7c3aed" stroke-width="1" opacity="0.293103"/>
+      <path d="M6 0V12" stroke="#7c3aed" stroke-width="1" opacity="0.293103"/>
+    </pattern>
+    <pattern id="sv-stripe-bg" patternUnits="userSpaceOnUse" width="10" height="10">
+      <rect width="10" height="10" fill="#dbeafe"/>
+      <rect y="1" width="10" height="2" fill="#0284c7" opacity="0.235023"/>
+      <rect y="6" width="10" height="1.5" fill="#0284c7" opacity="0.235023"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#475569"/>
+    </marker>
+  </defs>
+  <style>
+    .box    { fill:#f8fafc; stroke:#94a3b8; stroke-width:1.2; }
+    .future { fill:#f8fafc; stroke:#94a3b8; stroke-width:1.2; stroke-dasharray:6 4; }
+    .core   { fill:url(#pickable-domain-cross-bg); stroke:#4f46e5; stroke-width:1.6; }
+    .owner  { fill:url(#buffer-owner-stripe-bg); stroke:#334155; stroke-width:1.2; }
+    .resident { fill:url(#csmesh-resident-cross-bg); stroke:#7c3aed; stroke-width:1.2; }
+    .sv-stripe { fill:url(#sv-stripe-bg); stroke:#0284c7; stroke-width:1.2; }
+    .t  { font-size:13.5px; font-weight:600; fill:#0f172a; }
+    .b  { font-size:12px; fill:#334155; }
+    .m  { font-size:12px; fill:#64748b; }
+    .h  { font-size:12.5px; font-weight:600; fill:#64748b; }
+    .flow { stroke:#475569; stroke-width:1.4; fill:none; marker-end:url(#arrow); }
+    .tag-hit  { font-weight:700; fill:#dc2626; }
+    .tag-may  { font-weight:700; fill:#d97706; }
+    .tag-skip { font-weight:700; fill:#64748b; }
+  </style>
+
+  <text x="30" y="38" font-size="20" font-weight="700" fill="#0f172a">TinyGlade 房屋：地面变化 vs 房子移动，各自改什么</text>
+  <text x="30" y="60" class="m">按 2026-09-18 代码：一律只标脏、在房子自己的 Tick 里合批兑现 · ReevaluateSite 幂等哈希守卫 · 接缝 = 接触记录，拖动期冻结、松手提交 · 无 subsystem · 配 Plan_House.md D3/D4/D6/D7/D9</text>
+
+  <text x="30"  y="96" class="h">A · 地面被改变（道路笔刷 / 地形塑形物）</text>
+  <text x="760" y="96" class="h">B · 房子移动（任意来源）</text>
+  <line x1="730" y1="86" x2="730" y2="812" stroke="#e2e8f0" stroke-width="1.5"/>
+
+  <!-- ================= A 地面被改变 ================= -->
+  <rect x="30" y="108" width="325" height="100" rx="8" class="box"/>
+  <text x="44" y="130" class="t">道路笔刷（FCSGroundPaintEdMode）</text>
+  <text x="44" y="150" class="b">每 dab ApplyPaintStroke 双写 Colors（R = 道路）</text>
+  <text x="44" y="167" class="b">→ 未提交广播；收笔 EndPaintStroke → 提交</text>
+  <text x="44" y="186" class="m">按住不放 = 一帧多笔，每笔都直推</text>
+
+  <rect x="375" y="108" width="325" height="100" rx="8" class="box"/>
+  <text x="389" y="130" class="t">地形塑形物增删移改（D9）</text>
+  <text x="389" y="150" class="b">RebuildTerrain(bCommitted) → 区域重导出 Heights</text>
+  <text x="389" y="167" class="b">区域 = union(旧足迹, 新足迹)，GPU 一个位移 pass</text>
+  <text x="389" y="186" class="m">拖动帧未提交；松手 / 改参 / 删除 = 提交</text>
+
+  <path class="flow" d="M192 208V214H358V220"/>
+  <path class="flow" d="M537 208V214H372V220"/>
+
+  <rect x="30" y="222" width="670" height="128" rx="8" class="owner"/>
+  <text x="44" y="244" class="t">ACSGroundActor：更新权威镜像 + GPU 投影 + 广播</text>
+  <text x="44" y="265" class="b">Colors ← 笔刷：镜像当场写；GPU 色流排队，FlushPaintToGpu 每帧异步推一次（同公式 8-bit 孪生）</text>
+  <text x="44" y="283" class="b">Heights ← 基底 0 与相交塑形物取 max，区域内绝对式重导出（撤隆起靠重算、不靠减法）</text>
+  <text x="44" y="301" class="b">广播前写 bLastChangeCommitted，再 OnGroundChanged.Broadcast(this, 变更世界盒)</text>
+  <text x="44" y="320" class="b">派生链（石阶 / 岩壳 / 裙边摆件 / 地被）不走广播：区域刷新后、每帧 FlushPaintToGpu 后同步重跑</text>
+  <text x="44" y="338" class="b">地面本身被拖：拖动帧平移 + 未提交广播，松手全量重建 = 提交 · 查询只打镜像，不回读 GPU</text>
+
+  <path class="flow" d="M365 350V360H250V368"/>
+  <path class="flow" d="M365 350V360H595V368"/>
+
+  <rect x="30" y="370" width="440" height="74" rx="8" class="sv-stripe"/>
+  <text x="44" y="392" class="t">房子 HandleGroundChanged（每栋，一视同仁）</text>
+  <text x="44" y="412" class="b">不看变更盒：RequestReevaluate 只标脏、开 tick</text>
+  <text x="44" y="430" class="b">bInGroundDrag = !提交；一帧多次广播 → 下一 tick 兑现一次</text>
+
+  <rect x="490" y="370" width="210" height="74" rx="8" class="box"/>
+  <text x="504" y="392" class="t">楼梯 ACSStairsActor</text>
+  <text x="504" y="412" class="b">变更盒 ∩ 样条包围盒才重算</text>
+  <text x="504" y="430" class="b">同步 RebuildStairs，哈希短路</text>
+
+  <path class="flow" d="M250 444V462"/>
+
+  <rect x="30" y="464" width="670" height="54" rx="8" class="core"/>
+  <text x="44" y="486" class="t">ACSHouseActor::ReevaluateSite() —— 每栋房屋在自己的 Tick 里执行</text>
+  <text x="44" y="506" class="m">同一入口；变的是哪个通道，决定哪份 desc 变 —— 分成 Colors / Heights 两支</text>
+
+  <path class="flow" d="M365 518V526H192V534"/>
+  <path class="flow" d="M365 518V526H537V534"/>
+
+  <text x="192" y="550" class="h" text-anchor="middle">变化的是 Colors（道路权重）</text>
+  <text x="537" y="550" class="h" text-anchor="middle">变化的是 Heights（地形形状）</text>
+
+  <rect x="30" y="560" width="325" height="96" rx="8" class="resident"/>
+  <text x="44" y="582"><tspan class="tag-hit" font-size="13.5">「变」</tspan><tspan class="t"> 房体网格 —— 门洞重判</tspan></text>
+  <text x="44" y="602" class="b">闭环采样路权 → 0.5 等值线求根 → 弦长即门宽</text>
+  <text x="44" y="620" class="b">→ 洞表 → clip 场逐像素挖洞（没有布尔）</text>
+  <text x="44" y="638" class="b">连带：门框砖 / 门扇 / 藤蔓避洞 / 门前摆件</text>
+
+  <rect x="30" y="666" width="325" height="54" rx="8" class="future"/>
+  <text x="44" y="688"><tspan class="tag-skip" font-size="13.5">「不变」</tspan><tspan class="t"> 柱组件</tspan></text>
+  <text x="44" y="708" class="b">Heights 没动 → 柱 desc 哈希短路</text>
+
+  <rect x="375" y="560" width="325" height="96" rx="8" class="resident"/>
+  <text x="389" y="582"><tspan class="tag-hit" font-size="13.5">「变」</tspan><tspan class="t"> 落座 + 柱组件</tspan></text>
+  <text x="389" y="602" class="b">房底 Z = 全域 max(地面) + HeightOffset</text>
+  <text x="389" y="620" class="b">绝对式、升降对称；支撑点 gap 超阈即生柱</text>
+  <text x="389" y="638" class="b">柱是独立组件：纯地形变化不碰房体</text>
+
+  <rect x="375" y="666" width="325" height="54" rx="8" class="resident"/>
+  <text x="389" y="688"><tspan class="tag-may" font-size="13.5">「可能变」</tspan><tspan class="t"> 房体网格 —— 门随离地收窄</tspan></text>
+  <text x="389" y="708" class="b">宽度连续收窄、量化 2 cm 进哈希；只落座 → 平移</text>
+
+  <path class="flow" d="M192 720V734"/>
+  <path class="flow" d="M537 720V734"/>
+
+  <rect x="30" y="736" width="670" height="72" rx="8" class="sv-stripe"/>
+  <text x="44" y="758"><tspan class="tag-may" font-size="13.5">「可能变」</tspan><tspan class="t"> 接缝（接触记录）—— 两支都可能触发</tspan></text>
+  <text x="44" y="778" class="b">未提交广播 ⇒ bInGroundDrag：照常落座、只用旧 Contacts，不发给对端</text>
+  <text x="44" y="796" class="b">提交那一轮：接缝 Key（含量化后的房底 Z）变了才 UpdateContacts → 向对端发记录</text>
+
+  <!-- ================= B 房子移动 ================= -->
+  <rect x="760" y="108" width="690" height="124" rx="8" class="box"/>
+  <text x="774" y="130" class="t">房子被移动（gizmo / 脚本 / 复制 / 撤销 / attach / 抓手）</text>
+  <text x="774" y="150" class="b">gizmo：PostEditMove(false) → NoteGizmoDrag 置 bInGizmoDrag，同步重求值走摆位快路径</text>
+  <text x="774" y="168" class="b">松手 PostEditMove(true) → 清标志 + 强制全量重建；抓手 PushEdge / PushHeight / PushBase 同一对标志</text>
+  <text x="774" y="186" class="b">其余来源：根组件 TransformUpdated → RequestReevaluate（只标脏；落座自改 Z 被 bInReevaluate 挡掉）</text>
+  <text x="774" y="206" class="m">兜底：松手事件没来 ⇒ GizmoDragIdleSeconds（2 s）内没有新拖动事件，Tick 就当松手处理</text>
+  <text x="774" y="222" class="m">删除房子：Destroyed / EndPlay → DetachContacts，对每个旧对端发空</text>
+
+  <path class="flow" d="M1105 232V246"/>
+
+  <rect x="760" y="248" width="690" height="54" rx="8" class="core"/>
+  <text x="774" y="270" class="t">ACSHouseActor::ReevaluateSite() —— 被移动的房屋自身</text>
+  <text x="774" y="290" class="m">同一个入口：门洞 / 柱是状态谓词，与「怎么变的」无关</text>
+
+  <path class="flow" d="M1105 302V316"/>
+
+  <rect x="760" y="318" width="690" height="70" rx="8" class="resident"/>
+  <text x="774" y="340"><tspan class="tag-may" font-size="13.5">「可能变」</tspan><tspan class="t"> 房体网格 —— 门随位置开合</tspan></text>
+  <text x="774" y="360" class="b">新 footprint 下重新采样道路：挪到路上 → 开门；离开道路 → 门合拢</text>
+  <text x="774" y="378" class="b">BodyHash 没变 → 只平移（TransformMesh 快路径）；变了 → 异步整栋重建</text>
+
+  <rect x="760" y="398" width="690" height="70" rx="8" class="resident"/>
+  <text x="774" y="420"><tspan class="tag-may" font-size="13.5">「可能变」</tspan><tspan class="t"> 柱组件 —— 悬空生柱 / 落地消柱</tspan></text>
+  <text x="774" y="440" class="b">新位置先落座（Z = max + 偏移）再判柱，gap 超阈的支撑点生柱</text>
+  <text x="774" y="458" class="b">独立第二网格，完全不碰房体</text>
+
+  <path class="flow" d="M1105 468V482"/>
+
+  <rect x="760" y="484" width="690" height="110" rx="8" class="sv-stripe"/>
+  <text x="774" y="506" class="t">接触记录 —— 拖动期冻结、松手提交（D7，09-16）</text>
+  <text x="774" y="526" class="b">拖动帧：只用旧 Contacts，不算不发；自己那半 clip 与柱跟着房子走，邻居那半留在原地</text>
+  <text x="774" y="544" class="b">松手（或脚本 / 撤销移动）且接缝 Key 变：旧对端 ∪ GetHouses 里够得着的 → Classify(我, 它)</text>
+  <text x="774" y="562" class="b">→ 对端.ReceiveContactFrom(我, 记录 | 空)；本房 CutsFor(我) 进 BodyHash、Owner() == 我 才砌柱</text>
+  <text x="774" y="582" class="m">一对房子至多一条记录，两端持同一个对象 —— 一条缝只砌一次</text>
+
+  <path class="flow" d="M1105 594V608"/>
+
+  <rect x="760" y="610" width="690" height="70" rx="8" class="resident"/>
+  <text x="774" y="632"><tspan class="tag-hit" font-size="13.5">「变」</tspan><tspan class="t"> 对端房子 —— 在它自己的下一 tick 重求值</tspan></text>
+  <text x="774" y="652" class="b">先丢掉所有涉及我的旧记录、再收下新的；只标脏、不反发（不会乒乓）</text>
+  <text x="774" y="670" class="b">CutsFor(它) 进它的 BodyHash，Owner() == 它 才砌柱 —— 柱数与接触逐条对应</text>
+
+  <rect x="760" y="690" width="690" height="52" rx="8" class="future"/>
+  <text x="774" y="712"><tspan class="tag-skip" font-size="13.5">「不变」</tspan><tspan class="t"> 地面</tspan></text>
+  <text x="774" y="731" class="b">镜像权威层不消费房子的变化，地面代码也从不读房子 —— 无环</text>
+
+  <!-- ================= 底部共用机制 ================= -->
+  <rect x="30" y="826" width="1420" height="70" rx="8" class="box"/>
+  <text x="44" y="848" class="t">幂等守卫 —— 两条流共用的收敛机制</text>
+  <text x="44" y="868" class="b">目标状态 = F(自身参数, 地面镜像, 接触记录, 标记登记)；重求值依次：落座 → 锚点重表达 → 接触 / 裁剪 → 门与窗 → 房体 → 柱 → 砖池 → 藤蔓 → 瓦 → 门扇 → 摆件 → 附属物，各自哈希谁变重建谁</text>
+  <text x="44" y="886" class="m">一帧里多次唤醒（逐笔广播、多选拖动、对端写入）合成一次；哈希不变即短路为零成本 —— 直推因此可以「必然更新」而不出错</text>
+
+  <rect x="30"  y="910" width="18" height="12" class="core"/>
+  <text x="54"  y="920" class="m">重求值入口</text>
+  <rect x="150" y="910" width="18" height="12" class="owner"/>
+  <text x="174" y="920" class="m">CPU 权威数据（双写）</text>
+  <rect x="330" y="910" width="18" height="12" class="sv-stripe"/>
+  <text x="354" y="920" class="m">标脏分发 / 接触记录</text>
+  <rect x="510" y="910" width="18" height="12" class="resident"/>
+  <text x="534" y="920" class="m">重建产物</text>
+  <rect x="630" y="910" width="18" height="12" class="future"/>
+  <text x="654" y="920" class="m">本流不发生（哈希短路）</text>
+  <rect x="820" y="910" width="18" height="12" class="box"/>
+  <text x="844" y="920" class="m">变更来源 / 旁路消费者</text>
+</svg>

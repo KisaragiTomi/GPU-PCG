@@ -1,0 +1,74 @@
+[
+  {
+    "case": "saved",
+    "world_time": 2.3178696036338806,
+    "uv_override": false,
+    "size": [
+      1280,
+      800
+    ]
+  },
+  {
+    "case": "valid-500",
+    "world_time": 5.210108507424593,
+    "uv_override": true,
+    "size": [
+      1280,
+      800
+    ]
+  },
+  {
+    "case": "valid-800",
+    "world_time": 8.102181114256382,
+    "uv_override": true,
+    "size": [
+      1280,
+      800
+    ]
+  },
+  {
+    "case": "variant-no-foam",
+    "world_time": 92.67482151836157,
+    "uv_override": true,
+    "size": [
+      1280,
+      800
+    ]
+  },
+  {
+    "case": "variant-no-detail",
+    "world_time": 92.67482151836157,
+    "uv_override": true,
+    "size": [
+      1280,
+      800
+    ]
+  },
+  {
+    "case": "variant-texture-simulation",
+    "world_time": 92.67482151836157,
+    "uv_override": true,
+    "size": [
+      1280,
+      800
+    ]
+  },
+  {
+    "case": "variant-texture-no-wpo",
+    "world_time": 92.67482151836157,
+    "uv_override": true,
+    "size": [
+      1280,
+      800
+    ]
+  },
+  {
+    "case": "variant-distortion-off",
+    "world_time": 92.67482151836157,
+    "uv_override": true,
+    "size": [
+      1280,
+      800
+    ]
+  }
+]

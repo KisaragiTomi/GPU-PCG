@@ -1,9 +1,111 @@
-# 屋顶：瓦片资产、错排、高度框、露台、屋脊收口与 VSM
+# 屋顶：脊长与山墙、瓦片资产、错排、高度框、露台、屋脊收口与 VSM
 
-2026-09-20 两轮屋顶改动的实现记录；2026-09-29 按用户确认的 TG 实拍与逆向把屋面瓦资产和排布改成 TG 真值，见[「屋面瓦资产」](#屋面瓦资产按-tg-真值重做2026-09-29)。同期的玩家楼梯（栏杆、拱墙、露台接合、宽度把手）见 [`Stairs_PlayerStairs.md`](Stairs_PlayerStairs.md)。
+2026-10-02 脊长可调、双坡 + 山墙，见[「脊长可调与双坡山墙」](#脊长可调与双坡山墙2026-10-02)。2026-09-20 两轮屋顶改动的实现记录；2026-09-29 按用户确认的 TG 实拍与逆向把屋面瓦资产和排布改成 TG 真值，见[「屋面瓦资产」](#屋面瓦资产按-tg-真值重做2026-09-29)。同期的玩家楼梯（栏杆、拱墙、露台接合、宽度把手）见 [`Stairs_PlayerStairs.md`](Stairs_PlayerStairs.md)。
 09-12 的屋顶材质移植、陶瓦参考图和旧烘焙的来历见[合卷「四坡屋顶 + 屋面瓦」](Progress_ModuleComparison.md#四坡屋顶--屋面瓦2026-08-31另一会话的重构--本轮资产收尾)。
 
 **当前状态（09-30 斜脊遮挡修正）**：以本文 09-29 的原版俯视图为准，已补逐瓦裁剪、窄斜脊、按厚度保形的瓦片变形及 Grey 配色。第二轮误用的斜脊下沉量已撤回，改为盖在坡面翘端上方；见下文遮挡修正记录。
+
+## 脊长可调与双坡山墙（2026-10-02）
+
+用户 2026-10-02：「屋顶梁距离是可以调整的；当梁距离等于房子长度时 4 瓣屋顶变成 2 瓣，侧面变成三角形；参考反编译文件。」三件事在 TG 里都有确凿对位（`ridge_length_01`、`Roof::is_gable`、`RecalculateGableRoofWallHeights`），证据、常量与有意偏离见 [附录 F](RE_RoofRidgeGable.md)。09-13「脊长是推论、不是参数」那条作废。
+
+![House_Pillar 同机位六档：自动四坡、脊长 0.6、0.95、双坡 + 阶梯山墙、双坡 + 悬挑山墙、换脊向](img/roof-ridge-20261002-sheet.png)
+
+### 怎么用
+
+- **拖**：选房子执行 `Enter Resize Mode`，屋脊两端各多一只躺平的箭头（TG 的 `brush_arrow_flat_single_foward`）。顺着脊拖任一只：这一头走 δ，脊居中，另一头镜像走，脊长 + 2δ。拖到脊与房子一样长就是双坡 + 山墙，往回拖又是四坡。异形房子与露台上箭头不出现。
+- **填**：细节面板 `CS House|Roof`。逐字段口径在 `CSHouseActor.h` 的属性注释里。
+
+```cpp
+float RoofRidgeLength01 = -1.0f;                          // < 0 自动（等坡度四坡，旧存档）；0..1 = TG 的 ridge_length_01；1 = 双坡 + 山墙
+ECSRoofRidgeAxis RoofRidgeAxis = ECSRoofRidgeAxis::X;     // 脊平行于局部 X / Y，只在显式脊长时读
+ECSGableRoofStyle GableRoofStyle = ECSGableRoofStyle::Stepped;   // Stepped = TG 砖石墙；Overhang = TG 半木构墙
+bool bTrimGable = true;                                   // CS House|Trim：阶梯山墙上沿的露砖台阶
+```
+
+- **按钮**：`Switch Roof Ridge Direction` 把脊转 90°（比例原样沿用）；`Reset Roof Ridge To Tiny Glade Default` 取 TG 新建房子的默认值（600 × 400 是 0.898；长边 ≥ 750 且长宽比 ≥ 1.5 直接是双坡）。回到本项目原来的等坡度四坡：把 `RoofRidgeLength01` 填回 −1。
+
+### 形态
+
+| `RoofRidgeLength01` | 屋面 | 两端的墙 |
+| --- | --- | --- |
+| `< 0`（自动，默认） | 等坡度四坡，脊长 = 长边 − 短边、沿长轴；与 10-02 之前逐位相同 | 矩形，墙顶平在檐口 |
+| `0` | 四个坡面收成一个尖 | 矩形 |
+| `0..1` | 四坡；脊长 = 10 + r·(顺脊边长 − 10)，两端坡面有自己的坡度（脊越长越陡） | 矩形 |
+| `1` | **双坡**：两端不铺瓦，两侧坡面是矩形；骨架的四条角线退化成两端的封边板 | **三角形山墙** |
+
+存的是比例不是厘米：拉房子尺寸时脊跟着伸缩，山墙拉长了还是山墙。屋脊高度始终只由垂直于脊的那条边决定（换脊向后 600 × 400 的起伏从 140 变 210）。
+
+两种山墙：
+
+| | `Stepped`（默认） | `Overhang` |
+| --- | --- | --- |
+| TG 里谁用 | 砖石 / 灰泥墙 | 半木构墙（本项目没有，留作可选观感） |
+| 屋面两头 | 缩进山墙外皮 26.5 cm | 挑出山墙 26.5 cm + 檐口出挑（外挑 25 时共 48.5） |
+| 墙顶线 | 比屋面线高 46 cm，像女儿墙立在屋面两头 | 贴着屋面线，藏在瓦底下 |
+| 上沿 | 灰泥只做到屋面线，上面 46 cm 是露着的砖，逐层收成台阶；角石跟到抬高的角点 | 直斜边，两端是封边板 |
+| 水平脊盖板 | 随屋面两头收在山墙里 | 随屋面两头挑出山墙 |
+
+![正对端墙：四坡时是矩形，双坡时升成三角形；阶梯山墙的砖台阶与悬挑山墙的封边板](img/roof-ridge-20261002-gable-front.png)
+
+![俯视：四坡 4 个坡面，双坡 2 个；阶梯式屋面缩在山墙里，悬挑式挑出山墙](img/roof-ridge-20261002-top.png)
+
+![拉尺寸模式：脊端的箭头（图为拖到头之后）](img/roof-ridge-20261002-handles.png)
+
+### 实现
+
+- **求值器**（`CSHouseRoof.{h,cpp}`）：屋面仍是一条闭式，只多一个逐边坡度倍率 `FCSRoofDesc::EdgeSteep`。倍率 ≤ 0 的边是山墙边：不进 min，屋面被竖直面收在墙外皮外 `GableOverhang` 处。骨架、坡面排区间、法线、覆盖谓词都吃同一组倍率。TG 的参数口径只在 `CSHouseRoof_ApplyRidge` 一处换算，且只对矩形生效。
+
+```text
+Z(p) = 檐口外沿高 + tan(pitch) · min_k( w_k · (内距_k(p) + Overhang) )
+两侧坡面 w = 1；两端坡面 w = (半跨 + Overhang) / (半长 + Overhang − 脊长 / 2)；r = 1 ⇒ 两端是山墙边
+```
+
+- **瓦**（`CSHouseTile.cpp`）：倍率不是 1 的面按自己的坡长分排，裁剪面取「两面等高」的线；山墙面不铺；山墙侧斜边（`FCSRoofSkeletonArc::bVerge`）照铺斜脊窄板当封边板。
+- **墙**（`CSHouseActor.cpp`）：`BuildGableWalls` 沿墙线向同一个求值器取上沿 ⇒ 山墙逐点贴着屋面。房体三角汤在墙顶之上追加一片实心棱柱（墙材质、贴图坐标连着铺上去）；角石柱高跟到角点；开了砖层时砖逐层续摞并按 TG `trim_rows` 的规则收成台阶，没开砖层时只出露在灰泥外的那一圈（`CSHouseBrickWall::BuildGableCourses`）。山墙上不开洞（窗的谓词卡在檐口以下）。
+- **抓手**（`CSHouseRidgeHandleActor.{h,cpp}`）：只把沿脊向的位移喂给 `ACSHouseActor::PushRidgeLength`，换算照抄 TG 的 `inverse_ridge_01_param`；记账、回位、宿主纪律与推墙箭头同一套。拉尺寸模式的抓手数从 N + 3 变 N + 5。
+- **尖顶与摆件**：双坡不立尖顶（TG 有脊就没有塔尖）；山墙边没有檐口，檐口鸟窝不上那两条边。
+- **容量**：阶梯山墙的露砖与角石 / 包边共用 `FrameReserveCapacity`（默认 512）；600 × 400 两面山墙 96 块，换脊向后 138 块。撞上限时先截断的是它，日志有警告。
+
+**等坡度屋面逐位不变**是硬承诺，也是这轮踩的坑：引擎开着 `/fp:fast`，`CosPitch()` 与 `SinPitch()` 紧挨着取时编译器把它们并成一次 sincos，结果与分开取差 1 ulp；演示房短边面的排宽恰好落在 `RoundToInt` 的 .5 边界上（337.5 / 45），差这 1 ulp 就从 210 片瓦变成 206 片。所以 `BuildPlan` 里倍率为 1 的坡面保留了改动之前的写法，`House.TileEqualPitchMatchesLegacy` 把提交 `3307d60` 的实现原样冻下来，对 10 种屋面 × 3 套瓦参数 × 2 个世界变换逐片逐字段比。
+
+### 验证
+
+- 构建：`Development_Editor / x64`，只涉及项目插件；日志 `Saved/Logs/RoofRidgeGable_Build*.log`。改过与新增的 9 个 `.cpp` 另用 UBT `-SingleFile` 逐个独立编译通过（unity 构建会掩盖缺的头文件，这轮就查出一处）。
+- 自动化（真 RHI，`PCGPlugins` 全量）：**235 过 / 4 红**，日志 `Saved/Logs/RoofRidgeGable_TestsFinal.log`、报告 `Saved/RoofRidgeGable_20261002/AutomationFinal`。4 条红与屋顶无关：`ShallowWater.Solver.{Downhill,SourceSpread}`（求解器漂移，既存）与 `TinyGladeHouse.Vine.{StrandMatchesRecords,TubePath}`（藤蔓管子打包的纯函数，藤蔓代码相对 `3307d60` 只有注释改动）。
+- 新增 7 条：
+
+| 测试 | 钉住什么 |
+| --- | --- |
+| `House.RoofRidgeParams` | TG 的三条换算式与山墙悬挑量 |
+| `House.RoofRidgeEval` | 带倍率的高度场对照独立的逐面平面方程；骨架、法线、覆盖谓词 |
+| `House.TileRidgeLength` | 调过脊长的四坡 / 双坡上瓦贴着屋面、铺满、装得进容量；封边板 |
+| `House.GableWallSoup` | 山墙进三角汤：三角数、朝向、贴图坐标、通道字典；砖层的台阶 |
+| `House.GableCoping` | 阶梯山墙的露砖：只丢整块埋在灰泥下的砖、台阶形状不变；墙板停在屋面线；四种配置各归各 |
+| `House.RidgeHandle` | 拖 50 cm 脊长 + 100；钳成恰好的 1 即山墙；换脊向；露台上无效 |
+| `House.TileEqualPitchMatchesLegacy` | 等坡度屋面的骨架、排区间、容量、每片瓦与冻结的旧实现逐位相同 |
+
+- 实景：`Scripts/TinyGladeRoofRidgeQA.py` 离屏跑 `L_HouseGroundDemo` 的 `House_Pillar`（600 × 400），逐档出斜视 / 正视 / 俯视，最后一档进拉尺寸模式真的拖一次脊端箭头（挪 actor → `ConsumeDragToHost`）。什么都不存盘。产物 `Saved/RoofRidgeGable_20261002/`，日志 `RoofRidgeGable_QA4.log`。
+
+| 档 | 脊长 cm | 双坡 | 起伏 cm | 瓦 | 山墙露砖 |
+| --- | --- | --- | --- | --- | --- |
+| 自动 | 200 | 否 | 140.0 | 210 | 0 |
+| 0 | 0 | 否 | 140.0 | 204 | 0 |
+| 0.6 | 364 | 否 | 140.0 | 219 | 0 |
+| 0.95 | 570.5 | 否 | 140.0 | 232 | 0 |
+| 1，阶梯 | 600 | 是 | 140.0 | 170 | 96 |
+| 1，悬挑 | 600 | 是 | 140.0 | 208 | 0 |
+| 1，阶梯，脊沿 Y | 400 | 是 | 210.1 | 177 | 138 |
+| 抓手：0.6 起拖 50 cm，再拖到头 | 364 → 464 → 600 | 是 | 140.0 | 170 | 96 |
+
+自动档的 210 片与 09-30 存档时一致。
+
+### 没做的
+
+- 屋面剖面只有直线（TG 的 `profile` 可以让坡面鼓起或凹下，计划 D4 的开放项 `ProfileCurvature`）。
+- 默认仍是自动档：新放的房子不会像 TG 那样按长宽比自己变成双坡，要按一下重置按钮。
+- 抓手没有 TG 的悬停放大与音效；换脊向是面板按钮，不是脊中点的可点抓手。
+- 山墙上不能开窗。
 
 ## 屋面瓦资产：按 TG 真值重做（2026-09-29）
 
@@ -134,7 +236,7 @@
 
 ## 高度框
 
-`EnterResizeMode` 生成每条边的水平把手，以及房底、墙顶、屋顶三个高度框。屋顶框是脊线上方的小框，只改屋顶起伏，墙高、房底高度不变。
+`EnterResizeMode` 生成每条边的水平把手，房底、墙顶、屋顶三个高度框，以及脊端的两只脊长箭头（2026-10-02，见上文）。屋顶框是脊线上方的小框，只改屋顶起伏，墙高、房底高度不变。
 
 屋顶起伏以厘米拖动，反算回 `RoofPitch`（0–70°）。压到下限后反向拖动立即升起，不累计越界位移。
 

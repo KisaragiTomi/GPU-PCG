@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1630" viewBox="0 0 1000 1630" role="img" aria-labelledby="title desc">
+<title id="title">目标流程：以任务和依赖推进，不主动阻塞</title><desc id="desc">建议的目标架构，尚未实现。主线程采集受控快照，工作线程进行纯数据计算，渲染线程异步分配构建资源并按预算提交 GPU 批次，主线程仅发布最新结果。缩容、回读和释放不阻塞生成关键路径。</desc>
+<defs>
+ <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9Z" fill="#50626a"/></marker>
+ <marker id="async-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9Z" fill="#287e78"/></marker>
+ <marker id="wait-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9Z" fill="#b84736"/></marker>
+</defs>
+<style>text { font-family: 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif; fill: #17252c; } .mono { font-family: Consolas, 'Microsoft YaHei', monospace; } </style>
+<rect width="1000" height="1630" fill="#ffffff"/>
+
+<text x="40" y="40" font-size="13" style="fill:#50626a" font-weight="500" text-anchor="start">VINE GENERATION  /  THREAD FLOW</text>
+<text x="40" y="82" font-size="31" style="fill:#17252c" font-weight="600" text-anchor="start">目标流程：以任务和依赖推进，不主动阻塞</text>
+<text x="40" y="116" font-size="17" style="fill:#50626a" font-weight="400" text-anchor="start">建议架构 · 尚未实现 · 保留必要主线程操作，重计算与等待离开交互路径</text>
+<rect x="40" y="142" width="15" height="15" rx="3" fill="#fff5df" stroke="#b3812d" stroke-width="1.3"/>
+<text x="64" y="155" font-size="14" style="fill:#50626a" font-weight="400" text-anchor="start">同步 CPU 工作</text>
+<rect x="254" y="142" width="15" height="15" rx="3" fill="#e9f5f4" stroke="#287e78" stroke-width="1.3"/>
+<text x="278" y="155" font-size="14" style="fill:#50626a" font-weight="400" text-anchor="start">异步提交 / GPU 工作</text>
+<rect x="513" y="142" width="15" height="15" rx="3" fill="#fff0ed" stroke="#b84736" stroke-width="1.3"/>
+<text x="537" y="155" font-size="14" style="fill:#50626a" font-weight="400" text-anchor="start">条件性阻塞等待</text>
+<text x="960" y="156" font-size="14" style="fill:#50626a" font-weight="400" text-anchor="end">依赖示意 · 非耗时比例</text>
+<rect x="40" y="180" width="318" height="1155" rx="0" fill="#fafcfd" stroke="none" stroke-width="1.3"/>
+<text x="54" y="204" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">游戏 / 编辑器主线程</text>
+<text x="54" y="227" font-size="13" style="fill:#50626a" font-weight="400" text-anchor="start">快照、调度、发布；不 Wait</text>
+<path d="M52 242 H346" stroke="#cbd6db" fill="none"/>
+<rect x="384" y="180" width="306" height="1155" rx="0" fill="#fafcfd" stroke="none" stroke-width="1.3"/>
+<text x="398" y="204" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">CPU 工作线程</text>
+<text x="398" y="227" font-size="13" style="fill:#50626a" font-weight="400" text-anchor="start">只处理自持有的数据快照</text>
+<path d="M396 242 H678" stroke="#cbd6db" fill="none"/>
+<rect x="716" y="180" width="244" height="1155" rx="0" fill="#fafcfd" stroke="none" stroke-width="1.3"/>
+<text x="730" y="204" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">渲染线程 → GPU</text>
+<text x="730" y="227" font-size="13" style="fill:#50626a" font-weight="400" text-anchor="start">资源与计算按依赖排队</text>
+<path d="M728 242 H948" stroke="#cbd6db" fill="none"/>
+<rect x="54" y="262" width="290" height="110" rx="9" fill="#fff5df" stroke="#b3812d" stroke-width="1.3"/>
+<text x="68" y="290" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">① 取得受控输入快照</text>
+<text x="68" y="315" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">参数、变换、必要的几何 / 地形数据</text>
+<text x="68" y="338" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">场景采集缓存化或分帧；射线异步化</text>
+<text x="68" y="361" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">登记请求版本，管理资源生命周期</text>
+<path d="M344 316 H368 V431 H398" fill="none" stroke="#287e78" stroke-width="2" stroke-linejoin="round" marker-end="url(#async-arrow)" stroke-dasharray="6 5"/>
+<rect x="398" y="390" width="278" height="170" rx="9" fill="#e9f5f4" stroke="#287e78" stroke-width="1.3"/>
+<text x="412" y="418" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">② 后台完成纯数据计算</text>
+<text x="412" y="443" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">散点 / 去重 / 起点筛选</text>
+<text x="412" y="466" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">SC 输入整理、最近点与 LUT</text>
+<text x="412" y="489" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">房屋分支：规划、细分、记录展开</text>
+<text x="412" y="512" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">不直接读写活动 Actor / 组件</text>
+<text x="412" y="546" font-size="13" style="fill:#50626a" font-weight="400" text-anchor="start" class="mono">Task + owned snapshot</text>
+<path d="M199 372 V438" fill="none" stroke="#287e78" stroke-width="2" stroke-linejoin="round" marker-end="url(#async-arrow)" stroke-dasharray="6 5"/>
+<rect x="54" y="438" width="290" height="84" rx="9" fill="#f1f5f7" stroke="#cbd6db" stroke-width="1.3" stroke-dasharray="5 4"/>
+<text x="68" y="466" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">主线程继续响应编辑与绘制</text>
+<text x="68" y="491" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">在途期间只保留最新待处理请求</text>
+<text x="68" y="514" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">取消 / 过期结果不覆盖新状态</text>
+<path d="M537 560 V597 H199 V629" fill="none" stroke="#287e78" stroke-width="2" stroke-linejoin="round" marker-end="url(#async-arrow)" stroke-dasharray="6 5"/>
+<rect x="54" y="629" width="290" height="91" rx="9" fill="#fff5df" stroke="#b3812d" stroke-width="1.3"/>
+<text x="68" y="657" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">③ 校验版本并提交构建</text>
+<text x="68" y="682" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">对象仍有效且请求仍为最新才提交</text>
+<text x="68" y="705" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">少量主线程操作；提交后立即返回</text>
+<path d="M344 674 H703 V798 H730" fill="none" stroke="#287e78" stroke-width="2" stroke-linejoin="round" marker-end="url(#async-arrow)" stroke-dasharray="6 5"/>
+<text x="415" y="662" font-size="14" style="fill:#287e78" font-weight="400" text-anchor="start">提交自持有构建包，不带栈地址</text>
+<rect x="730" y="748" width="216" height="137" rx="9" fill="#e9f5f4" stroke="#287e78" stroke-width="1.3"/>
+<text x="744" y="776" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">④ RT：异步资源准备</text>
+<text x="744" y="801" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">首次分配 / 扩容 / 布局</text>
+<text x="744" y="824" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">准备独立的新资源集</text>
+<text x="744" y="847" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">与后续构建顺序衔接</text>
+<text x="744" y="870" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">替换同步容量接口</text>
+<path d="M838 885 V910" fill="none" stroke="#287e78" stroke-width="2" stroke-linejoin="round" marker-end="url(#async-arrow)"/>
+<rect x="730" y="910" width="216" height="149" rx="9" fill="#e9f5f4" stroke="#287e78" stroke-width="1.3"/>
+<text x="744" y="938" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">⑤ GPU：生成藤蔓</text>
+<text x="744" y="963" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">体素 → SC → concat</text>
+<text x="744" y="986" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">噪声 / 轴向 / UV / 网格</text>
+<text x="744" y="1009" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">大任务按预算分批 / 分帧</text>
+<text x="744" y="1032" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">中间缓冲保留到后续批次</text>
+<text x="404" y="936" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">继续显示上一版藤蔓</text>
+<text x="404" y="966" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">后台构建期间，旧资源保持有效</text>
+<text x="404" y="993" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">GPU 计算总量不会因异步减少</text>
+<text x="404" y="1020" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">分帧预算用于控制长任务冲击</text>
+<path d="M838 1059 V1093" fill="none" stroke="#287e78" stroke-width="2" stroke-linejoin="round" marker-end="url(#async-arrow)"/>
+<rect x="730" y="1093" width="216" height="111" rx="9" fill="#e9f5f4" stroke="#287e78" stroke-width="1.3"/>
+<text x="744" y="1121" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">⑥ RT：准备结果交接</text>
+<text x="744" y="1146" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">用 RDG / RHI 依赖定序</text>
+<text x="744" y="1169" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">需要 fence 时非阻塞检查</text>
+<text x="744" y="1192" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">不使用全局 GPUIdle 等待</text>
+<path d="M730 1167 H703 V1241 H344" fill="none" stroke="#287e78" stroke-width="2" stroke-linejoin="round" marker-end="url(#async-arrow)" stroke-dasharray="6 5"/>
+<text x="408" y="1226" font-size="14" style="fill:#287e78" font-weight="400" text-anchor="start">异步通知；GPU 使用顺序由依赖保证</text>
+<rect x="54" y="1200" width="290" height="111" rx="9" fill="#fff5df" stroke="#b3812d" stroke-width="1.3"/>
+<text x="68" y="1228" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">⑦ 主线程发布最新结果</text>
+<text x="68" y="1253" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">核对请求版本 → 绑定组件 / 新资源</text>
+<text x="68" y="1276" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">旧资源延迟释放，过期结果丢弃</text>
+<text x="68" y="1299" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">CPU 不读回整个生成网格</text>
+<path d="M40 1355 H960" stroke="#cbd6db"/>
+<text x="40" y="1386" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">离开每次生成的关键路径</text>
+<text x="40" y="1417" font-size="16" style="fill:#50626a" font-weight="400" text-anchor="start">缩容：设置滞回并延后处理。确需计数时异步回读，后续帧检查 IsReady，准备好再处理。</text>
+<text x="40" y="1446" font-size="16" style="fill:#50626a" font-weight="400" text-anchor="start">释放：解绑与渲染资源生命周期按序推进。保留旧、新两版期间会增加显存占用。</text>
+<path d="M40 1470 H960" stroke="#cbd6db"/>
+<text x="40" y="1502" font-size="18" style="fill:#17252c" font-weight="600" text-anchor="start">需要改造的边界</text>
+<text x="40" y="1533" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">CPU 准备 → 快照 + 后台任务    ·    分配 / 扩容 → 异步资源准备    ·    同步缩容 / 清理 → 延迟处理</text>
+<text x="40" y="1562" font-size="15" style="fill:#50626a" font-weight="400" text-anchor="start">回调表示的完成阶段需明确；请求版本、对象有效性、资源所有权必须贯穿整个任务。</text>
+<text x="40" y="1596" font-size="14" style="fill:#50626a" font-weight="400" text-anchor="start">目标是取消流程中的主动阻塞；保留必要主线程成本。AsyncCompute 属于另一个优化维度。</text>
+</svg>

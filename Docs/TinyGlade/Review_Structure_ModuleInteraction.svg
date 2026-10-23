@@ -1,0 +1,337 @@
+<svg viewBox="0 0 1650 916" width="1650" height="916" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Microsoft YaHei, sans-serif">
+  <defs>
+    <pattern id="pickable-domain-cross-bg" patternUnits="userSpaceOnUse" width="12" height="12">
+      <rect width="12" height="12" fill="#e0e7ff"/>
+      <path d="M0 6H12" stroke="#4f46e5" stroke-width="1" opacity="0.316770"/>
+      <path d="M6 0V12" stroke="#4f46e5" stroke-width="1" opacity="0.316770"/>
+    </pattern>
+    <pattern id="csmesh-resident-cross-bg" patternUnits="userSpaceOnUse" width="12" height="12">
+      <rect width="12" height="12" fill="#f3e8ff"/>
+      <path d="M0 6H12" stroke="#7c3aed" stroke-width="1" opacity="0.293103"/>
+      <path d="M6 0V12" stroke="#7c3aed" stroke-width="1" opacity="0.293103"/>
+    </pattern>
+    <pattern id="buffer-owner-stripe-bg" patternUnits="userSpaceOnUse" width="10" height="10">
+      <rect width="10" height="10" fill="#e2e8f0"/>
+      <rect y="1" width="10" height="2" fill="#334155" opacity="0.291429"/>
+      <rect y="6" width="10" height="1.5" fill="#334155" opacity="0.291429"/>
+    </pattern>
+    <pattern id="legacy-hatch" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
+      <rect width="10" height="10" fill="#f1f5f9"/>
+      <rect x="0" y="0" width="10" height="2" fill="#64748b" opacity="0.361702"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#334155"/>
+    </marker>
+    <marker id="arrow-d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#ea580c"/>
+    </marker>
+  </defs>
+  <style>
+    .box      { fill:#f8fafc; stroke:#94a3b8; stroke-width:1.2; }
+    .ext      { fill:#f8fafc; stroke:#94a3b8; stroke-width:1.2; stroke-dasharray:6 4; }
+    .core     { fill:url(#pickable-domain-cross-bg); stroke:#4f46e5; stroke-width:1.4; }
+    .resident { fill:url(#csmesh-resident-cross-bg); stroke:#7c3aed; stroke-width:1.4; }
+    .owner    { fill:url(#buffer-owner-stripe-bg); stroke:#334155; stroke-width:1.2; }
+    .legacy-hatch { fill:url(#legacy-hatch); stroke:#64748b; stroke-width:1.2; }
+    .t  { font-size:13px; font-weight:600; fill:#0f172a; }
+    .t2 { font-size:12px; font-weight:600; fill:#0f172a; }
+    .b  { font-size:10px; fill:#334155; }
+    .m  { font-size:10px; fill:#64748b; }
+    .n  { font-size:10px; fill:#334155; }
+    .nd { font-size:10px; fill:#1d4ed8; }
+    .ns { font-size:10px; fill:#c2410c; }
+    .w  { stroke:#334155; stroke-width:1.5; fill:none; marker-end:url(#arrow); }
+    .wb { stroke:#334155; stroke-width:1.5; fill:none; marker-start:url(#arrow); marker-end:url(#arrow); }
+    .d  { stroke:#2563eb; stroke-width:1.6; fill:none; marker-end:url(#arrow-d); }
+    .s  { stroke:#ea580c; stroke-width:1.4; fill:none; stroke-dasharray:5 3; marker-end:url(#arrow-s); }
+  </style>
+
+  <text x="20" y="36" font-size="20" font-weight="700" fill="#0f172a">TinyGlade 复刻：模块交互图（谁包含谁、谁调谁、谁通知谁）</text>
+  <text x="20" y="58" class="m" font-size="12px">读法：箭头指向被调方 / 被通知方；每个框里列的是审查核实到的交互相关状态；圈码 ⑧–⑲ = Review_Structure.md 深挖 D / E 的小节号，✔ = 已不成立 / 已修；按 2026-09-18 代码更新</text>
+
+  <line x1="20" y1="84" x2="60" y2="84" class="w"/>
+  <text x="66" y="88" class="n">同步直接调用</text>
+  <line x1="160" y1="84" x2="200" y2="84" class="d"/>
+  <text x="206" y="88" class="nd">静态 / 多播委托广播</text>
+  <line x1="340" y1="84" x2="380" y2="84" class="s"/>
+  <text x="386" y="88" class="ns">TActorIterator / TActorRange 世界扫描</text>
+  <rect x="610" y="76" width="26" height="16" rx="3" class="core"/>
+  <text x="642" y="88" class="n">核心 actor（房子）</text>
+  <rect x="750" y="76" width="26" height="16" rx="3" class="resident"/>
+  <text x="782" y="88" class="n">地面（CPU 权威镜像）</text>
+  <rect x="900" y="76" width="26" height="16" rx="3" class="owner"/>
+  <text x="932" y="88" class="n">共享记录（两端共持）</text>
+  <rect x="1050" y="76" width="26" height="16" rx="3" class="legacy-hatch"/>
+  <text x="1082" y="88" class="n">遗留代码</text>
+  <rect x="1140" y="76" width="26" height="16" rx="3" class="ext"/>
+  <text x="1172" y="88" class="n">编辑器模块 / 说明</text>
+  <rect x="1300" y="76" width="26" height="16" rx="3" class="box"/>
+  <text x="1332" y="88" class="n">从属 actor / 函数库</text>
+
+  <!-- 行 1 -->
+  <rect x="20" y="110" width="240" height="186" rx="8" class="box"/>
+  <text x="28" y="130" class="t">UCSHouseLibrary（静态函数库）</text>
+  <text x="28" y="146" class="m">09-16 取代 UCSHouseSubsystem</text>
+  <text x="28" y="160" class="m">无状态、无 tick、无登记表</text>
+  <text x="28" y="178" class="b">GetHouses：TActorRange + GUID 升序</text>
+  <text x="28" y="192" class="m">世界本身就是名单（只在提交接缝时翻）</text>
+  <text x="28" y="210" class="b">PickHouse / PickHouseNear → 房子解析求交</text>
+  <text x="28" y="224" class="b">PlaceMarkerAlongRay：生成 + AdoptAnchor</text>
+  <text x="28" y="242" class="m">⑬ 花名册撞键随登记表一起消失 ✔</text>
+  <text x="28" y="256" class="m">⑨ MarkHouseDirty 合并队列随之删除 ✔</text>
+  <text x="28" y="270" class="m">0.25 s 快扫 → 房子根组件 TransformUpdated</text>
+
+  <rect x="420" y="110" width="300" height="186" rx="8" class="ext"/>
+  <text x="428" y="130" class="t">PCGEditorProcess（编辑器模块）</text>
+  <text x="428" y="148" class="b">FCSWindowBrushEdMode（窗笔刷）</text>
+  <text x="428" y="162" class="b">FCSGroundPaintEdMode（地面画笔）</text>
+  <text x="428" y="176" class="b">CSHouseResizeSelectionWatcher（失选即退出）</text>
+  <text x="428" y="196" class="m">只订阅三个静态委托；运行时模块零编辑器 include ✔</text>
+  <text x="428" y="210" class="m">CSWindowBrushEdModeTests 钉住「按钮 → 委托 → 激活」链 ✔</text>
+  <text x="428" y="230" class="b">→ UCSHouseLibrary::PickHouse / PlaceMarkerAlongRay</text>
+  <text x="428" y="244" class="b">→ 地面 ApplyPaintStroke / Begin/EndPaintStroke</text>
+  <text x="428" y="262" class="m">包含 CSHouseActor.h 的 16 个文件里 5 个在这里 ⑧</text>
+  <text x="428" y="276" class="m">收笔 EndPaintStroke 让地面补一次「已提交」广播</text>
+
+  <rect x="900" y="110" width="450" height="186" rx="8" class="ext"/>
+  <text x="908" y="130" class="t">09-11 → 09-18 的结构变化</text>
+  <text x="908" y="150" class="b">· 删 UCSHouseSubsystem：名单 → UCSHouseLibrary::GetHouses（TActorRange）；</text>
+  <text x="908" y="164" class="m">　0.25 s 快扫 → 根组件 TransformUpdated 标脏；MarkHouseDirty 删除</text>
+  <text x="908" y="184" class="b">· 接缝改接触记录 FCSHouseContact：两端共持同一对象，谁动谁发、松手才提交，</text>
+  <text x="908" y="198" class="m">　对端只标脏；Destroyed / EndPlay 向每个旧对端发空（左下）</text>
+  <text x="908" y="218" class="b">· 抓手：每条边一个锥子 + 檐口 / 房底两个框；Push* 只同步重求值一次</text>
+  <text x="908" y="238" class="b">· 新增 ACSStairsActor（玩家绘制楼梯）：ChangedBounds 的第一个消费者</text>
+  <text x="908" y="258" class="b">· HouseId 加 NonPIEDuplicateTransient + 注册时查重（⑬ 房子侧已修）</text>
+  <text x="908" y="278" class="b">· 窗贴墙脚变门：门前踏步经宿主的 Ground 采样（标记 → 地面第二条读路径）</text>
+
+  <rect x="1380" y="110" width="250" height="186" rx="8" class="ext"/>
+  <text x="1388" y="130" class="t">⑧ 挂错名下的公共头</text>
+  <text x="1388" y="150" class="b">CSGroundShaperSteps.h</text>
+  <text x="1388" y="164" class="m">= GPU palette 基座；6 个房子头 include</text>
+  <text x="1388" y="178" class="m">还为一个宏带上整个实例组件头</text>
+  <text x="1388" y="196" class="b">CSHouseVine.h</text>
+  <text x="1388" y="210" class="m">= FWallStrip / Hash01 / IdentityHash /</text>
+  <text x="1388" y="224" class="m">BuildBaseMesh，瓦·柱·摆件·地面都用</text>
+  <text x="1388" y="242" class="b">CSHouseDecor.h ← CSGroundDecor.h</text>
+  <text x="1388" y="256" class="m">地面复用房子的规划 / 打包</text>
+  <text x="1388" y="272" class="b">CSHouseFeatureMarker.h → CSHouseActor.h</text>
+  <text x="1388" y="286" class="m">只为 FCSHouseWindow 一个 struct</text>
+
+  <!-- 行 2 -->
+  <rect x="20" y="340" width="240" height="316" rx="8" class="box"/>
+  <text x="28" y="360" class="t">ACSHouseFeatureMarker ×N</text>
+  <text x="28" y="378" class="b">ACSWindowMarker（Blueprintable 子类）</text>
+  <text x="28" y="398" class="b">Anchor：权威，序列化，进事务</text>
+  <text x="28" y="412" class="m">Host：transient 弱引用</text>
+  <text x="28" y="426" class="m">+ attach 父 = 第三份宿主关系 ⑫</text>
+  <text x="28" y="446" class="b">Tick（拖动期）→ HandleDrag(false)</text>
+  <text x="28" y="460" class="m">→ RegisterAnchor → 房子只标脏、合批 ⑨</text>
+  <text x="28" y="480" class="b">RegisterAnchor：</text>
+  <text x="28" y="494" class="m">探针裁决 → 登记（只标脏）→ 回写探针 ⑪</text>
+  <text x="28" y="508" class="m">（最终裁决合批后才到；记账仍按探针）</text>
+  <text x="28" y="528" class="b">MarkerId：构造期 NewGuid</text>
+  <text x="28" y="542" class="m">复制 actor 不重掷 ⑬（标记侧仍成立）</text>
+  <text x="28" y="562" class="m">读 Host->WallThickness / WallHeight</text>
+  <text x="28" y="576" class="m">PostEditMove / Undo / 改属性 各自触发解析</text>
+  <text x="28" y="590" class="m">无宿主自毁只在最终裁决（基类纪律 ④ ✔）</text>
+  <text x="28" y="610" class="b">窗贴墙脚变门（09-16，bDoorForm）</text>
+  <text x="28" y="624" class="m">门前踏步：经 Host->Ground 取 SampleHeight</text>
+  <text x="28" y="638" class="m">（CSStairs::BuildDoorSteps，纯函数共用）</text>
+
+  <rect x="420" y="340" width="300" height="316" rx="8" class="core"/>
+  <text x="428" y="360" class="t">ACSHouseActor ×N（4904 + 2816 行）</text>
+  <text x="428" y="378" class="b">ReevaluateSite()：同步 8 处 + 自 Tick 合批 ⑨</text>
+  <text x="428" y="392" class="m">只标脏 5 处：地面广播 / 标记登记·注销 /</text>
+  <text x="428" y="406" class="m">对端 ReceiveContactFrom / 根组件 TransformUpdated</text>
+  <text x="428" y="420" class="m">同步：抓手 Push* ×3 / 构造脚本 / PostRegister /</text>
+  <text x="428" y="434" class="m">Move / Undo / RebuildHouse；读入口补票 50 余处</text>
+  <text x="428" y="454" class="b">MarkerWindows：{Id, Window, Anchor 副本, Marker}</text>
+  <text x="428" y="468" class="m">锚点存两份、宿主关系三份 ⑫</text>
+  <text x="428" y="488" class="b">Contacts：TSharedPtr 两端共持（左下）</text>
+  <text x="428" y="502" class="m">bIn{Gizmo,Ground}Drag 冻结期只用不发，松手提交；</text>
+  <text x="428" y="516" class="m">拖动标志 2 s 没有新拖动事件就由 Tick 当松手</text>
+  <text x="428" y="536" class="b">ResizeHandles：每边一锥 + 两框，RF_Transient</text>
+  <text x="428" y="556" class="b">Ground：TActorIterator 取首个 + AddUObject</text>
+  <text x="428" y="576" class="b">WallThickness / WallHeight 裸字段被标记 / 抓手直接读 ⑧</text>
+  <text x="428" y="596" class="b">CSVineTube::BuildTubeIntoMesh → 遗留文件 ⑲</text>
+  <text x="428" y="616" class="m">61 个 BlueprintPure 探针 vs 13 个 BlueprintCallable ⑱</text>
+  <text x="428" y="630" class="m">HouseId：NonPIEDuplicateTransient + 注册时查重 ✔ ⑬</text>
+  <text x="428" y="644" class="m">GetTrackingHash / 0.25 s 快扫已删（09-16）</text>
+
+  <rect x="920" y="340" width="300" height="316" rx="8" class="resident"/>
+  <text x="928" y="360" class="t">ACSGroundActor（2333 + 1781 行）</text>
+  <text x="928" y="378" class="b">Mirror.Heights / Colors：CPU 权威镜像</text>
+  <text x="928" y="398" class="b">Shapers：世界扫描 + 登记两路写同一张表 ⑩</text>
+  <text x="928" y="412" class="m">顺序不随关卡保存（CSGroundDecor.h 自述）</text>
+  <text x="928" y="432" class="b">RegisterShaper → 全域刷新 + RebuildSkirtDecor</text>
+  <text x="928" y="446" class="m">一次登记 = 2 次高度刷新 + 9 次派生重建 ⑩</text>
+  <text x="928" y="466" class="b">RefreshHeightsInRegion：镜像没变也跑 4 条派生链</text>
+  <text x="928" y="486" class="b">OnGroundChanged 广播前写 bLastChangeCommitted：</text>
+  <text x="928" y="500" class="m">每 dab / 每帧拖地面 = 未提交；收笔 / 全量重建 = 提交；</text>
+  <text x="928" y="514" class="m">区域刷新随调用方（塑形物拖动帧未提交、松手提交）</text>
+  <text x="928" y="534" class="b">SampleHeight / SampleRoadWeight / RaycastGround</text>
+  <text x="928" y="554" class="b">RebuildStairs 无哈希守卫：每次都 dispatch</text>
+  <text x="928" y="574" class="m">派生四链：石阶 / 岩壳 / 裙边摆件 / 地被，</text>
+  <text x="928" y="588" class="m">各持 buffer、各自 Release（大问题 1）</text>
+  <text x="928" y="608" class="m">ChangedBounds 只有楼梯 actor 在用，</text>
+  <text x="928" y="622" class="m">房子照旧不过滤、无条件标脏（大问题 2）</text>
+
+  <rect x="1380" y="340" width="250" height="208" rx="8" class="box"/>
+  <text x="1388" y="360" class="t">ACSGroundShaperActor ×N</text>
+  <text x="1388" y="378" class="b">ACSTinyGlade 子类：只借基类 OnConstruction ⑲</text>
+  <text x="1388" y="398" class="b">RebuildTerrain(bCommitted) 触发点 ×4：</text>
+  <text x="1388" y="412" class="m">OnConstruction / PostRegister /</text>
+  <text x="1388" y="426" class="m">PostEditChangeProperty / PostEditMove</text>
+  <text x="1388" y="440" class="m">（拖动帧传未提交，松手传提交）</text>
+  <text x="1388" y="460" class="b">SampleShapeHeight：解析场的 CPU 孪生</text>
+  <text x="1388" y="474" class="m">（与 .ush 有 CpuGpuFieldParity 守着 ✔）</text>
+  <text x="1388" y="494" class="b">只与地面对话，不订阅 OnGroundChanged ✔</text>
+  <text x="1388" y="514" class="m">Ground：TActorIterator 取首个</text>
+  <text x="1388" y="528" class="m">加载顺序决定谁先登记 → 最坏 O(N²) 刷新 ⑩</text>
+
+  <!-- 行 3 -->
+  <rect x="20" y="710" width="240" height="184" rx="8" class="owner"/>
+  <text x="28" y="730" class="t">FCSHouseContact（接触记录）</text>
+  <text x="28" y="746" class="b">09-16：两端各持同一个 TSharedPtr</text>
+  <text x="28" y="764" class="b">Houses[2] 弱引用 + Ids[2]（规范序）</text>
+  <text x="28" y="778" class="b">Owner() = 规范序里第一个能出砖的</text>
+  <text x="28" y="798" class="b">竖缝 FCSHouseSeamContact：</text>
+  <text x="28" y="812" class="b">交点 / 两端裁剪段 / 两房快照 Shapes[2]</text>
+  <text x="28" y="826" class="b">柱逐接触出，永不跨接触合并</text>
+  <text x="28" y="846" class="b">横缝 FCSHouseBearingContact：只判定</text>
+  <text x="28" y="866" class="b">不是 UObject：不存盘、不进事务</text>
+  <text x="28" y="880" class="b">对端 = 另一栋 ACSHouseActor</text>
+
+  <rect x="440" y="710" width="280" height="176" rx="8" class="box"/>
+  <text x="448" y="730" class="t2">ResizeHandle × 边数 + HeightHandle × 2</text>
+  <text x="448" y="748" class="b">RF_Transient，attach 在房子下（父级带动回路）</text>
+  <text x="448" y="766" class="b">OnHandleDrag → PushEdge / PushHeight / PushBase</text>
+  <text x="448" y="780" class="m">= NoteGizmoDrag + 立即重求值，接缝冻结到松手</text>
+  <text x="448" y="794" class="m">（MarkHouseDirty 的延后第二次随子系统删除 ✔ ⑨）</text>
+  <text x="448" y="814" class="b">记账量 LastConsumedWorld / LastAppliedOffset</text>
+  <text x="448" y="828" class="m">两族各一份，正文七成逐字相同 ⑯</text>
+  <text x="448" y="848" class="m">每次事件 SnapResizeHandles → N+2 个归位</text>
+  <text x="448" y="862" class="m">基类 ACSHouseHandleActor：宿主纪律 / 双解绑 / 降级 ✔</text>
+  <text x="448" y="876" class="m">锥子数 = 取完凸包之后的 footprint 边数</text>
+
+  <rect x="920" y="710" width="300" height="160" rx="8" class="legacy-hatch"/>
+  <text x="928" y="730" class="t">遗留藤蔓：GeometryEditorActor.cpp 4906 行</text>
+  <text x="928" y="748" class="b">AVineContainer（空间殖民 / 体素吸附）</text>
+  <text x="928" y="766" class="b">CSVineTube::BuildTubeIntoMesh 实现在此 ⑲</text>
+  <text x="928" y="780" class="m">用两个 file-static，所以搬不出去</text>
+  <text x="928" y="800" class="b">CSVineScatter.cpp（519 行）</text>
+  <text x="928" y="814" class="m">TActorIterator&lt;ACSGroundActor&gt; 反向依赖 TG</text>
+  <text x="928" y="834" class="m">TG 实际只用约 100 行入口；其余 5.3K 行</text>
+  <text x="928" y="848" class="m">无 TG 消费者（待拍板：删或留）</text>
+
+  <rect x="1380" y="710" width="250" height="184" rx="8" class="box"/>
+  <text x="1388" y="730" class="t">ACSStairsActor ×N（09-16）</text>
+  <text x="1388" y="746" class="m">玩家绘制楼梯（TG §4.1 MVP）</text>
+  <text x="1388" y="764" class="b">ACSTinyGlade 子类 + USplineComponent</text>
+  <text x="1388" y="778" class="m">样条点 = 楼梯点；点缩放 Y = 该端宽度</text>
+  <text x="1388" y="798" class="b">Ground：TActorIterator 取首个 + 订阅广播</text>
+  <text x="1388" y="812" class="m">变化盒与样条包围盒不相交就跳过</text>
+  <text x="1388" y="826" class="m">—— ChangedBounds 的第一个消费者</text>
+  <text x="1388" y="846" class="b">RebuildStairs：同步 SetInstances（阻塞）</text>
+  <text x="1388" y="860" class="m">砖表量化 0.1 cm 进哈希，没变就短路</text>
+  <text x="1388" y="880" class="m">纯函数层 CSStairs.h（门前踏步共用）</text>
+
+  <!-- 边：编辑器 → 函数库；房子 / 地面 → 编辑器（静态委托） -->
+  <path d="M420 152 H262" class="w"/>
+  <text x="268" y="132" class="n">PickHouse（悬停拾取）</text>
+  <text x="268" y="146" class="n">PlaceMarkerAlongRay</text>
+  <text x="268" y="168" class="n">← 窗笔刷落笔（EdMode）</text>
+  <path d="M480 340 V298" class="d"/>
+  <text x="488" y="314" class="nd">OnWindowBrushRequest /</text>
+  <text x="488" y="328" class="nd">OnResizeModeChanged 静态委托</text>
+  <path d="M980 340 V318 H740 V200 H722" class="d"/>
+  <text x="750" y="312" class="nd">OnGroundPaintEditorRequest 静态委托</text>
+
+  <!-- 边：函数库 ↔ 房子 -->
+  <path d="M260 230 H405 V360 H418" class="w"/>
+  <text x="268" y="210" class="n">PickHouse(Near) →</text>
+  <text x="268" y="224" class="n">RayHitWall / NearestWall</text>
+  <path d="M420 400 H385 V262 H262" class="w"/>
+  <text x="268" y="256" class="n">GetHouses：提交接缝时</text>
+  <text x="268" y="278" class="n">扫 world（TActorRange）</text>
+
+  <!-- 边：函数库 ↔ 标记 -->
+  <path d="M60 340 V298" class="w"/>
+  <text x="68" y="314" class="n">PickHouse(Near)</text>
+  <text x="68" y="328" class="n">拖动期每 tick</text>
+  <path d="M210 296 V338" class="w"/>
+  <text x="218" y="314" class="n">生成 +</text>
+  <text x="218" y="328" class="n">AdoptAnchor</text>
+
+  <!-- 边：标记 ↔ 房子 -->
+  <path d="M260 470 H418" class="w"/>
+  <text x="268" y="450" class="n">探针裁决 QueryFeatureReject</text>
+  <text x="268" y="464" class="n">→ RegisterFeatureMarker ⑪</text>
+  <text x="268" y="486" class="n">→ RequestReevaluate（合批）</text>
+  <text x="268" y="500" class="n">拖动期每帧一次，N 个合一 ⑨</text>
+  <path d="M420 550 H262" class="w"/>
+  <text x="268" y="530" class="n">NotifyMarkersRebuilt 每轮末</text>
+  <text x="268" y="544" class="n">ApplyHostVerdict 回执</text>
+  <text x="268" y="566" class="n">SnapToAnchor · Reanchor</text>
+  <text x="268" y="580" class="n">锚点副本回写 ⑫</text>
+
+  <!-- 边：房子 ↔ 接触记录（↔ 对端房子） -->
+  <path d="M418 646 H400 V770 H264" class="wb"/>
+  <text x="268" y="604" class="n">UpdateContacts（松手）：</text>
+  <text x="268" y="618" class="n">Classify(A,B) 生成记录，</text>
+  <text x="268" y="632" class="n">对端.ReceiveContactFrom</text>
+  <text x="268" y="686" class="n">对端只标脏、不反发；</text>
+  <text x="268" y="700" class="n">删除 / EndPlay 发空</text>
+  <text x="268" y="790" class="n">读：CutsFor(我) → 裁剪段；</text>
+  <text x="268" y="804" class="n">Owner()==我 才砌柱</text>
+
+  <!-- 边：房子 ↔ 地面 -->
+  <path d="M920 385 H722" class="d"/>
+  <text x="728" y="367" class="nd">OnGroundChanged 广播</text>
+  <text x="728" y="399" class="nd">→ HandleGroundChanged：只标脏 ⑨</text>
+  <text x="728" y="413" class="nd">未提交 ⇒ bInGroundDrag（接缝冻结）</text>
+  <path d="M720 455 H918" class="w"/>
+  <text x="728" y="437" class="n">SampleHeight / SampleRoadWeight</text>
+  <text x="728" y="469" class="n">落座 ≈120 + 门 ≈340 次 / 轮</text>
+  <path d="M720 520 H918" class="s"/>
+  <text x="728" y="512" class="ns">TActorIterator 取首个地面</text>
+  <text x="728" y="534" class="ns">+ OnGroundChanged.AddUObject</text>
+
+  <!-- 边：地面 ↔ 塑形物 -->
+  <path d="M1380 385 H1222" class="w"/>
+  <text x="1228" y="367" class="n">RegisterShaper ⑩ ·</text>
+  <text x="1228" y="379" class="n">RefreshHeightsInRegion</text>
+  <text x="1228" y="399" class="n">（拖动帧未提交）</text>
+  <path d="M1220 430 H1378" class="s"/>
+  <text x="1228" y="424" class="ns">ResolveShapers 世界扫描</text>
+  <path d="M1220 480 H1378" class="w"/>
+  <text x="1228" y="474" class="n">SampleShapeHeight</text>
+  <text x="1228" y="494" class="n">×4225 格 ×N 座 / 全域刷新</text>
+  <path d="M1380 525 H1222" class="s"/>
+  <text x="1228" y="540" class="ns">TActorIterator 取首个地面</text>
+
+  <!-- 边：地面 ↔ 楼梯 -->
+  <path d="M1220 600 H1300 V760 H1378" class="d"/>
+  <text x="1306" y="596" class="nd">OnGroundChanged 广播</text>
+  <text x="1306" y="610" class="nd">→ 与样条包围盒相交才同步重算</text>
+  <path d="M1380 872 H1250 V640 H1222" class="s"/>
+  <text x="1256" y="890" class="ns">取首个 + SampleHeight</text>
+
+  <!-- 边：房子 ↔ 抓手 -->
+  <path d="M460 656 V708" class="w"/>
+  <text x="468" y="676" class="n">EnterResizeMode：Spawn + Attach + Init</text>
+  <text x="468" y="690" class="n">每次事件 SnapResizeHandles ×(N+2)</text>
+  <path d="M706 708 V658" class="w"/>
+  <text x="714" y="676" class="n">PushEdge / PushHeight / PushBase</text>
+  <text x="714" y="690" class="n">NoteGizmoDrag + 立即重求值一次 ⑨</text>
+
+  <!-- 边：房子 → 遗留藤蔓；遗留 → 地面 -->
+  <path d="M720 620 H900 V780 H918" class="w"/>
+  <text x="728" y="600" class="n">CSVineTube::BuildTubeIntoMesh</text>
+  <text x="728" y="614" class="n">→ 焊在旧藤蔓文件末尾 ⑲</text>
+  <path d="M1000 710 V658" class="s"/>
+  <text x="1008" y="690" class="ns">CSVineScatter.cpp → TActorIterator 取首个</text>
+</svg>

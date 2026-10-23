@@ -1,0 +1,338 @@
+[
+  {
+    "case": "saved",
+    "view": "overview",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.0005537109375,
+    "rgb_max_absolute_error_8bit": 4,
+    "pixels_any_channel_over_2": 20,
+    "pixels_any_channel_different": 1410,
+    "pixel_percent_over_2": 0.001953125,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "saved",
+    "view": "surface",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.0005182291666666666,
+    "rgb_max_absolute_error_8bit": 5,
+    "pixels_any_channel_over_2": 16,
+    "pixels_any_channel_different": 1275,
+    "pixel_percent_over_2": 0.0015625,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "saved",
+    "view": "grazing",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 1.4973958333333333e-05,
+    "rgb_max_absolute_error_8bit": 2,
+    "pixels_any_channel_over_2": 0,
+    "pixels_any_channel_different": 31,
+    "pixel_percent_over_2": 0.0,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "valid-500",
+    "view": "overview",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.00010026041666666667,
+    "rgb_max_absolute_error_8bit": 2,
+    "pixels_any_channel_over_2": 0,
+    "pixels_any_channel_different": 264,
+    "pixel_percent_over_2": 0.0,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "valid-500",
+    "view": "surface",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.00022591145833333334,
+    "rgb_max_absolute_error_8bit": 4,
+    "pixels_any_channel_over_2": 8,
+    "pixels_any_channel_different": 548,
+    "pixel_percent_over_2": 0.00078125,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "valid-500",
+    "view": "grazing",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 1.6276041666666666e-05,
+    "rgb_max_absolute_error_8bit": 2,
+    "pixels_any_channel_over_2": 0,
+    "pixels_any_channel_different": 29,
+    "pixel_percent_over_2": 0.0,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "valid-800",
+    "view": "overview",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.0004931640625,
+    "rgb_max_absolute_error_8bit": 3,
+    "pixels_any_channel_over_2": 6,
+    "pixels_any_channel_different": 1322,
+    "pixel_percent_over_2": 0.0005859375,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "valid-800",
+    "view": "surface",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.0019274088541666667,
+    "rgb_max_absolute_error_8bit": 14,
+    "pixels_any_channel_over_2": 96,
+    "pixels_any_channel_different": 4242,
+    "pixel_percent_over_2": 0.009375,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "valid-800",
+    "view": "grazing",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 4.459635416666667e-05,
+    "rgb_max_absolute_error_8bit": 5,
+    "pixels_any_channel_over_2": 1,
+    "pixels_any_channel_different": 90,
+    "pixel_percent_over_2": 9.765625e-05,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-no-foam",
+    "view": "overview",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.0004069010416666667,
+    "rgb_max_absolute_error_8bit": 5,
+    "pixels_any_channel_over_2": 24,
+    "pixels_any_channel_different": 978,
+    "pixel_percent_over_2": 0.00234375,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-no-foam",
+    "view": "surface",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.0004905598958333333,
+    "rgb_max_absolute_error_8bit": 13,
+    "pixels_any_channel_over_2": 35,
+    "pixels_any_channel_different": 1053,
+    "pixel_percent_over_2": 0.0034179687500000004,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-no-foam",
+    "view": "grazing",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 1.4973958333333333e-05,
+    "rgb_max_absolute_error_8bit": 3,
+    "pixels_any_channel_over_2": 1,
+    "pixels_any_channel_different": 31,
+    "pixel_percent_over_2": 9.765625e-05,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-no-detail",
+    "view": "overview",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.0,
+    "rgb_max_absolute_error_8bit": 0,
+    "pixels_any_channel_over_2": 0,
+    "pixels_any_channel_different": 0,
+    "pixel_percent_over_2": 0.0,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-no-detail",
+    "view": "surface",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 3.255208333333333e-07,
+    "rgb_max_absolute_error_8bit": 1,
+    "pixels_any_channel_over_2": 0,
+    "pixels_any_channel_different": 1,
+    "pixel_percent_over_2": 0.0,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-no-detail",
+    "view": "grazing",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.0,
+    "rgb_max_absolute_error_8bit": 0,
+    "pixels_any_channel_over_2": 0,
+    "pixels_any_channel_different": 0,
+    "pixel_percent_over_2": 0.0,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-texture-simulation",
+    "view": "overview",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 7.8125e-06,
+    "rgb_max_absolute_error_8bit": 1,
+    "pixels_any_channel_over_2": 0,
+    "pixels_any_channel_different": 22,
+    "pixel_percent_over_2": 0.0,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-texture-simulation",
+    "view": "surface",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.0006536458333333333,
+    "rgb_max_absolute_error_8bit": 10,
+    "pixels_any_channel_over_2": 24,
+    "pixels_any_channel_different": 1663,
+    "pixel_percent_over_2": 0.00234375,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-texture-simulation",
+    "view": "grazing",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 6.803385416666667e-05,
+    "rgb_max_absolute_error_8bit": 2,
+    "pixels_any_channel_over_2": 0,
+    "pixels_any_channel_different": 183,
+    "pixel_percent_over_2": 0.0,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-texture-no-wpo",
+    "view": "overview",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 7.8125e-06,
+    "rgb_max_absolute_error_8bit": 1,
+    "pixels_any_channel_over_2": 0,
+    "pixels_any_channel_different": 22,
+    "pixel_percent_over_2": 0.0,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-texture-no-wpo",
+    "view": "surface",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.0006536458333333333,
+    "rgb_max_absolute_error_8bit": 10,
+    "pixels_any_channel_over_2": 24,
+    "pixels_any_channel_different": 1663,
+    "pixel_percent_over_2": 0.00234375,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-texture-no-wpo",
+    "view": "grazing",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 6.803385416666667e-05,
+    "rgb_max_absolute_error_8bit": 2,
+    "pixels_any_channel_over_2": 0,
+    "pixels_any_channel_different": 183,
+    "pixel_percent_over_2": 0.0,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-distortion-off",
+    "view": "overview",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.0005511067708333334,
+    "rgb_max_absolute_error_8bit": 5,
+    "pixels_any_channel_over_2": 18,
+    "pixels_any_channel_different": 1453,
+    "pixel_percent_over_2": 0.0017578124999999998,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-distortion-off",
+    "view": "surface",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.0006103515625,
+    "rgb_max_absolute_error_8bit": 12,
+    "pixels_any_channel_over_2": 29,
+    "pixels_any_channel_different": 1387,
+    "pixel_percent_over_2": 0.0028320312500000003,
+    "aa_control_max_error_8bit": 0
+  },
+  {
+    "case": "variant-distortion-off",
+    "view": "grazing",
+    "size": [
+      1280,
+      800
+    ],
+    "rgb_mean_absolute_error_8bit": 0.00010026041666666667,
+    "rgb_max_absolute_error_8bit": 3,
+    "pixels_any_channel_over_2": 1,
+    "pixels_any_channel_different": 247,
+    "pixel_percent_over_2": 9.765625e-05,
+    "aa_control_max_error_8bit": 0
+  }
+]

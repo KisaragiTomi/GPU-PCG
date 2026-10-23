@@ -1,0 +1,196 @@
+<svg viewBox="0 0 1500 876" width="1500" height="876" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Microsoft YaHei, sans-serif">
+  <defs>
+    <pattern id="pickable-domain-cross-bg" patternUnits="userSpaceOnUse" width="12" height="12">
+      <rect width="12" height="12" fill="#e0e7ff"/>
+      <path d="M0 6H12" stroke="#4f46e5" stroke-width="1" opacity="0.316770"/>
+      <path d="M6 0V12" stroke="#4f46e5" stroke-width="1" opacity="0.316770"/>
+    </pattern>
+    <pattern id="untracked-dot-bg" patternUnits="userSpaceOnUse" width="8" height="8">
+      <rect width="8" height="8" fill="#ffe4e6"/>
+      <circle cx="4" cy="4" r="1.6" fill="#be123c" opacity="0.242857"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#334155"/>
+    </marker>
+    <marker id="arrow-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#dc2626"/>
+    </marker>
+  </defs>
+  <style>
+    .lane      { fill:none; stroke:#cbd5e1; stroke-width:1; stroke-dasharray:4 4; }
+    .box       { fill:#f8fafc; stroke:#94a3b8; stroke-width:1.2; }
+    .ext       { fill:#f8fafc; stroke:#94a3b8; stroke-width:1.2; stroke-dasharray:6 4; }
+    .core      { fill:url(#pickable-domain-cross-bg); stroke:#4f46e5; stroke-width:1.4; }
+    .untracked { fill:url(#untracked-dot-bg); stroke:#be123c; stroke-width:1.4; }
+    .bad       { fill:#fff1f2; stroke:#dc2626; stroke-width:1.6; }
+    .h  { font-size:13px; font-weight:700; fill:#0f172a; }
+    .t  { font-size:12px; font-weight:600; fill:#0f172a; }
+    .b  { font-size:10px; fill:#334155; }
+    .m  { font-size:10px; fill:#64748b; }
+    .r  { font-size:10px; font-weight:600; fill:#b91c1c; }
+    .w  { stroke:#334155; stroke-width:1.5; fill:none; marker-end:url(#arrow); }
+    .wr { stroke:#dc2626; stroke-width:1.5; fill:none; marker-end:url(#arrow-r); }
+  </style>
+
+  <text x="20" y="34" font-size="20" font-weight="700" fill="#0f172a">TinyGlade 复刻：撤销链路（一次细节面板改 FootprintSize 的记录、回放与扇出）· 按 2026-09-18 代码</text>
+  <text x="20" y="56" class="m" font-size="12px">读法：三栏从左到右是时间顺序；引擎行号为 UE 5.7.4；红框 / 红字 = 失同步发生处；底栏是事务看不见的状态，撤销后仍保持撤销前的值。括号里的 26 / 27 = Review_Structure.md 深挖 G 小节号，C3 / C4 … = 附录 C 编号</text>
+
+  <!-- 三条泳道 -->
+  <rect x="14" y="70" width="420" height="500" rx="6" class="lane"/>
+  <rect x="470" y="70" width="488" height="500" rx="6" class="lane"/>
+  <rect x="984" y="70" width="502" height="500" rx="6" class="lane"/>
+  <text x="20" y="92" class="h">① 记录期：细节面板把 FootprintSize.X 600 → 1000</text>
+  <text x="476" y="92" class="h">② Ctrl+Z：FTransaction::Apply（EditorTransaction.cpp:814–957）</text>
+  <text x="990" y="92" class="h">③ 插件钩子的扇出：同一次 Ctrl+Z 三次进 ReevaluateSite</text>
+
+  <!-- ① 记录期 -->
+  <rect x="20" y="104" width="406" height="58" rx="4" class="box"/>
+  <text x="30" y="122" class="t">房子 Modify()（属性编辑的 PreEditChange）</text>
+  <text x="30" y="138" class="b">FTransaction::SaveObject（:701–717）按对象去重 ⇒ 记录 #1 = 房子</text>
+  <text x="30" y="152" class="b">记下全部 UPROPERTY（Transient 也进，NonTransactional 不进）</text>
+  <path class="w" d="M223 162V176"/>
+
+  <rect x="20" y="176" width="406" height="72" rx="4" class="box"/>
+  <text x="30" y="194" class="t">房子 PostEditChangeProperty → 构造脚本 → ReevaluateSite</text>
+  <text x="30" y="210" class="b">AActor::PostEditChangeProperty（ActorEditor.cpp:172–243，原生类也放行）：</text>
+  <text x="30" y="224" class="b">Unregister → RerunConstructionScripts → Reregister</text>
+  <text x="30" y="238" class="b">⇒ 构造脚本 + 再登记各进一次 ReevaluateSite（中等问题 6 的「两次」）</text>
+  <path class="w" d="M223 248V262"/>
+
+  <rect x="20" y="262" width="406" height="72" rx="4" class="box"/>
+  <text x="30" y="280" class="t">ReanchorMarkersToPreserveWorld（CSHouseActor.cpp:372）</text>
+  <text x="30" y="296" class="b">bMarkerRefValid &amp;&amp; bGeomChanged ⇒ 锚点重表达到新墙上（世界位置守恒）</text>
+  <text x="30" y="310" class="r">随后 MarkerRef*（Footprint / Thickness / Build）← 新值：非 UPROPERTY</text>
+  <text x="30" y="324" class="b">不进任何记录（CSHouseActor.h:2254–2257；见底栏）</text>
+  <path class="w" d="M223 334V348"/>
+
+  <rect x="20" y="348" width="406" height="72" rx="4" class="box"/>
+  <text x="30" y="366" class="t">标记 Reanchor() → Modify()（CSHouseFeatureMarker.h:142）</text>
+  <text x="30" y="382" class="b">标记由 PlaceMarkerAlongRay 生成（CSHouseLibrary.cpp:118），</text>
+  <text x="30" y="396" class="b">默认 FActorSpawnParameters ⇒ RF_Transactional（子系统 09-16 已删）</text>
+  <text x="30" y="410" class="b">⇒ 记录 #2 = 标记；记录序 = 首次 Modify() 序 = [房子, 标记]</text>
+
+  <rect x="20" y="432" width="406" height="72" rx="4" class="ext"/>
+  <text x="30" y="450" class="t">对照：抓手拉尺寸 / 调墙高 / 调房底（26 / C1）</text>
+  <text x="30" y="466" class="b">PushEdge / PushHeight / PushBase 直写尺寸、墙高、房底与位置，零 Modify()；</text>
+  <text x="30" y="480" class="b">抓手 RF_Transient（:1372）；gizmo 只 Modify 被拖 actor 及其 attach 子级</text>
+  <text x="30" y="494" class="r">⇒ 事务里只有记录 #2（标记），根本没有房子：Ctrl+Z 只回滚窗的锚点</text>
+
+  <!-- ① → ② -->
+  <path class="w" d="M426 377H452V140H476"/>
+  <text x="452" y="128" text-anchor="middle" class="r">Ctrl+Z</text>
+
+  <!-- ② Apply -->
+  <rect x="476" y="104" width="476" height="72" rx="4" class="box"/>
+  <text x="486" y="122" class="t">1. 逐记录 PreEditUndo()（:848–880，Inc = −1，从记录 #2 往前）</text>
+  <text x="486" y="138" class="b">房子、标记都没有覆写 —— 这正是清 MarkerRef* 的位置（27 建议）</text>
+  <text x="486" y="152" class="b">DeadToAlive 的对象在此 MarkAsGarbage()（:877）：笔刷落笔的 spawn 撤销停在这一步，</text>
+  <text x="486" y="166" class="b">不走 DestroyActor ⇒ 标记的 Destroyed / EndPlay 都不来（27 / C6）</text>
+  <path class="w" d="M714 176V190"/>
+
+  <rect x="476" y="190" width="476" height="58" rx="4" class="box"/>
+  <text x="486" y="208" class="t">2. Load + Restore 全部记录（:890–899）</text>
+  <text x="486" y="224" class="b">FootprintSize ← 600、房子变换 ← 旧；标记 Anchor ← 旧、变换 ← 旧</text>
+  <text x="486" y="238" class="b">全部对象都恢复完毕之后，才有任何一个 PostEditUndo 通知</text>
+  <path class="w" d="M714 248V262"/>
+
+  <rect x="476" y="262" width="476" height="58" rx="4" class="box"/>
+  <text x="486" y="280" class="t">3. KeyStableSort（:905）</text>
+  <text x="486" y="296" class="b">组件排到所属 actor 之前；actor 之间保持记录逆序</text>
+  <text x="486" y="310" class="b">⇒ 通知序 = [标记, 房子]</text>
+  <path class="w" d="M714 320V334"/>
+
+  <rect x="476" y="334" width="476" height="72" rx="4" class="box"/>
+  <text x="486" y="352" class="t">4. 逐个 PostEditUndo（:929–957）</text>
+  <text x="486" y="368" class="b">先标记（记录 #2）、后房子（记录 #1）</text>
+  <text x="486" y="382" class="r">顺序由首次 Modify() 的次序决定，不是「不由代码决定」（订正主文第 12 条）</text>
+  <text x="486" y="396" class="b">Inc *= −1（:1008）⇒ 重做时正序</text>
+
+  <rect x="476" y="428" width="476" height="58" rx="4" class="ext"/>
+  <text x="486" y="446" class="t">对照：撤销不走 PostEditMove，但走 PostEditChangeProperty（属性为空）</text>
+  <text x="486" y="462" class="b">PostEditUndo → PostEditChange()（Obj.cpp:847–851）→ PostEditChangeProperty(nullptr)</text>
+  <text x="486" y="476" class="b">房子 / 地面的 PostEditUndo 注释只写了前半句（27 / C4；房子那处 09-10 已改）</text>
+
+  <!-- ② → ③ -->
+  <path class="w" d="M952 366H968V140H990"/>
+  <text x="972" y="134" class="b">先</text>
+  <path class="w" d="M952 388H978V219H990"/>
+  <text x="981" y="213" class="b">后</text>
+
+  <!-- ③ 扇出 -->
+  <rect x="990" y="104" width="490" height="72" rx="4" class="box"/>
+  <text x="1000" y="122" class="t">标记 PostEditUndo（CSHouseFeatureMarker.cpp:173）</text>
+  <text x="1000" y="138" class="b">Super 先走 PostEditChange() → 本类 PostEditChangeProperty(空)（:237）</text>
+  <text x="1000" y="152" class="b">→ HandleDrag(false) 从当前变换重新射线、覆写刚恢复的 Anchor（C9）</text>
+  <text x="1000" y="166" class="b">再 RegisterAnchor → 房子 RegisterFeatureMarker → RequestReevaluate：只置脏</text>
+  <path class="w" d="M1235 176V190"/>
+
+  <rect x="990" y="190" width="490" height="58" rx="4" class="box"/>
+  <text x="1000" y="208" class="t">房子 PostEditUndo（CSHouseActor.cpp:4894）→ Super::PostEditUndo()</text>
+  <text x="1000" y="224" class="b">UObject::PostEditUndo → PostEditChange() → PostEditChangeProperty(空属性)</text>
+  <text x="1000" y="238" class="b">→ Unregister → RerunConstructionScripts → Reregister（ActorEditor.cpp:172–243）</text>
+  <path class="wr" d="M1235 248V262"/>
+
+  <rect x="990" y="262" width="490" height="100" rx="4" class="bad"/>
+  <text x="1000" y="280" class="t">基类 OnConstruction（CSTinyGlade.cpp:275）→ ReevaluateSite #1（27 / C3）</text>
+  <text x="1000" y="296" class="b">入口清掉标记置的脏，先跑 ReanchorMarkersToPreserveWorld：</text>
+  <text x="1000" y="310" class="b">FootprintSize 已是旧值 600，MarkerRefFootprint 仍是新值 1000（底栏）</text>
+  <text x="1000" y="324" class="b">⇒ bGeomChanged（CSHouseActor.cpp:379–380）</text>
+  <text x="1000" y="338" class="r">⇒ 把已恢复的旧锚点当「新墙上的锚点」再重表达一次 ⇒ 窗沿墙滑</text>
+  <text x="1000" y="352" class="b">之后 MarkerRef* ← 旧值，参照系「有效」了：后两次重求值都不再纠正</text>
+  <path class="w" d="M1235 362V376"/>
+
+  <rect x="990" y="376" width="490" height="36" rx="4" class="core"/>
+  <text x="1000" y="399" class="t">PostRegisterAllComponents（CSHouseActor.cpp:4805）→ ReevaluateSite #2</text>
+  <path class="w" d="M1235 412V426"/>
+
+  <rect x="990" y="426" width="490" height="58" rx="4" class="core"/>
+  <text x="1000" y="444" class="t">回到覆写本体：再 ReevaluateSite #3（27 / C4）</text>
+  <text x="1000" y="460" class="b">覆写注释 09-10 已改对；地面那处仍写「不保证跑构造脚本」</text>
+  <text x="1000" y="474" class="b">09-07 是四次：标记那次 09-10 起只置脏；房子这三次仍全部同步</text>
+
+  <!-- 底栏：事务看不见的状态 -->
+  <rect x="14" y="586" width="1472" height="226" rx="6" class="untracked"/>
+  <text x="24" y="608" class="h">事务看不见的状态：撤销后仍是撤销前的值（附录 C 状态分类表里「一致？＝否 / 部分」的那些行）</text>
+
+  <text x="24" y="634" class="t">房子（ACSHouseActor）</text>
+  <text x="24" y="652" class="b">MarkerRefFootprint / MarkerRefThickness / MarkerRefBuild / bMarkerRefValid</text>
+  <text x="24" y="666" class="r">非 UPROPERTY（.h:2254–2257）—— 27 / C3 的根因，缺 PreEditUndo</text>
+  <text x="24" y="686" class="b">MarkerWindows（登记表）—— 非 UPROPERTY；撤销 spawn 后 garbage 标记</text>
+  <text x="24" y="700" class="b">还能重新登记进来，NotifyMarkersRebuilt 到一轮末尾才按 IsStale 清（C6）</text>
+  <text x="24" y="720" class="b">FHandoverCache / *DescHash / Current* —— 非 UPROPERTY；靠 HasInstanceSourceGPU()</text>
+  <text x="24" y="734" class="b">与 bForceFullRebuild 兜底，撤销后第一次重求值全量对齐</text>
+  <text x="24" y="754" class="b">FootprintSize / FootprintShape / WallHeight / HeightOffset（抓手路）——</text>
+  <text x="24" y="768" class="b">UPROPERTY 但从未 Modify() ⇒ 没进记录（26）</text>
+  <text x="24" y="788" class="b">Contacts / LastSeamKey / bIn*Drag（09-16 接触记录）—— 非 UPROPERTY、不进事务；</text>
+  <text x="24" y="802" class="b">撤销后第一次重求值 ComputeSeamKey ≠ LastSeamKey ⇒ 向新旧对端重发，接缝自愈 ✔</text>
+
+  <text x="520" y="634" class="t">持久记忆（NonTransactional，有意豁免）</text>
+  <text x="520" y="652" class="b">DoorRunMemory / PierSpanIsPier（CSHouseActor.h:2513, 2523）</text>
+  <text x="520" y="666" class="b">撤销后三次重求值继承的是撤销「期间」写进去的状态 ⇒ 收敛到操作后的迟回态，</text>
+  <text x="520" y="680" class="b">不是操作前的画面（已知但不算结构问题；修法：PostEditUndo 先清再算）</text>
+  <text x="520" y="700" class="b">Mirror（地面高度 / 颜色，CSGroundActor.h）</text>
+  <text x="520" y="714" class="b">撤销一次格数 / 格距改动 ⇒ PostEditUndo 的 EnsureMirrorInitialized 判错配</text>
+  <text x="520" y="728" class="r">⇒ 镜像重置为平地 + 底色、此后所画全丢、且不 MarkPackageDirty（27）</text>
+
+  <text x="1010" y="634" class="t">跨 actor 登记与句柄</text>
+  <text x="1010" y="652" class="b">标记 Host —— Transient；权威是 attach 父，恢复路被 RF_WasLoaded 闸住（28 / C2）</text>
+  <text x="1010" y="666" class="b">房子 GroundChangedHandle —— 以句柄是否有效代替「订阅的是哪块地面」（29 / C7）</text>
+  <text x="1010" y="680" class="b">HouseId —— NonPIEDuplicateTransient + 注册时查重，复制撞键已修（13，09-16）</text>
+  <text x="1010" y="694" class="m">原子系统 Tracked（FGuid → 弱引用）随 UCSHouseSubsystem 删除；名单 = TActorRange</text>
+  <text x="1010" y="714" class="b">标记 bHasBeenPlaced —— 只由已退役的 AddActor 路置位（28 / C13）</text>
+  <text x="1010" y="734" class="b">抓手 ResizeHandles —— Transient；抓手 actor 不存盘，重开关卡后模式静默消失</text>
+  <text x="1010" y="754" class="m">完整归类见附录 C「状态分类表」；六条路径 × 钩子见附录 C「钩子对称性矩阵」</text>
+
+  <!-- 图例 -->
+  <rect x="20" y="836" width="26" height="14" class="core"/>
+  <text x="52" y="847" class="b">房子进入 ReevaluateSite（全量重求值）</text>
+  <rect x="290" y="836" width="26" height="14" class="bad"/>
+  <text x="322" y="847" class="b">失同步发生处</text>
+  <rect x="440" y="836" width="26" height="14" class="untracked"/>
+  <text x="472" y="847" class="b">事务看不见的状态</text>
+  <rect x="620" y="836" width="26" height="14" class="ext"/>
+  <text x="652" y="847" class="b">对照 / 备注</text>
+  <path class="w" d="M760 843H800"/>
+  <text x="808" y="847" class="b">调用 / 时间顺序</text>
+</svg>

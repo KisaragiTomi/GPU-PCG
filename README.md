@@ -68,7 +68,7 @@ GPU procedural content generation (PCG) tools for Unreal Engine 5.7: procedural 
 
 > 调试宏 `PCGPLUGINS_DEBUG` 由 `ComputeShaderGenerator` / `GeometryScriptExtraEditor` / `PCGEditorProcess` 三个 Build.cs 定义，非 Shipping 为 1。**编译期**可用环境变量 `PCGPLUGINS_DEBUG=0` 关掉：它由 UBT 读取，不是运行时开关；Shipping 下 `PCGPLUGINS_DEBUG_ENABLED` 恒为 0，设成 1 也没用。头文件 `PCGPluginDebug.h` 在 `Source/ComputeShaderGenerator/` 的 `Public/` 与 `Private/` 各有一份，内容逐字相同。
 
-> 🧩 **GPU 网格产出统一**：MeshGenerator / Road / Vine 三条 GPU 三角形产出先向共享 `SceneProxy` 基类下沉、汇入同一处 readback / 存盘 → `UStaticMesh` 的数据流（[`Docs/GpuTriangleBuffer_Unification_Flow.svg`](Docs/GpuTriangleBuffer_Unification_Flow.svg)）；此后进一步对象化为「`UCSMesh` 网格对象 + `UCSMeshOps` 算子库 + `UCSMeshRenderComponent` 渲染组件」，见下方核心功能第 1 节。
+> 🧩 **GPU 网格产出统一**：当前采用 `UCSMesh` 网格对象、`UCSMeshOps` 算子库与 `UCSMeshRenderComponent` 渲染组件；接口与数据流见下方核心功能第 1 节。
 
 ---
 
@@ -174,7 +174,7 @@ GPU procedural content generation (PCG) tools for Unreal Engine 5.7: procedural 
 - **光追 BLAS**（2026-09-09）：`FCSGpuMeshSceneProxy` 给每个 `UCSMeshRenderComponent`（含 `URoadMeshComponent`）建底层加速结构，每个 section 一段，让硬件 Lumen、光追阴影与光追反射看得见 GPU 常驻网格。本工程的 Lumen 走硬件光追、追的是 TLAS，给 GPU mesh 写距离场对它没用——代理也一直关着距离场表示。开关是 `r.CSGpuMesh.RayTracing`（默认 1），`CSGpuMesh.DumpRayTracing` 打印现状。
 - BLAS 的三角数只能来自 CPU（RHI 没有 indirect BLAS build），所以它跟着 `FCSMeshResident` 的 draw-args 回读镜像走：每次拥有图的编辑结束都请求一次 args 回读，落地时 `GetDrawArgsPublishSerial()` +1，proxy 在 `OnEndFrameRT` 泵里比对 serial 决定是否重建。回读在途时旧 BLAS 保留；连续逐帧编辑时新请求会顶掉在途的那份，所以编辑停下才重建，天然限流。重建是全量 fast build，不走 refit，也不进帧预算。
 - ⚠️ Index 流的最终访问状态必须含 `SRVMask`（现为 `VertexOrIndexBuffer | SRVMask`）：BLAS 构建按 SRV 读输入，RHI 不会替你转换。
-- 实例化叶子（`BaseMesh` 没开 Nanite 时的 GPU 剔除路）不建 BLAS（`WantsRayTracingGeometry() = false`）：它的流里只有一份源网格，实例变换在 GPU buffer 里，单实例 BLAS 会在原点冒出一个幻影。所以门框砖、瓦、草这类实例化产物目前都不在 TLAS 里。
+- 实例化叶子的经典 GPU 剔除路不建 BLAS（`WantsRayTracingGeometry() = false`）：流里只有一份源网格，实例变换在 GPU buffer 中，单实例 BLAS 会在原点产生幻影。该限制只针对经典路；`BaseMesh` 启用 Nanite 后的光追由引擎处理，具体路径见下一节。
 - 没有 surface cache（proxy 只有 dynamic relevance，做不了 card capture），GPU mesh 在 Lumen 里「能遮挡、命中点发黑」；反射可开 `r.Lumen.Reflections.HardwareRayTracing.HitLighting=1` 补色。
 - **VSM 阴影**（2026-09-08 修）：非 Nanite 的 VSM 光栅会把每个 batch 送进 GPU-Scene 实例剔除，那条路按 `NumPrimitives` 重建 indirect args，而带 `IndirectArgsBuffer` 的 batch `NumPrimitives` 必须为 0——结果画 0 个索引，表现为 CSM 有影、VSM 没影。现在阴影深度视图改发**直接绘制**，计数取自 draw-args 的 CPU 镜像 `FCSGpuDrawArgs`（镜像还没落地时退回间接形式），其它视图仍是精确的间接绘制。实例化叶子的 GPU 剔除路 VSM 阴影仍未修，会被 VSM 的准入检查拒掉（`BaseMesh` 开了 Nanite 的走 Nanite 路，有 VSM 阴影）。
 - 📖 [`Docs/GpuMeshRayTracing.md`](Docs/GpuMeshRayTracing.md)；测试 `GpuMeshObject.RayTracingGeometry`（要真 RHI）与 `GpuMeshObject.DrawArgsMirror`。
@@ -212,7 +212,7 @@ GPU procedural content generation (PCG) tools for Unreal Engine 5.7: procedural 
 
 GPU 实例化叶子的用户（每个组件各持一份 `InstancedGpuMesh`）：地面的石阶 / 石阶卵石 / 裙边摆件 / 地被，房屋的门框砖（接缝、角石、包边、砖墙共用这一个组件）/ 承重柱砖 / 藤蔓枝叶花 / 屋瓦 / 摆件，以及 PointBrush 的实例显示。房屋的尖顶、门扇与窗的预制网格是普通 `UStaticMeshComponent`，不在这一层。
 
-- 📖 设计与落地计划：[`Docs/GpuTriangleUnified_Plan.md`](Docs/GpuTriangleUnified_Plan.md)；架构图 [`Docs/GpuTriangleUnified_Architecture.svg`](Docs/GpuTriangleUnified_Architecture.svg)、数据流 [`Docs/GpuTriangleBuffer_Unification_Flow.svg`](Docs/GpuTriangleBuffer_Unification_Flow.svg)
+- 📖 设计与落地计划：[`Docs/GpuTriangleUnified_Plan.md`](Docs/GpuTriangleUnified_Plan.md)；当前对象与数据流见本节。
 - 🧪 自动化测试（`Source/ComputeShaderGenerator/Private/Tests/`）：`CSGpuMeshObjectTests`（对象 / 编辑 / 桥接口径）、`CSGpuInstancedMeshTests`、`CSGpuInstancedNaniteTests`（Nanite 路：按资产自动选路、真渲染一帧从深度图数实例）、`CSGpuMemoryBudgetTests`、`CSDirectMeshSaveTests`、`CSMeshBooleanParityTests`；全部测试组与跑法见 [自动化测试](#自动化测试)
 
 ### 2. GPU 浅水模拟 · Shallow Water
@@ -221,6 +221,10 @@ GPU 实例化叶子的用户（每个组件各持一份 `InstancedGpuMesh`）：
 
 - 核心 Actor `ACSShallowWaterCapture`（`ComputeShaderGenerator`）本身**不 Tick**：求解由 `StartSolver(TimerRate, Iteration)` 挂在世界 `TimerManager` 上定时驱动，`StopSolver` 停止。`StartSolver` 带参数，细节面板不会给它出按钮，编辑器里从蓝图或下面的 `StartSWSolver` 调。
 - 配套蓝图库 `UCSShallowWaterProcess`（`PCGEditorProcess`）负责保存 / 烘焙 / 调试：`SaveSWData`、`StartSWSolver` / `StopSWSolver`（转发到上面两个）、`DebugDumpSWPassResults` 等。
+- `ApplyResultMeshToSimulation()`（蓝图调用 / 细节面板 `ComputeShader|Bake` 按钮）按当前 `ReusltMesh` 的实际顶点位置和 CSSW 顶点色覆盖整个模拟；组件挂预览网格时改取 `BakedResultMesh`，可在求解运行中调用。需要保留 `SimulationPreviewMesh` 或现有 SimVis 预览瓦片。
+  GPU 光栅化水面并对重叠处取最高层，按当前捕获的地面计算水深；恢复流速、湿润覆盖和泡沫，同时替换显示结果、平滑地面及活跃 tile。支持组件变换和组件顶点色覆盖，无颜色时恢复为静水。未覆盖 / 无地形 / 低于地面的单元清为空水，不与旧模拟混合。
+  求解器保持原来的运行 / 暂停状态，并支持没有水源 Actor 时继续演化。该功能根据网格重建状态，顶点色有 8 位量化，旧瀑布地面修正与干区湿润历史不在网格中，不能当作逐位恢复的模拟检查点。
+  实现：`CSShallowWaterRestore.cpp` / `Shaders/Private/ShallowWaterRestore.usf`。2026-10-15 验证：Rider 首个 `Development_Editor / x64` 配置的完整 Editor 构建及 DLL 链接通过；补齐 UE 必需的 `Platform.ush` 后，目标项目 D3D12 / SM6 全局着色器编译和绑定通过。完整编辑器帧循环中的临时场景 GPU 回读确认：10 cm 水深、零流速、未覆盖区域清空、世界湿润高度、活跃 tile 及无水源继续求解均正确。另有实际 HLSL 的 18 个 D3D11 WARP 用例通过；这些小场景测试不代替复杂烘焙网格的场景验收。
 - 体素地形变体 `ACSShallowWaterVoxelCapture` 目前只有骨架（`BuildTerrainVoxelGrid()` 未实现），[`Docs/ShallowWater_VoxelGridBuild_Flow.svg`](Docs/ShallowWater_VoxelGridBuild_Flow.svg) 是它的构建流程图。
 - Shader：[`Shaders/Private/ShallowWater.usf`](Shaders/Private/ShallowWater.usf)（含 `SparseTileDispatch.ush`）
 - C++：`ComputeShaderShallowWater.cpp` / `CSShallowWaterProcess.cpp`
@@ -244,9 +248,8 @@ AVineContainer::GenerateVineGPU()          # 录完图即返回（"已递交"）
 - 其它入口：`EnsureVineGeometry()`（幂等补建——GPU 数据不存盘，关卡加载后靠它重新生成）、`Clean()`、`FetchFoliage()` / `RevertFoliage()`、`SaveStaticmesh()`。
 - Shader：`SpaceColonizationQueue.usf`、`VVVoxel.usf`（含把 GPU 计数换算成派发参数的 `VineDispatchArgsCS`）、`VineFrameCommon.ush`、`VinePerlinNoise.ush`。
 - 编辑器交互：旧的藤蔓专用视口面板已泛化为 `FViewEditCategoryViewportOverlay`（见第 7 节），按钮移到了蓝图侧。
-- 📖 现状与剩余计划见 [`Docs/VineGpuResidency.md`](Docs/VineGpuResidency.md)。[`VisVineGPU_AlgorithmFlow.svg`](Docs/VisVineGPU_AlgorithmFlow.svg)、[`VisVineGPU_Pipeline.svg`](Docs/VisVineGPU_Pipeline.svg) 与下图都画于 2026-07-23 GPU 常驻化之前（那时 SC 结果和网格还要回读、网格落在 `UDynamicMesh`），只当算法示意看。
+- 📖 现状与剩余计划见 [`Docs/VineGpuResidency.md`](Docs/VineGpuResidency.md)。
 
-[![SpaceColonization](Docs/SpaceColonizationCS.preview.png)](Docs/SpaceColonizationCS.svg)
 
 ### 4. Geometry Script 扩展节点库
 
@@ -291,18 +294,18 @@ AVineContainer::GenerateVineGPU()          # 录完图即返回（"已递交"）
 
 以 Tiny Glade 为原型的交互式场景搭建：在地面上画路，房子沿路自动开门拱；堆起土台，房子跟着落座、悬空处长出承重柱；两栋房相交，交点立接缝砖柱；用窗笔刷在墙上点一下就挂上一扇窗。整套系统建在第 1 节的 CSMesh 家族上，运行时代码全部在 `ComputeShaderGenerator`；笔刷 EdMode、拉尺寸的失选监听等编辑器应答在 `PCGEditorProcess`（运行时只广播请求，零编辑器依赖，所以无头测试能走完整条交互）。
 
-![Tiny Glade — L_HouseGroundDemo 编辑器视口](Docs/Result/TinyGladeHouseGround.png)
+![Tiny Glade — 最新屋顶与场景结果](Docs/TinyGlade/img/roof-reference-20260930-demo.png)
 
-> `L_HouseGroundDemo` 编辑器视口（2026-09-10）：四坡瓦顶与尖顶、窗、门拱与门扇、藤蔓、墙面灰泥剥落、角石、承重柱，塑形物土台上的岩壳与石阶，以及摆件和草花地被。
+> `L_HouseGroundDemo` 重新加载验证（2026-09-30）：第二轮屋顶收口、逐瓦裁剪与 Grey 配色，House_Pillar / House_Road 为 210 / 357 片。详见 [屋顶文档](Docs/TinyGlade/Roof_TerraceAndRidge.md)。
 
 | ![样条墙 — 默认 L 形：压顶与垛口、墙端砖柱、两面爬藤](Docs/Result/TinyGladeSplineWall_L.jpg) | ![样条墙 — S 形弯墙：夹角大处是圆滑的墙，墙顶砖一段到底](Docs/Result/TinyGladeSplineWall_Curve.jpg) |
 |---|---|
 
 > 样条墙 `ACSWallActor`（2026-09-22）：左为默认 L 形（直角处是拐角，外侧出角石），右为控制点全是 Curve 的 S 形弯墙。
 
-![草的近 / 远两档](Docs/Result/TinyGladeGrassLod.jpg)
+![最新 Nanite 草花地被](Docs/TinyGlade/img/cover-nanite-20260929-usercam.png)
 
-> 地被的近 / 远两档（2026-09-23，关掉花只看草）：上图是改之前 —— 100 万根的预算摊在 512 m 见方的地面上，密度被自动退让到 4 株/m²，近处稀得见土；下图是改之后 —— 相机周围一块 140 m 见方的窗口里按满密度 50 株/m² 撒 98.2 万根**单根草**（跟着相机走，挪动只重撒不交接），60 m 之外换成 39.4 万簇**组合草**（`SM_TG_GrassClump`，材质不做 WPO、风只扰动法线），交界处两档按逐株随机数在 15 m 过渡带里互补，画面上看不到圈。
+> 地被最终验收（2026-09-29）：草花走 Nanite 实例路径，花色与聚散已调整；近景与俯视结果见 [地被文档](Docs/TinyGlade/Ground_Cover.md)。
 
 | 类 | 角色 | 头文件 |
 |---|---|---|
@@ -314,8 +317,8 @@ AVineContainer::GenerateVineGPU()          # 录完图即返回（"已递交"）
 | `ACSHouseResizeHandleActor` / `ACSHouseHeightHandleActor` | 拉尺寸抓手：footprint 每条边一个锥子推拉墙面，外加檐口 / 房底两个高度框（改墙高 / 底动顶不动）；公共基类 `ACSHouseHandleActor`，用编辑器原生 gizmo 拖 | [`CSHouseResizeHandleActor.h`](Source/ComputeShaderGenerator/Public/CSHouseResizeHandleActor.h) |
 | `UCSHouseLibrary` | 静态函数库、无状态：房屋名单 `GetHouses`（`TActorRange` 按 GUID 升序，没有登记表）、`PickHouse` / `PickHouseNear` 解析拾取、点击放窗的执行面 `PlaceMarkerAlongRay`。取代 2026-09-16 删除的 `UCSHouseSubsystem` | [`CSHouseLibrary.h`](Source/ComputeShaderGenerator/Public/CSHouseLibrary.h) |
 | `ACSStairsActor` | 玩家绘制楼梯（TG §4.1 的 MVP）：默认带样条组件，按 50 cm 弧长重采样出级，踏步块底下按层砌砖到地面；订阅地面广播，只在变更盒与样条包围盒相交时重算 | [`CSStairsActor.h`](Source/ComputeShaderGenerator/Public/CSStairsActor.h) |
-| `ACSWallBase` | 墙的基类（[墙化计划](Docs/TinyGlade/TinyGladeWall_Plan.md)第 4 步）：`ACSWallActor` 与 `ACSHouseActor` 都派生自它。路径来源是虚函数（样条 / footprint），藤的胶水（组件、MID、快照、交接、生长相位、管子）只有这一份；墙体 / 墙顶 / 角石 / 藤的墙面都走纯函数核心 [`CSWall.h`](Source/ComputeShaderGenerator/Public/CSWall.h)（房子 = 围合墙 + 平顶 + 屋顶，画面与统一前逐位相同） | [`CSWallBase.h`](Source/ComputeShaderGenerator/Public/CSWallBase.h) |
-| `ACSWallActor` | 样条墙（TG 的 freehand 墙，[墙化计划](Docs/TinyGlade/TinyGladeWall_Plan.md)第 1 步）：墙 = 样条中线，逐点贴地，默认 3 m 高；墙顶压顶砖 + 隔块抬起的垛口、墙端与拐角角石、两面爬藤；拐角只按相邻两段的夹角判（转得缓就是圆滑的墙）。派生自 `ACSWallBase`，与房子共用墙的逻辑 | [`CSWallActor.h`](Source/ComputeShaderGenerator/Public/CSWallActor.h) |
+| `ACSWallBase` | 墙的基类（[墙化计划](Docs/TinyGlade/Plan_Wall.md)第 4 步）：`ACSWallActor` 与 `ACSHouseActor` 都派生自它。路径来源是虚函数（样条 / footprint），藤的胶水（组件、MID、快照、交接、生长相位、管子）只有这一份；墙体 / 墙顶 / 角石 / 藤的墙面都走纯函数核心 [`CSWall.h`](Source/ComputeShaderGenerator/Public/CSWall.h)（房子 = 围合墙 + 平顶 + 屋顶，画面与统一前逐位相同） | [`CSWallBase.h`](Source/ComputeShaderGenerator/Public/CSWallBase.h) |
+| `ACSWallActor` | 样条墙（TG 的 freehand 墙，[墙化计划](Docs/TinyGlade/Plan_Wall.md)第 1 步）：墙 = 样条中线，逐点贴地，默认 3 m 高；墙顶压顶砖 + 隔块抬起的垛口、墙端与拐角角石、两面爬藤；拐角只按相邻两段的夹角判（转得缓就是圆滑的墙）。派生自 `ACSWallBase`，与房子共用墙的逻辑 | [`CSWallActor.h`](Source/ComputeShaderGenerator/Public/CSWallActor.h) |
 | `ACSSplineBlockActor` | 样条块排布：刚体块沿样条排列，只缩沿线步距、恰好占满样条（不是 SplineMesh 弯曲） | [`CSSplineBlockActor.h`](Source/ComputeShaderGenerator/Public/CSSplineBlockActor.h) |
 
 纯函数层（剖面 / 接缝 / 角石 / 包边 / 屋面 / 拉尺寸 / 门段）是 header-inline 的 `CSHouseProfile.h`、`CSHouseSeam.h`、`CSHouseQuoin.h`、`CSHouseTrim.h`、`CSHouseRoof.h`、`CSHouseResize.h`、`CSHouseDoorRuns.h`，以及玩家楼梯的 `CSStairs.h`，带逻辑单测。实例化产物各有一个打包 / 散布 kernel，直接写 `UCSGpuInstancedMeshComponent` 的 GPU 实例行：门框砖 `CSHouseFrame.usf`、瓦 `CSHouseTile.usf`、藤蔓 `CSHouseVine.usf`、摆件 `CSHouseDecor.usf`、承重柱砖 `CSHousePillar.usf`、石阶 `CSGroundStairs.usf`、地被 `CSGroundCover.usf`；岩壳则是一张 `UCSMesh`，由 `CSGroundRockShell.usf` 在常驻流上做位移、法线平均与倒角载荷。
@@ -327,7 +330,7 @@ AVineContainer::GenerateVineGPU()          # 录完图即返回（"已递交"）
 - **开洞不挖几何**：门、窗、接缝裁剪都是逐像素 clip。房体 UV1 传解析裁剪场，材质里的判据与 `CSHouse_ClipKeeps()` 逐字对应；洞缘断口由门框砖或预制窗框盖住。与 TG 原版同构，也不走 MeshBoolean。
 - **交互热路径零阻塞**：拖房子、拖抓手、画笔刷期间一次设备同步都不许有。回归脚本在这些路径上断言 `UCSMesh::GetBlockingFlushCount()` 增量为 0；摆件、藤蔓这类「松手才生成」的提交链允许异步回读。
 
-- 📖 文档入口 [`Docs/TinyGlade/index.md`](Docs/TinyGlade/index.md)：设计裁决主文档 `TinyGladeHouse_Plan.md`（D1–D14）、模块对照与进度合卷、窗户专卷、树冠着色专卷，以及完成进度速览。编排层的整体结构审查在插件根 [`TinyGlade_结构审查.md`](TinyGlade_结构审查.md)。
+- 📖 文档入口 [`Docs/TinyGlade/index.md`](Docs/TinyGlade/index.md)：设计裁决主文档 `Plan_House.md`（D1–D14）、模块对照与进度合卷、窗户专卷、树冠着色专卷，以及完成进度速览。编排层的整体结构审查在插件根 [`Review_Structure.md`](Docs/TinyGlade/Review_Structure.md)。
 - 🎬 演示关卡与跑法见下方 [Tiny Glade 演示](#-tiny-glade--房屋与地面)；材质建图、演示搭建与出图脚本在 `Scripts/TinyGlade*.py`。
 - 📦 TG 原版提取资产在 `Content/HouseTest/TinyGladeAsset/`（StaticMesh / 材质 / 贴图，另有 `TinyGladeGallery`、`TG_GrassWindDemo` 两张陈列关卡），尺寸一律按它实测。
 
@@ -390,9 +393,6 @@ AVineContainer::GenerateVineGPU()          # 录完图即返回（"已递交"）
 
 > **📍 测试关卡**：[`Content/SpaceColonization/L_TestWorld.umap`](Content/SpaceColonization)（关卡内已放置 `AVineContainer` 藤蔓 Actor）
 
-![VineGenerator — ViewEdit 视口浮窗与藤蔓生成结果](Docs/Result/VineGenerator.png)
-
-> 截图摄于 2026-07：左侧是 `ViewEdit` 分类浮窗；右上角那块按钮面板属于已删除的 `FVineContainerViewportOverlay`，现在已经没有了。
 
 - **配套资产**：`SMF_*_FoliageType`（Tube/Plane/Target 三类 FoliageType）、`Mesh/`（Tube/Plane/Target 源网格）、`Material/`（藤蔓/调试材质）
 - **运行方式**：打开关卡 → 选中场景中的藤蔓 Actor（`BP_VineSource` 实例），视口叠加面板会浮出它的 `ViewEdit` 分类，`Curl Noise Fre`、`Perlin Noise Fre`、`Circle Scale` 等参数在那里调 → 蓝图侧提供取回 / 还原场景 Foliage（`FetchSceneFoliage` / `RevertSceneFoliage`）、生成（调 `GenerateVineGPU()`）与清理（`CleanAll`）的入口。要烘焙成 StaticMesh 调 `SaveStaticmesh()`（蓝图可调）。
@@ -532,7 +532,7 @@ BVH 那一行标「下界」：基准里用的是节点 32 字节、叶子 4 三
 & "<UE>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<Project>.uproject" -ExecutePythonScript="<Project>/Plugins/PCGPlugins/Scripts/TinyGladeDemoRegression.py" -unattended -nosplash -stdout -AbsLog="<log>"
 ```
 
-C++ 用例 120 余条，全部是 `IMPLEMENT_SIMPLE_AUTOMATION_TEST`，位于 `Source/ComputeShaderGenerator/Private/Tests/` 与 `Source/PCGEditorProcess/Private/Tests/`：
+C++ 自动化测试位于 `Source/ComputeShaderGenerator/Private/Tests/` 与 `Source/PCGEditorProcess/Private/Tests/`；下表列出主要测试组，数量以当前源码和运行日志为准：
 
 | 过滤串（`PCGPlugins.` 之后） | 测试文件 | 覆盖 |
 |---|---|---|
@@ -561,7 +561,7 @@ C++ 用例 120 余条，全部是 `IMPLEMENT_SIMPLE_AUTOMATION_TEST`，位于 `S
 | 文档 | 内容 | 状态 |
 |---|---|---|
 | [`Docs/TinyGlade/index.md`](Docs/TinyGlade/index.md) | Tiny Glade 复刻的文档入口：设计裁决、模块对照与进度、窗户 / 树冠专卷、逆向报告 | 持续更新 |
-| [`TinyGlade_结构审查.md`](TinyGlade_结构审查.md) | Tiny Glade 编排层的整体结构审查，子代理报告在 `Docs/TinyGlade/` 附录 A/B/C | 2026-09-06～07 审查，09-11 复核 |
+| [`Docs/TinyGlade/Review_Structure.md`](Docs/TinyGlade/Review_Structure.md) | Tiny Glade 编排层的整体结构审查，子代理报告同目录 `Review_Structure_{A,B,C}_*.md` | 2026-09-06～07 审查，09-11 复核 |
 | [`Docs/GpuTriangleUnified_Plan.md`](Docs/GpuTriangleUnified_Plan.md) | GPU 三角形统一：可拓展储存 + 单一 readback，CSMesh 对象层的前身 | ⚠️ 历史文档：L0 回读层与 sink B 未按此落地，对象层取代了它（2026-09-10 标注） |
 | [`Docs/GpuMeshRayTracing.md`](Docs/GpuMeshRayTracing.md) | GPU 常驻网格的光追 BLAS 接入（Lumen 硬件光追 / 光追阴影 / 反射） | 2026-09-09 落地 |
 | [`Docs/VineGpuResidency.md`](Docs/VineGpuResidency.md) | 藤蔓生成链路的 GPU 常驻化现状与剩余计划 | 2026-08-14；现状表于 2026-09-10 订正过两行 |
@@ -569,7 +569,7 @@ C++ 用例 120 余条，全部是 `IMPLEMENT_SIMPLE_AUTOMATION_TEST`，位于 `S
 | [`Docs/GpuClothSim_Plan.md`](Docs/GpuClothSim_Plan.md) | XPBD 布料模拟：常驻算子逐帧驱动 `UCSMesh` 形变 | 计划，未实施 |
 | [`Docs/GpuRigidSettle_Plan.md`](Docs/GpuRigidSettle_Plan.md) | 批量刚体沉降（粒子簇形状匹配），布料计划的姊妹篇 | 计划，未实施 |
 | [`NaniteClusterHLOD_Plan.md`](NaniteClusterHLOD_Plan.md) | 用 Nanite cluster 截面给远处的大中型物体组生成简易 HLOD（小物体归 foliage，不进 HLOD）：`UCSNaniteCutOps` 算子 + `UCSNaniteCutHLODBuilder` | 2026-09-22 落地（含关卡内试验台与外部可见性剔除），测试 5/5，测试关卡截图验收；未在 WP 关卡实跑 |
-| [`Docs/CSLandscapeLayer_Framework.md`](Docs/CSLandscapeLayer_Framework.md) | CS 地形图层编辑框架的模块关系、数据流与已知架构问题 | 2026-07-23 写成 |
+| [`Docs/CSLandscapeLayer_Framework.md`](Docs/CSLandscapeLayer_Framework.md) | 当前 Landscape 图层继承、Merge 与烘焙入口 | 2026-09-30 按源码清理已删除类与旧接口 |
 | [`Docs/InstanceBrushPaintDesign.md`](Docs/InstanceBrushPaintDesign.md) | Actor 自持的实例笔刷方案 | 2026-07-23 设计稿 |
 | [`Docs/VDBMeshFromActorPoints.md`](Docs/VDBMeshFromActorPoints.md)、[`Docs/VDBMeshFromSurfaceVoxels.md`](Docs/VDBMeshFromSurfaceVoxels.md) | VDB 网格生成的 GPU 加速方案 | 2026-07-23 写成；之后 `*ToDynamicMesh` 系列已改为 `*ToGpuMesh` |
 | [`Docs/ComputeShaderMeshGeneratorVoxelTriangleCache.md`](Docs/ComputeShaderMeshGeneratorVoxelTriangleCache.md)、[`Docs/ComputeShaderMeshGeneratorTriangleCachePitfalls.md`](Docs/ComputeShaderMeshGeneratorTriangleCachePitfalls.md) | `AComputeShaderMeshGenerator` 的体素激活与脏页三角缓存 | ⚠️ 所述子系统已于 2026-08-12 删除（`fd95aff`），仅作历史 |
@@ -583,7 +583,6 @@ C++ 用例 120 余条，全部是 `IMPLEMENT_SIMPLE_AUTOMATION_TEST`，位于 `S
 PCGPlugins/
 ├─ PCGPlugins.uplugin        # 插件描述文件（4 个模块）
 ├─ README.md                 # 本文件
-├─ TinyGlade_结构审查.md      # Tiny Glade 编排层的整体结构审查
 ├─ NaniteClusterHLOD_Plan.md # Nanite 截面 HLOD：截面抽取算子 + 可见性剔除 + WP HLOD 构建器 + 关卡试验台
 ├─ VoxelTest.hip             # Houdini 参考文件
 ├─ Config/

@@ -1,0 +1,166 @@
+[
+  {
+    "case": "no-foam",
+    "variant": "original",
+    "switches": {
+      "UseFoam": false,
+      "SwithSim": true
+    },
+    "stats": {
+      "num_vertex_shader_instructions": 290,
+      "num_pixel_shader_instructions": 963,
+      "num_samplers": 4,
+      "num_vertex_texture_samples": 0,
+      "num_pixel_texture_samples": 9
+    }
+  },
+  {
+    "case": "no-foam",
+    "variant": "custom",
+    "switches": {
+      "UseFoam": false,
+      "SwithSim": true
+    },
+    "stats": {
+      "num_vertex_shader_instructions": 290,
+      "num_pixel_shader_instructions": 970,
+      "num_samplers": 4,
+      "num_vertex_texture_samples": 0,
+      "num_pixel_texture_samples": 9
+    }
+  },
+  {
+    "case": "no-detail",
+    "variant": "original",
+    "switches": {
+      "UseDetailWave": false,
+      "UseDetailWaveWPO": false,
+      "SwithSim": true
+    },
+    "stats": {
+      "num_vertex_shader_instructions": 290,
+      "num_pixel_shader_instructions": 1046,
+      "num_samplers": 5,
+      "num_vertex_texture_samples": 0,
+      "num_pixel_texture_samples": 10
+    }
+  },
+  {
+    "case": "no-detail",
+    "variant": "custom",
+    "switches": {
+      "UseDetailWave": false,
+      "UseDetailWaveWPO": false,
+      "SwithSim": true
+    },
+    "stats": {
+      "num_vertex_shader_instructions": 290,
+      "num_pixel_shader_instructions": 1054,
+      "num_samplers": 5,
+      "num_vertex_texture_samples": 0,
+      "num_pixel_texture_samples": 10
+    }
+  },
+  {
+    "case": "texture-simulation",
+    "variant": "original",
+    "switches": {
+      "SwithSim": false,
+      "UseFoam": true,
+      "UseDetailWave": true,
+      "UseDetailWaveWPO": true
+    },
+    "stats": {
+      "num_vertex_shader_instructions": 339,
+      "num_pixel_shader_instructions": 1124,
+      "num_samplers": 6,
+      "num_vertex_texture_samples": 4,
+      "num_pixel_texture_samples": 16
+    }
+  },
+  {
+    "case": "texture-simulation",
+    "variant": "custom",
+    "switches": {
+      "SwithSim": false,
+      "UseFoam": true,
+      "UseDetailWave": true,
+      "UseDetailWaveWPO": true
+    },
+    "stats": {
+      "num_vertex_shader_instructions": 339,
+      "num_pixel_shader_instructions": 1134,
+      "num_samplers": 6,
+      "num_vertex_texture_samples": 4,
+      "num_pixel_texture_samples": 16
+    }
+  },
+  {
+    "case": "texture-no-wpo",
+    "variant": "original",
+    "switches": {
+      "SwithSim": false,
+      "UseFoam": true,
+      "UseDetailWave": true,
+      "UseDetailWaveWPO": false
+    },
+    "stats": {
+      "num_vertex_shader_instructions": 339,
+      "num_pixel_shader_instructions": 1124,
+      "num_samplers": 6,
+      "num_vertex_texture_samples": 4,
+      "num_pixel_texture_samples": 16
+    }
+  },
+  {
+    "case": "texture-no-wpo",
+    "variant": "custom",
+    "switches": {
+      "SwithSim": false,
+      "UseFoam": true,
+      "UseDetailWave": true,
+      "UseDetailWaveWPO": false
+    },
+    "stats": {
+      "num_vertex_shader_instructions": 339,
+      "num_pixel_shader_instructions": 1134,
+      "num_samplers": 6,
+      "num_vertex_texture_samples": 4,
+      "num_pixel_texture_samples": 16
+    }
+  },
+  {
+    "case": "distortion-off",
+    "variant": "original",
+    "switches": {
+      "SwithSim": true,
+      "UseFoam": true,
+      "UseFoamDistortion": false,
+      "UseDetailWave": true
+    },
+    "stats": {
+      "num_vertex_shader_instructions": 290,
+      "num_pixel_shader_instructions": 1112,
+      "num_samplers": 6,
+      "num_vertex_texture_samples": 0,
+      "num_pixel_texture_samples": 13
+    }
+  },
+  {
+    "case": "distortion-off",
+    "variant": "custom",
+    "switches": {
+      "SwithSim": true,
+      "UseFoam": true,
+      "UseFoamDistortion": false,
+      "UseDetailWave": true
+    },
+    "stats": {
+      "num_vertex_shader_instructions": 290,
+      "num_pixel_shader_instructions": 1120,
+      "num_samplers": 6,
+      "num_vertex_texture_samples": 0,
+      "num_pixel_texture_samples": 13
+    }
+  }
+]

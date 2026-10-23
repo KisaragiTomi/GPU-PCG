@@ -9,7 +9,7 @@
 
 > **2026-09-21 / 09-22 的两次转向**（本版据此重写）：
 > - 09-21 用户纠正服务对象：本系统**主要为 TG 组件服务**（`ACSTinyGlade` 派生类之间的跨 actor 空间影响）；**CSSW、道路、藤蔓都不是它的消费者**。上一版围绕这三者排的消费侧与 M1–M4 作废（CSSW 那段的单腿化作为透明物修复已独立落地，挪到附录留档）。上一版"第四条路径：TG 链不接入本系统"方向是反的 —— TG 链今天的直推（`OnGroundChanged` + 根组件 `TransformUpdated`）是**过渡**，本系统是它的去向。
-> - 09-22 用户提出"房子变成墙、subsystem 持有各种 buffer"。TG 的真实结构（见 §二）是**登记处 + 通道 + 订阅**三层，buffer 由写它的一方持有、订阅游标归消费者；本版照此分层。墙那条主线见 [`TinyGlade/TinyGladeWall_Plan.md`](TinyGlade/TinyGladeWall_Plan.md)。
+> - 09-22 用户提出"房子变成墙、subsystem 持有各种 buffer"。TG 的真实结构（见 §二）是**登记处 + 通道 + 订阅**三层，buffer 由写它的一方持有、订阅游标归消费者；本版照此分层。墙那条主线见 [`TinyGlade/Plan_Wall.md`](TinyGlade/Plan_Wall.md)。
 
 ## 一、背景：今天的 TG 链怎么通知
 
@@ -144,11 +144,11 @@ if (Hits.Num()) PartialUpdate(Hits);
 
 ### 首个用例：建筑周边灌木
 
-TG 里这条链是"生产者 ≠ 所有者"的样板：房子（其实是墙）只把形状写进 `GroundedBuildingsSsbo`，渲染循环光栅化成建筑 mask，花园 compute 读 mask 撒灌木 —— 灌木归花园系统，不归房子也不归地面（逆向细节见 memory `tg-walls-publish-dirty-tiles` 与 `TinyGlade/TinyGladeHouse_Plan.md` 的灌木节）。
+TG 里这条链是"生产者 ≠ 所有者"的样板：房子（其实是墙）只把形状写进 `GroundedBuildingsSsbo`，渲染循环光栅化成建筑 mask，花园 compute 读 mask 撒灌木 —— 灌木归花园系统，不归房子也不归地面（逆向细节见 memory `tg-walls-publish-dirty-tiles` 与 `TinyGlade/Plan_House.md` 的灌木节）。
 
 落到本系统：
 
-1. 墙表进登记处（[墙化计划第 3 步](TinyGlade/TinyGladeWall_Plan.md#第-3-步墙表与世界级登记处)）；房子 / 围合的墙发布外皮。建筑 mask（或今天的"逐栋有符号距离"）从墙表派生，写者 = 地面的灌木链自己。
+1. 墙表进登记处（[墙化计划第 3 步](TinyGlade/Plan_Wall.md#第-3-步墙表与世界级登记处)）；房子 / 围合的墙发布外皮。建筑 mask（或今天的"逐栋有符号距离"）从墙表派生，写者 = 地面的灌木链自己。
 2. 房子摆位变了 ⇒ P2 发旧 ∪ 新外皮 ⇒ 灌木链只重撒命中的 tile。
 3. 验收：搬一栋房子，只有它周围一两个 tile 的灌木实例段被重写（回读断言其余 tile 的实例逐位不变）。
 
@@ -202,4 +202,3 @@ TG 里这条链是"生产者 ≠ 所有者"的样板：房子（其实是墙）�
 
 - **CSSW 道具捕获单腿化**（2026-09-20 已实施，作为透明物修复**独立成立**）：`bCaptureWithRenderer`（原 `bCaptureNaniteWithRenderer`，`Config/DefaultPCGPlugins.ini` 配 `PropertyRedirects`）打开时，所有拍得到的道具都走引擎 depth pass（Translucent 不写深度、Masked 逐像素 clip、WPO 与画面一致）；拍不到的（隐藏 / 无代理 / 关了 `bRenderInMainPass`·`bRenderInDepthPass`）逐组件退回三角形路径（判据 `IsCapturableComponent`）。代价：高度图不再逐位确定（LOD / cull distance / WPO 归渲染器）。`CSNaniteHeightCapture` 的 pass 本就按任意 texel 子矩形工作，`CaptureRegion` 不再是目标。
 - **道路 / 藤蔓**：自身的全量重建与"改场景后不知道"的正确性问题仍在，但不由本系统解决（09-21 裁决）。上一版为它们设计的 Self-Mask、藤蔓 cell 级缓存（`FCSMeshGeneratorVoxelCacheState`，体素 1:1）、道路只重贴地分路，需要时另立项。
-- 旧版架构图 [`cs-scene-dirty-3d-architecture.svg`](cs-scene-dirty-3d-architecture.svg) 与调试示意 [`cs-scene-dirty-3d-debug-overlay.svg`](cs-scene-dirty-3d-debug-overlay.svg) 画的是上一版（消费者是 CSSW / 道路 / 藤蔓），待按本版重画。

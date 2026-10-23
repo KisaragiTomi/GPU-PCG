@@ -1,6 +1,6 @@
 # VDBMeshFromSurfaceVoxels GPU 流程文档
 
-![SurfaceVoxels 到 OpenDynamicMesh 的邻域三角化流程](./SurfaceVoxelsToOpenDynamicMeshNeighborTriangulation.svg)
+> 当前 GPU 网格输出接口见 [README](../README.md)；本文保留算法说明。
 
 `VDBMeshFromSurfaceVoxels` 的目标是从 `In_Actors` 与 `ValidPositions` 生成贴近真实表面的网格。新的设计不再以 CPU 复制 StaticMesh、合并 `FDynamicMesh3`、构建 `TMeshAABBTree3`、逐体素最近三角形查询为主流程，也不再把最终结果停留在 voxel 点云；而是让 GPU Compute Shader **直接绑定并读取 StaticMesh 已上传到显存/RHI 的顶点与索引 buffer**，把输入的参考点集合加入 CS，在 GPU 端完成：
 

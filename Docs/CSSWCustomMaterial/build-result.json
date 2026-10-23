@@ -1,0 +1,191 @@
+{
+  "graphs": {
+    "M_FluxSurfaceOver": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/M_FluxSurfaceOver.M_FluxSurfaceOver",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/M_CSSW_Surface_Custom.M_CSSW_Surface_Custom",
+      "before": 179,
+      "replaced": 108,
+      "custom_added": 17,
+      "after": 88
+    },
+    "MF_FluidDetailWave": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Detail/MF_FluidDetailWave.MF_FluidDetailWave",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidDetailWave_Custom.MF_FluidDetailWave_Custom",
+      "before": 81,
+      "replaced": 31,
+      "custom_added": 9,
+      "after": 59
+    },
+    "MF_DistantLayer": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Detail/MF_DistantLayer.MF_DistantLayer",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_DistantLayer_Custom.MF_DistantLayer_Custom",
+      "before": 29,
+      "replaced": 11,
+      "custom_added": 3,
+      "after": 21
+    },
+    "MF_NormalAddDerivate": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Detail/MF_NormalAddDerivate.MF_NormalAddDerivate",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_NormalAddDerivate_Custom.MF_NormalAddDerivate_Custom",
+      "before": 26,
+      "replaced": 17,
+      "custom_added": 1,
+      "after": 10
+    },
+    "MF_AdvectWaveSample2D": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Tools/MF_AdvectWaveSample2D.MF_AdvectWaveSample2D",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectWaveSample2D_Custom.MF_AdvectWaveSample2D_Custom",
+      "before": 38,
+      "replaced": 11,
+      "custom_added": 5,
+      "after": 32
+    },
+    "MF_AdvectUV3": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Tools/MF_AdvectUV3.MF_AdvectUV3",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectUV3_Custom.MF_AdvectUV3_Custom",
+      "before": 45,
+      "replaced": 15,
+      "custom_added": 8,
+      "after": 38
+    },
+    "MF_AdvectionData": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Tools/MF_AdvectionData.MF_AdvectionData",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectionData_Custom.MF_AdvectionData_Custom",
+      "before": 13,
+      "replaced": 9,
+      "custom_added": 2,
+      "after": 6
+    },
+    "MF_WaveSampleDecode": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Detail/MF_WaveSampleDecode.MF_WaveSampleDecode",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_WaveSampleDecode_Custom.MF_WaveSampleDecode_Custom",
+      "before": 39,
+      "replaced": 19,
+      "custom_added": 9,
+      "after": 29
+    },
+    "MF_DecodeNormaDerivate": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Detail/MF_DecodeNormaDerivate.MF_DecodeNormaDerivate",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_DecodeNormaDerivate_Custom.MF_DecodeNormaDerivate_Custom",
+      "before": 18,
+      "replaced": 9,
+      "custom_added": 3,
+      "after": 12
+    },
+    "MF_AdvectTexture2D": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Tools/MF_AdvectTexture2D.MF_AdvectTexture2D",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectTexture2D_Custom.MF_AdvectTexture2D_Custom",
+      "before": 28,
+      "replaced": 6,
+      "custom_added": 2,
+      "after": 24
+    },
+    "MF_SurfaceFluxGet": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Layers/MF_SurfaceFluxGet.MF_SurfaceFluxGet",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_SurfaceFluxGet_Custom.MF_SurfaceFluxGet_Custom",
+      "before": 10,
+      "replaced": 0,
+      "custom_added": 0,
+      "after": 10
+    },
+    "MF_SurfaceFluxSet": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Layers/MF_SurfaceFluxSet.MF_SurfaceFluxSet",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_SurfaceFluxSet_Custom.MF_SurfaceFluxSet_Custom",
+      "before": 29,
+      "replaced": 4,
+      "custom_added": 1,
+      "after": 26
+    },
+    "MF_FluidFoam": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Foam/MF_FluidFoam.MF_FluidFoam",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoam_Custom.MF_FluidFoam_Custom",
+      "before": 107,
+      "replaced": 49,
+      "custom_added": 8,
+      "after": 66
+    },
+    "MF_FluidFoamShallow": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Foam/MF_FluidFoamShallow.MF_FluidFoamShallow",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoamShallow_Custom.MF_FluidFoamShallow_Custom",
+      "before": 12,
+      "replaced": 6,
+      "custom_added": 2,
+      "after": 8
+    },
+    "MF_FluidFoamDistortion": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Foam/MF_FluidFoamDistortion.MF_FluidFoamDistortion",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoamDistortion_Custom.MF_FluidFoamDistortion_Custom",
+      "before": 18,
+      "replaced": 8,
+      "custom_added": 4,
+      "after": 14
+    },
+    "MF_FluidFoamApply": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Foam/MF_FluidFoamApply.MF_FluidFoamApply",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoamApply_Custom.MF_FluidFoamApply_Custom",
+      "before": 27,
+      "replaced": 7,
+      "custom_added": 5,
+      "after": 25
+    },
+    "MF_CombineTranslucent": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Tools/MF_CombineTranslucent.MF_CombineTranslucent",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_CombineTranslucent_Custom.MF_CombineTranslucent_Custom",
+      "before": 17,
+      "replaced": 7,
+      "custom_added": 2,
+      "after": 12
+    },
+    "MF_NormalOverlay": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Tools/MF_NormalOverlay.MF_NormalOverlay",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_NormalOverlay_Custom.MF_NormalOverlay_Custom",
+      "before": 15,
+      "replaced": 8,
+      "custom_added": 2,
+      "after": 9
+    },
+    "MF_FluidFoamAdvect": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Materials/Functions/Foam/MF_FluidFoamAdvect.MF_FluidFoamAdvect",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoamAdvect_Custom.MF_FluidFoamAdvect_Custom",
+      "before": 43,
+      "replaced": 22,
+      "custom_added": 9,
+      "after": 30
+    },
+    "MF_ReconstructNormal": {
+      "source": "/PCGPlugins/ShallowWater/Material30/Interaction/Functions/MF_ReconstructNormal.MF_ReconstructNormal",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_ReconstructNormal_Custom.MF_ReconstructNormal_Custom",
+      "before": 8,
+      "replaced": 5,
+      "custom_added": 1,
+      "after": 4
+    }
+  },
+  "instances": [
+    {
+      "source": "/PCGPlugins/ShallowWater/Material30/Surface/Templates/River/Materials/MI_RiverSurfaceOver",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_River_Custom.MI_CSSW_River_Custom",
+      "parent": "/PCGPlugins/ShallowWater/Material30/Custom/M_CSSW_Surface_Custom.M_CSSW_Surface_Custom"
+    },
+    {
+      "source": "/PCGPlugins/ShallowWater/VelocityHeight/Material/MI_WaterSurface",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_WaterSurface_Custom.MI_CSSW_WaterSurface_Custom",
+      "parent": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_River_Custom.MI_CSSW_River_Custom"
+    },
+    {
+      "source": "/PCGPlugins/ShallowWater/VelocityHeight/CSSWData/MI_CSSW_Water_3333333",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_Water_3333333_Custom.MI_CSSW_Water_3333333_Custom",
+      "parent": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_WaterSurface_Custom.MI_CSSW_WaterSurface_Custom"
+    },
+    {
+      "source": "/PCGPlugins/ShallowWater/VelocityHeight/CSSWData/MI_CSSW_Water_25155946",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_Water_25155946_Custom.MI_CSSW_Water_25155946_Custom",
+      "parent": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_River_Custom.MI_CSSW_River_Custom"
+    },
+    {
+      "source": "/PCGPlugins/SpaceColonization/CSSWData/MI_CSSW_Water_8141441",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_Water_8141441_Custom.MI_CSSW_Water_8141441_Custom",
+      "parent": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_River_Custom.MI_CSSW_River_Custom"
+    }
+  ]
+}

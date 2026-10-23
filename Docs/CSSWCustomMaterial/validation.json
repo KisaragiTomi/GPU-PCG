@@ -1,0 +1,2086 @@
+{
+  "settings": {
+    "blend_mode": [
+      "<BlendMode.BLEND_MASKED: 1>",
+      "<BlendMode.BLEND_MASKED: 1>"
+    ],
+    "shading_model": [
+      "<MaterialShadingModel.MSM_SINGLE_LAYER_WATER: 10>",
+      "<MaterialShadingModel.MSM_SINGLE_LAYER_WATER: 10>"
+    ],
+    "two_sided": [
+      true,
+      true
+    ],
+    "use_material_attributes": [
+      true,
+      true
+    ],
+    "tangent_space_normal": [
+      false,
+      false
+    ],
+    "opacity_mask_clip_value": [
+      0.33329999446868896,
+      0.33329999446868896
+    ],
+    "dithered_lod_transition": [
+      false,
+      false
+    ],
+    "used_with_instanced_static_meshes": [
+      true,
+      true
+    ]
+  },
+  "instances": [
+    {
+      "source": "/PCGPlugins/ShallowWater/Material30/Surface/Templates/River/Materials/MI_RiverSurfaceOver",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_River_Custom.MI_CSSW_River_Custom",
+      "parameters": {
+        "scalar": {
+          "CheapScatteringDetails": [
+            0.5,
+            0.5
+          ],
+          "CheapScatteringPower": [
+            2.0,
+            2.0
+          ],
+          "CheapScatteringScale": [
+            10.0,
+            10.0
+          ],
+          "DetailWaveHeight": [
+            18.0,
+            18.0
+          ],
+          "DetailWaveLength": [
+            800.0,
+            800.0
+          ],
+          "DetailWaveRange": [
+            25000.0,
+            25000.0
+          ],
+          "DetailWaveUVSwitching": [
+            1.0,
+            1.0
+          ],
+          "DetailWaveUVVelocity": [
+            1.0,
+            1.0
+          ],
+          "FoamColorAlpha": [
+            0.0,
+            0.0
+          ],
+          "FoamColorDetail": [
+            0.5,
+            0.5
+          ],
+          "FoamDistortionIntensity": [
+            40.0,
+            40.0
+          ],
+          "FoamDistortionScale": [
+            0.0020000000949949026,
+            0.0020000000949949026
+          ],
+          "FoamDistortionSpeed": [
+            0.10000000149011612,
+            0.10000000149011612
+          ],
+          "FoamDitheringAlpha": [
+            0.3499999940395355,
+            0.3499999940395355
+          ],
+          "FoamDitheringOffset": [
+            1.5,
+            1.5
+          ],
+          "FoamDitheringScale": [
+            40.0,
+            40.0
+          ],
+          "FoamHardnessIntensity": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "FoamHardnessWidth": [
+            0.3499999940395355,
+            0.3499999940395355
+          ],
+          "FoamNormalBlend": [
+            2.0,
+            2.0
+          ],
+          "FoamNormalScale": [
+            2.0,
+            2.0
+          ],
+          "FoamRoughness": [
+            0.20000000298023224,
+            0.20000000298023224
+          ],
+          "FoamShallowOffset": [
+            0.10000000149011612,
+            0.10000000149011612
+          ],
+          "FoamShallowScale": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "FoamSoftBase": [
+            0.30000001192092896,
+            0.30000001192092896
+          ],
+          "FoamSoftIntensity": [
+            0.0,
+            0.0
+          ],
+          "FoamSoftMax": [
+            0.800000011920929,
+            0.800000011920929
+          ],
+          "FoamSoftVelocity": [
+            0.5,
+            0.5
+          ],
+          "FoamSpecular": [
+            0.20000000298023224,
+            0.20000000298023224
+          ],
+          "FoamUVAdvectionOffset": [
+            -0.5,
+            -0.5
+          ],
+          "FoamUVRandomization": [
+            1.0,
+            1.0
+          ],
+          "FoamUVScale": [
+            0.001500000013038516,
+            0.001500000013038516
+          ],
+          "FoamUVSpeed": [
+            0.800000011920929,
+            0.800000011920929
+          ],
+          "FoamUVVelocity": [
+            1.0,
+            1.0
+          ],
+          "NormalMaskPower": [
+            0.75,
+            0.75
+          ],
+          "Offset": [
+            0.0,
+            0.0
+          ],
+          "OpPower": [
+            1.0,
+            1.0
+          ],
+          "SurfacePhaseG0": [
+            2.6235299110412598,
+            2.6235299110412598
+          ],
+          "VelScale": [
+            1.0,
+            1.0
+          ],
+          "WaterRoughnessMin": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "WaveDetailFastFoam": [
+            1.0,
+            1.0
+          ],
+          "WaveDetailWPOScale": [
+            1.0,
+            1.0
+          ],
+          "WaveTextureHeight": [
+            300.0,
+            300.0
+          ],
+          "WaveTextureOffsetZ": [
+            -10000.0,
+            -10000.0
+          ],
+          "WorldUVScale": [
+            0.0010000000474974513,
+            0.0010000000474974513
+          ]
+        },
+        "vector": {
+          "CSSW_SimCenter": [
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          ],
+          "ColorBehind0": [
+            [
+              0.6520000100135803,
+              0.8094620108604431,
+              0.9353910088539124,
+              1.0
+            ],
+            [
+              0.6520000100135803,
+              0.8094620108604431,
+              0.9353910088539124,
+              1.0
+            ]
+          ],
+          "FoamColorBase": [
+            [
+              0.5,
+              0.5,
+              0.5,
+              0.30000001192092896
+            ],
+            [
+              0.5,
+              0.5,
+              0.5,
+              0.30000001192092896
+            ]
+          ],
+          "FoamEmissive": [
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.009999999776482582
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.009999999776482582
+            ]
+          ],
+          "SurfaceAbsorption0": [
+            [
+              200.0,
+              200.0,
+              140.0,
+              1.2000000476837158
+            ],
+            [
+              200.0,
+              200.0,
+              140.0,
+              1.2000000476837158
+            ]
+          ],
+          "SurfaceScattering0": [
+            [
+              0.20000000298023224,
+              0.30000001192092896,
+              0.4000000059604645,
+              0.0003000000142492354
+            ],
+            [
+              0.20000000298023224,
+              0.30000001192092896,
+              0.4000000059604645,
+              0.0003000000142492354
+            ]
+          ],
+          "WaterSpecular": [
+            [
+              0.07000000029802322,
+              0.30000001192092896,
+              12.0,
+              0.0
+            ],
+            [
+              0.07000000029802322,
+              0.30000001192092896,
+              12.0,
+              0.0
+            ]
+          ],
+          "WaveTextureOffsetScale": [
+            [
+              0.0,
+              0.0,
+              0.0001250000059371814,
+              0.0001250000059371814
+            ],
+            [
+              0.0,
+              0.0,
+              0.0001250000059371814,
+              0.0001250000059371814
+            ]
+          ]
+        },
+        "texture": {
+          "CSSW_DepthWet": [
+            "/Engine/Functions/Engine_MaterialFunctions02/PivotPainter2/Black_1x1_EXR_Texture.Black_1x1_EXR_Texture",
+            "/Engine/Functions/Engine_MaterialFunctions02/PivotPainter2/Black_1x1_EXR_Texture.Black_1x1_EXR_Texture"
+          ],
+          "CSSW_VelHeight": [
+            "/Engine/Functions/Engine_MaterialFunctions02/PivotPainter2/Black_1x1_EXR_Texture.Black_1x1_EXR_Texture",
+            "/Engine/Functions/Engine_MaterialFunctions02/PivotPainter2/Black_1x1_EXR_Texture.Black_1x1_EXR_Texture"
+          ],
+          "DetailWaveTexture": [
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_DetailWaveTexture_02.T_DetailWaveTexture_02",
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_DetailWaveTexture_02.T_DetailWaveTexture_02"
+          ],
+          "FoamNormalSoftHeightMap": [
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_Seafoam_03_NSH.T_Seafoam_03_NSH",
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_Seafoam_03_NSH.T_Seafoam_03_NSH"
+          ],
+          "InteractionRT": [
+            "/PCGPlugins/ShallowWater/VelocityHeight/RT_InteractionNormal.RT_InteractionNormal",
+            "/PCGPlugins/ShallowWater/VelocityHeight/RT_InteractionNormal.RT_InteractionNormal"
+          ]
+        },
+        "static_switch": {
+          "SwithSim": [
+            false,
+            false
+          ],
+          "UseDetailWave": [
+            true,
+            true
+          ],
+          "UseDetailWaveWPO": [
+            true,
+            true
+          ],
+          "UseFoam": [
+            true,
+            true
+          ],
+          "UseFoamDistortion": [
+            true,
+            true
+          ]
+        }
+      },
+      "stats": {
+        "original": {
+          "num_vertex_shader_instructions": 339,
+          "num_pixel_shader_instructions": 1124,
+          "num_samplers": 6,
+          "num_vertex_texture_samples": 4,
+          "num_pixel_texture_samples": 16
+        },
+        "custom": {
+          "num_vertex_shader_instructions": 339,
+          "num_pixel_shader_instructions": 1134,
+          "num_samplers": 6,
+          "num_vertex_texture_samples": 4,
+          "num_pixel_texture_samples": 16
+        }
+      }
+    },
+    {
+      "source": "/PCGPlugins/ShallowWater/VelocityHeight/Material/MI_WaterSurface",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_WaterSurface_Custom.MI_CSSW_WaterSurface_Custom",
+      "parameters": {
+        "scalar": {
+          "CheapScatteringDetails": [
+            0.5,
+            0.5
+          ],
+          "CheapScatteringPower": [
+            2.0,
+            2.0
+          ],
+          "CheapScatteringScale": [
+            10.0,
+            10.0
+          ],
+          "DetailWaveHeight": [
+            18.0,
+            18.0
+          ],
+          "DetailWaveLength": [
+            800.0,
+            800.0
+          ],
+          "DetailWaveRange": [
+            25000.0,
+            25000.0
+          ],
+          "DetailWaveUVSwitching": [
+            1.0,
+            1.0
+          ],
+          "DetailWaveUVVelocity": [
+            1.0,
+            1.0
+          ],
+          "FoamColorAlpha": [
+            0.0,
+            0.0
+          ],
+          "FoamColorDetail": [
+            0.5,
+            0.5
+          ],
+          "FoamDistortionIntensity": [
+            40.0,
+            40.0
+          ],
+          "FoamDistortionScale": [
+            0.0020000000949949026,
+            0.0020000000949949026
+          ],
+          "FoamDistortionSpeed": [
+            0.10000000149011612,
+            0.10000000149011612
+          ],
+          "FoamDitheringAlpha": [
+            0.3499999940395355,
+            0.3499999940395355
+          ],
+          "FoamDitheringOffset": [
+            1.5,
+            1.5
+          ],
+          "FoamDitheringScale": [
+            40.0,
+            40.0
+          ],
+          "FoamHardnessIntensity": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "FoamHardnessWidth": [
+            0.3499999940395355,
+            0.3499999940395355
+          ],
+          "FoamNormalBlend": [
+            2.0,
+            2.0
+          ],
+          "FoamNormalScale": [
+            2.0,
+            2.0
+          ],
+          "FoamRoughness": [
+            0.20000000298023224,
+            0.20000000298023224
+          ],
+          "FoamShallowOffset": [
+            0.10000000149011612,
+            0.10000000149011612
+          ],
+          "FoamShallowScale": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "FoamSoftBase": [
+            0.30000001192092896,
+            0.30000001192092896
+          ],
+          "FoamSoftIntensity": [
+            0.0,
+            0.0
+          ],
+          "FoamSoftMax": [
+            0.800000011920929,
+            0.800000011920929
+          ],
+          "FoamSoftVelocity": [
+            0.5,
+            0.5
+          ],
+          "FoamSpecular": [
+            0.20000000298023224,
+            0.20000000298023224
+          ],
+          "FoamUVAdvectionOffset": [
+            -0.5,
+            -0.5
+          ],
+          "FoamUVRandomization": [
+            1.0,
+            1.0
+          ],
+          "FoamUVScale": [
+            0.001500000013038516,
+            0.001500000013038516
+          ],
+          "FoamUVSpeed": [
+            0.800000011920929,
+            0.800000011920929
+          ],
+          "FoamUVVelocity": [
+            1.0,
+            1.0
+          ],
+          "NormalMaskPower": [
+            0.75,
+            0.75
+          ],
+          "Offset": [
+            0.0,
+            0.0
+          ],
+          "OpPower": [
+            1.0,
+            1.0
+          ],
+          "SurfacePhaseG0": [
+            2.6235299110412598,
+            2.6235299110412598
+          ],
+          "VelScale": [
+            1.0,
+            1.0
+          ],
+          "WaterRoughnessMin": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "WaveDetailFastFoam": [
+            1.0,
+            1.0
+          ],
+          "WaveDetailWPOScale": [
+            1.0,
+            1.0
+          ],
+          "WaveTextureHeight": [
+            300.0,
+            300.0
+          ],
+          "WaveTextureOffsetZ": [
+            -10000.0,
+            -10000.0
+          ],
+          "WorldUVScale": [
+            0.0010000000474974513,
+            0.0010000000474974513
+          ]
+        },
+        "vector": {
+          "CSSW_SimCenter": [
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          ],
+          "ColorBehind0": [
+            [
+              0.6520000100135803,
+              0.8094620108604431,
+              0.9353910088539124,
+              1.0
+            ],
+            [
+              0.6520000100135803,
+              0.8094620108604431,
+              0.9353910088539124,
+              1.0
+            ]
+          ],
+          "FoamColorBase": [
+            [
+              0.5,
+              0.5,
+              0.5,
+              0.30000001192092896
+            ],
+            [
+              0.5,
+              0.5,
+              0.5,
+              0.30000001192092896
+            ]
+          ],
+          "FoamEmissive": [
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.009999999776482582
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.009999999776482582
+            ]
+          ],
+          "SurfaceAbsorption0": [
+            [
+              200.0,
+              200.0,
+              140.0,
+              1.2000000476837158
+            ],
+            [
+              200.0,
+              200.0,
+              140.0,
+              1.2000000476837158
+            ]
+          ],
+          "SurfaceScattering0": [
+            [
+              0.20000000298023224,
+              0.30000001192092896,
+              0.4000000059604645,
+              0.0003000000142492354
+            ],
+            [
+              0.20000000298023224,
+              0.30000001192092896,
+              0.4000000059604645,
+              0.0003000000142492354
+            ]
+          ],
+          "WaterSpecular": [
+            [
+              0.07000000029802322,
+              0.30000001192092896,
+              12.0,
+              0.0
+            ],
+            [
+              0.07000000029802322,
+              0.30000001192092896,
+              12.0,
+              0.0
+            ]
+          ],
+          "WaveTextureOffsetScale": [
+            [
+              0.0,
+              0.0,
+              0.0001250000059371814,
+              0.0001250000059371814
+            ],
+            [
+              0.0,
+              0.0,
+              0.0001250000059371814,
+              0.0001250000059371814
+            ]
+          ]
+        },
+        "texture": {
+          "CSSW_DepthWet": [
+            "/Engine/Functions/Engine_MaterialFunctions02/PivotPainter2/Black_1x1_EXR_Texture.Black_1x1_EXR_Texture",
+            "/Engine/Functions/Engine_MaterialFunctions02/PivotPainter2/Black_1x1_EXR_Texture.Black_1x1_EXR_Texture"
+          ],
+          "CSSW_VelHeight": [
+            "/Engine/Functions/Engine_MaterialFunctions02/PivotPainter2/Black_1x1_EXR_Texture.Black_1x1_EXR_Texture",
+            "/Engine/Functions/Engine_MaterialFunctions02/PivotPainter2/Black_1x1_EXR_Texture.Black_1x1_EXR_Texture"
+          ],
+          "DetailWaveTexture": [
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_DetailWaveTexture_02.T_DetailWaveTexture_02",
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_DetailWaveTexture_02.T_DetailWaveTexture_02"
+          ],
+          "FoamNormalSoftHeightMap": [
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_Seafoam_03_NSH.T_Seafoam_03_NSH",
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_Seafoam_03_NSH.T_Seafoam_03_NSH"
+          ],
+          "InteractionRT": [
+            "/PCGPlugins/ShallowWater/VelocityHeight/RT_InteractionNormal.RT_InteractionNormal",
+            "/PCGPlugins/ShallowWater/VelocityHeight/RT_InteractionNormal.RT_InteractionNormal"
+          ]
+        },
+        "static_switch": {
+          "SwithSim": [
+            false,
+            false
+          ],
+          "UseDetailWave": [
+            true,
+            true
+          ],
+          "UseDetailWaveWPO": [
+            true,
+            true
+          ],
+          "UseFoam": [
+            true,
+            true
+          ],
+          "UseFoamDistortion": [
+            true,
+            true
+          ]
+        }
+      },
+      "stats": {
+        "original": {
+          "num_vertex_shader_instructions": 339,
+          "num_pixel_shader_instructions": 1124,
+          "num_samplers": 6,
+          "num_vertex_texture_samples": 4,
+          "num_pixel_texture_samples": 16
+        },
+        "custom": {
+          "num_vertex_shader_instructions": 339,
+          "num_pixel_shader_instructions": 1134,
+          "num_samplers": 6,
+          "num_vertex_texture_samples": 4,
+          "num_pixel_texture_samples": 16
+        }
+      }
+    },
+    {
+      "source": "/PCGPlugins/ShallowWater/VelocityHeight/CSSWData/MI_CSSW_Water_3333333",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_Water_3333333_Custom.MI_CSSW_Water_3333333_Custom",
+      "parameters": {
+        "scalar": {
+          "CheapScatteringDetails": [
+            0.5,
+            0.5
+          ],
+          "CheapScatteringPower": [
+            2.0,
+            2.0
+          ],
+          "CheapScatteringScale": [
+            10.0,
+            10.0
+          ],
+          "DetailWaveHeight": [
+            18.0,
+            18.0
+          ],
+          "DetailWaveLength": [
+            800.0,
+            800.0
+          ],
+          "DetailWaveRange": [
+            25000.0,
+            25000.0
+          ],
+          "DetailWaveUVSwitching": [
+            1.0,
+            1.0
+          ],
+          "DetailWaveUVVelocity": [
+            1.0,
+            1.0
+          ],
+          "FoamColorAlpha": [
+            0.0,
+            0.0
+          ],
+          "FoamColorDetail": [
+            0.5,
+            0.5
+          ],
+          "FoamDistortionIntensity": [
+            40.0,
+            40.0
+          ],
+          "FoamDistortionScale": [
+            0.0020000000949949026,
+            0.0020000000949949026
+          ],
+          "FoamDistortionSpeed": [
+            0.10000000149011612,
+            0.10000000149011612
+          ],
+          "FoamDitheringAlpha": [
+            0.3499999940395355,
+            0.3499999940395355
+          ],
+          "FoamDitheringOffset": [
+            1.5,
+            1.5
+          ],
+          "FoamDitheringScale": [
+            40.0,
+            40.0
+          ],
+          "FoamHardnessIntensity": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "FoamHardnessWidth": [
+            0.3499999940395355,
+            0.3499999940395355
+          ],
+          "FoamNormalBlend": [
+            2.0,
+            2.0
+          ],
+          "FoamNormalScale": [
+            2.0,
+            2.0
+          ],
+          "FoamRoughness": [
+            0.20000000298023224,
+            0.20000000298023224
+          ],
+          "FoamShallowOffset": [
+            0.10000000149011612,
+            0.10000000149011612
+          ],
+          "FoamShallowScale": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "FoamSoftBase": [
+            0.30000001192092896,
+            0.30000001192092896
+          ],
+          "FoamSoftIntensity": [
+            0.0,
+            0.0
+          ],
+          "FoamSoftMax": [
+            0.800000011920929,
+            0.800000011920929
+          ],
+          "FoamSoftVelocity": [
+            0.5,
+            0.5
+          ],
+          "FoamSpecular": [
+            0.20000000298023224,
+            0.20000000298023224
+          ],
+          "FoamUVAdvectionOffset": [
+            -0.5,
+            -0.5
+          ],
+          "FoamUVRandomization": [
+            1.0,
+            1.0
+          ],
+          "FoamUVScale": [
+            0.001500000013038516,
+            0.001500000013038516
+          ],
+          "FoamUVSpeed": [
+            0.800000011920929,
+            0.800000011920929
+          ],
+          "FoamUVVelocity": [
+            1.0,
+            1.0
+          ],
+          "NormalMaskPower": [
+            0.75,
+            0.75
+          ],
+          "Offset": [
+            0.0,
+            0.0
+          ],
+          "OpPower": [
+            1.0,
+            1.0
+          ],
+          "SurfacePhaseG0": [
+            2.6235299110412598,
+            2.6235299110412598
+          ],
+          "VelScale": [
+            1.0,
+            1.0
+          ],
+          "WaterRoughnessMin": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "WaveDetailFastFoam": [
+            1.0,
+            1.0
+          ],
+          "WaveDetailWPOScale": [
+            1.0,
+            1.0
+          ],
+          "WaveTextureHeight": [
+            300.0,
+            300.0
+          ],
+          "WaveTextureOffsetZ": [
+            -10000.0,
+            -10000.0
+          ],
+          "WorldUVScale": [
+            0.0010000000474974513,
+            0.0010000000474974513
+          ]
+        },
+        "vector": {
+          "CSSW_SimCenter": [
+            [
+              1605.0,
+              1785.0,
+              0.0,
+              0.0
+            ],
+            [
+              1605.0,
+              1785.0,
+              0.0,
+              0.0
+            ]
+          ],
+          "ColorBehind0": [
+            [
+              0.6520000100135803,
+              0.8094620108604431,
+              0.9353910088539124,
+              1.0
+            ],
+            [
+              0.6520000100135803,
+              0.8094620108604431,
+              0.9353910088539124,
+              1.0
+            ]
+          ],
+          "FoamColorBase": [
+            [
+              0.5,
+              0.5,
+              0.5,
+              0.30000001192092896
+            ],
+            [
+              0.5,
+              0.5,
+              0.5,
+              0.30000001192092896
+            ]
+          ],
+          "FoamEmissive": [
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.009999999776482582
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.009999999776482582
+            ]
+          ],
+          "SurfaceAbsorption0": [
+            [
+              200.0,
+              200.0,
+              140.0,
+              1.2000000476837158
+            ],
+            [
+              200.0,
+              200.0,
+              140.0,
+              1.2000000476837158
+            ]
+          ],
+          "SurfaceScattering0": [
+            [
+              0.20000000298023224,
+              0.30000001192092896,
+              0.4000000059604645,
+              0.0003000000142492354
+            ],
+            [
+              0.20000000298023224,
+              0.30000001192092896,
+              0.4000000059604645,
+              0.0003000000142492354
+            ]
+          ],
+          "WaterSpecular": [
+            [
+              0.07000000029802322,
+              0.30000001192092896,
+              12.0,
+              0.0
+            ],
+            [
+              0.07000000029802322,
+              0.30000001192092896,
+              12.0,
+              0.0
+            ]
+          ],
+          "WaveTextureOffsetScale": [
+            [
+              0.0,
+              0.0,
+              0.0001250000059371814,
+              0.0001250000059371814
+            ],
+            [
+              0.0,
+              0.0,
+              0.0001250000059371814,
+              0.0001250000059371814
+            ]
+          ]
+        },
+        "texture": {
+          "CSSW_DepthWet": [
+            "/PCGPlugins/ShallowWater/VelocityHeight/CSSWData/T_CSSW_DepthWet_3333333.T_CSSW_DepthWet_3333333",
+            "/PCGPlugins/ShallowWater/VelocityHeight/CSSWData/T_CSSW_DepthWet_3333333.T_CSSW_DepthWet_3333333"
+          ],
+          "CSSW_VelHeight": [
+            "/PCGPlugins/ShallowWater/VelocityHeight/CSSWData/T_CSSW_VelHeight_3333333.T_CSSW_VelHeight_3333333",
+            "/PCGPlugins/ShallowWater/VelocityHeight/CSSWData/T_CSSW_VelHeight_3333333.T_CSSW_VelHeight_3333333"
+          ],
+          "DetailWaveTexture": [
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_DetailWaveTexture_02.T_DetailWaveTexture_02",
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_DetailWaveTexture_02.T_DetailWaveTexture_02"
+          ],
+          "FoamNormalSoftHeightMap": [
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_Seafoam_03_NSH.T_Seafoam_03_NSH",
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_Seafoam_03_NSH.T_Seafoam_03_NSH"
+          ],
+          "InteractionRT": [
+            "/PCGPlugins/ShallowWater/VelocityHeight/RT_InteractionNormal.RT_InteractionNormal",
+            "/PCGPlugins/ShallowWater/VelocityHeight/RT_InteractionNormal.RT_InteractionNormal"
+          ]
+        },
+        "static_switch": {
+          "SwithSim": [
+            true,
+            true
+          ],
+          "UseDetailWave": [
+            true,
+            true
+          ],
+          "UseDetailWaveWPO": [
+            true,
+            true
+          ],
+          "UseFoam": [
+            true,
+            true
+          ],
+          "UseFoamDistortion": [
+            true,
+            true
+          ]
+        }
+      },
+      "stats": {
+        "original": {
+          "num_vertex_shader_instructions": 290,
+          "num_pixel_shader_instructions": 1112,
+          "num_samplers": 6,
+          "num_vertex_texture_samples": 0,
+          "num_pixel_texture_samples": 13
+        },
+        "custom": {
+          "num_vertex_shader_instructions": 290,
+          "num_pixel_shader_instructions": 1120,
+          "num_samplers": 6,
+          "num_vertex_texture_samples": 0,
+          "num_pixel_texture_samples": 13
+        }
+      }
+    },
+    {
+      "source": "/PCGPlugins/ShallowWater/VelocityHeight/CSSWData/MI_CSSW_Water_25155946",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_Water_25155946_Custom.MI_CSSW_Water_25155946_Custom",
+      "parameters": {
+        "scalar": {
+          "CheapScatteringDetails": [
+            0.5,
+            0.5
+          ],
+          "CheapScatteringPower": [
+            2.0,
+            2.0
+          ],
+          "CheapScatteringScale": [
+            10.0,
+            10.0
+          ],
+          "DetailWaveHeight": [
+            18.0,
+            18.0
+          ],
+          "DetailWaveLength": [
+            800.0,
+            800.0
+          ],
+          "DetailWaveRange": [
+            25000.0,
+            25000.0
+          ],
+          "DetailWaveUVSwitching": [
+            1.0,
+            1.0
+          ],
+          "DetailWaveUVVelocity": [
+            1.0,
+            1.0
+          ],
+          "FoamColorAlpha": [
+            0.0,
+            0.0
+          ],
+          "FoamColorDetail": [
+            0.5,
+            0.5
+          ],
+          "FoamDistortionIntensity": [
+            40.0,
+            40.0
+          ],
+          "FoamDistortionScale": [
+            0.0020000000949949026,
+            0.0020000000949949026
+          ],
+          "FoamDistortionSpeed": [
+            0.10000000149011612,
+            0.10000000149011612
+          ],
+          "FoamDitheringAlpha": [
+            0.3499999940395355,
+            0.3499999940395355
+          ],
+          "FoamDitheringOffset": [
+            1.5,
+            1.5
+          ],
+          "FoamDitheringScale": [
+            40.0,
+            40.0
+          ],
+          "FoamHardnessIntensity": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "FoamHardnessWidth": [
+            0.3499999940395355,
+            0.3499999940395355
+          ],
+          "FoamNormalBlend": [
+            2.0,
+            2.0
+          ],
+          "FoamNormalScale": [
+            2.0,
+            2.0
+          ],
+          "FoamRoughness": [
+            0.20000000298023224,
+            0.20000000298023224
+          ],
+          "FoamShallowOffset": [
+            0.10000000149011612,
+            0.10000000149011612
+          ],
+          "FoamShallowScale": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "FoamSoftBase": [
+            0.30000001192092896,
+            0.30000001192092896
+          ],
+          "FoamSoftIntensity": [
+            0.0,
+            0.0
+          ],
+          "FoamSoftMax": [
+            0.800000011920929,
+            0.800000011920929
+          ],
+          "FoamSoftVelocity": [
+            0.5,
+            0.5
+          ],
+          "FoamSpecular": [
+            0.20000000298023224,
+            0.20000000298023224
+          ],
+          "FoamUVAdvectionOffset": [
+            -0.5,
+            -0.5
+          ],
+          "FoamUVRandomization": [
+            1.0,
+            1.0
+          ],
+          "FoamUVScale": [
+            0.001500000013038516,
+            0.001500000013038516
+          ],
+          "FoamUVSpeed": [
+            0.800000011920929,
+            0.800000011920929
+          ],
+          "FoamUVVelocity": [
+            1.0,
+            1.0
+          ],
+          "NormalMaskPower": [
+            0.75,
+            0.75
+          ],
+          "Offset": [
+            0.0,
+            0.0
+          ],
+          "OpPower": [
+            1.0,
+            1.0
+          ],
+          "SurfacePhaseG0": [
+            2.6235299110412598,
+            2.6235299110412598
+          ],
+          "VelScale": [
+            1.0,
+            1.0
+          ],
+          "WaterRoughnessMin": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "WaveDetailFastFoam": [
+            1.0,
+            1.0
+          ],
+          "WaveDetailWPOScale": [
+            1.0,
+            1.0
+          ],
+          "WaveTextureHeight": [
+            300.0,
+            300.0
+          ],
+          "WaveTextureOffsetZ": [
+            -10000.0,
+            -10000.0
+          ],
+          "WorldUVScale": [
+            0.0010000000474974513,
+            0.0010000000474974513
+          ]
+        },
+        "vector": {
+          "CSSW_SimCenter": [
+            [
+              90.0,
+              -1120.0,
+              0.0,
+              0.0
+            ],
+            [
+              90.0,
+              -1120.0,
+              0.0,
+              0.0
+            ]
+          ],
+          "ColorBehind0": [
+            [
+              0.6520000100135803,
+              0.8094620108604431,
+              0.9353910088539124,
+              1.0
+            ],
+            [
+              0.6520000100135803,
+              0.8094620108604431,
+              0.9353910088539124,
+              1.0
+            ]
+          ],
+          "FoamColorBase": [
+            [
+              0.5,
+              0.5,
+              0.5,
+              0.30000001192092896
+            ],
+            [
+              0.5,
+              0.5,
+              0.5,
+              0.30000001192092896
+            ]
+          ],
+          "FoamEmissive": [
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.009999999776482582
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.009999999776482582
+            ]
+          ],
+          "SurfaceAbsorption0": [
+            [
+              200.0,
+              200.0,
+              140.0,
+              1.2000000476837158
+            ],
+            [
+              200.0,
+              200.0,
+              140.0,
+              1.2000000476837158
+            ]
+          ],
+          "SurfaceScattering0": [
+            [
+              0.20000000298023224,
+              0.30000001192092896,
+              0.4000000059604645,
+              0.0003000000142492354
+            ],
+            [
+              0.20000000298023224,
+              0.30000001192092896,
+              0.4000000059604645,
+              0.0003000000142492354
+            ]
+          ],
+          "WaterSpecular": [
+            [
+              0.07000000029802322,
+              0.30000001192092896,
+              12.0,
+              0.0
+            ],
+            [
+              0.07000000029802322,
+              0.30000001192092896,
+              12.0,
+              0.0
+            ]
+          ],
+          "WaveTextureOffsetScale": [
+            [
+              0.0,
+              0.0,
+              0.0001250000059371814,
+              0.0001250000059371814
+            ],
+            [
+              0.0,
+              0.0,
+              0.0001250000059371814,
+              0.0001250000059371814
+            ]
+          ]
+        },
+        "texture": {
+          "CSSW_DepthWet": [
+            "/Engine/Functions/Engine_MaterialFunctions02/PivotPainter2/Black_1x1_EXR_Texture.Black_1x1_EXR_Texture",
+            "/Engine/Functions/Engine_MaterialFunctions02/PivotPainter2/Black_1x1_EXR_Texture.Black_1x1_EXR_Texture"
+          ],
+          "CSSW_VelHeight": [
+            "/Engine/Functions/Engine_MaterialFunctions02/PivotPainter2/Black_1x1_EXR_Texture.Black_1x1_EXR_Texture",
+            "/Engine/Functions/Engine_MaterialFunctions02/PivotPainter2/Black_1x1_EXR_Texture.Black_1x1_EXR_Texture"
+          ],
+          "DetailWaveTexture": [
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_DetailWaveTexture_02.T_DetailWaveTexture_02",
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_DetailWaveTexture_02.T_DetailWaveTexture_02"
+          ],
+          "FoamNormalSoftHeightMap": [
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_Seafoam_03_NSH.T_Seafoam_03_NSH",
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_Seafoam_03_NSH.T_Seafoam_03_NSH"
+          ],
+          "InteractionRT": [
+            "/PCGPlugins/ShallowWater/VelocityHeight/RT_InteractionNormal.RT_InteractionNormal",
+            "/PCGPlugins/ShallowWater/VelocityHeight/RT_InteractionNormal.RT_InteractionNormal"
+          ]
+        },
+        "static_switch": {
+          "SwithSim": [
+            true,
+            true
+          ],
+          "UseDetailWave": [
+            true,
+            true
+          ],
+          "UseDetailWaveWPO": [
+            true,
+            true
+          ],
+          "UseFoam": [
+            true,
+            true
+          ],
+          "UseFoamDistortion": [
+            true,
+            true
+          ]
+        }
+      },
+      "stats": {
+        "original": {
+          "num_vertex_shader_instructions": 290,
+          "num_pixel_shader_instructions": 1112,
+          "num_samplers": 6,
+          "num_vertex_texture_samples": 0,
+          "num_pixel_texture_samples": 13
+        },
+        "custom": {
+          "num_vertex_shader_instructions": 290,
+          "num_pixel_shader_instructions": 1120,
+          "num_samplers": 6,
+          "num_vertex_texture_samples": 0,
+          "num_pixel_texture_samples": 13
+        }
+      }
+    },
+    {
+      "source": "/PCGPlugins/SpaceColonization/CSSWData/MI_CSSW_Water_8141441",
+      "copy": "/PCGPlugins/ShallowWater/Material30/Custom/MI_CSSW_Water_8141441_Custom.MI_CSSW_Water_8141441_Custom",
+      "parameters": {
+        "scalar": {
+          "CheapScatteringDetails": [
+            0.5,
+            0.5
+          ],
+          "CheapScatteringPower": [
+            2.0,
+            2.0
+          ],
+          "CheapScatteringScale": [
+            10.0,
+            10.0
+          ],
+          "DetailWaveHeight": [
+            18.0,
+            18.0
+          ],
+          "DetailWaveLength": [
+            800.0,
+            800.0
+          ],
+          "DetailWaveRange": [
+            25000.0,
+            25000.0
+          ],
+          "DetailWaveUVSwitching": [
+            1.0,
+            1.0
+          ],
+          "DetailWaveUVVelocity": [
+            1.0,
+            1.0
+          ],
+          "FoamColorAlpha": [
+            0.0,
+            0.0
+          ],
+          "FoamColorDetail": [
+            0.5,
+            0.5
+          ],
+          "FoamDistortionIntensity": [
+            40.0,
+            40.0
+          ],
+          "FoamDistortionScale": [
+            0.0020000000949949026,
+            0.0020000000949949026
+          ],
+          "FoamDistortionSpeed": [
+            0.10000000149011612,
+            0.10000000149011612
+          ],
+          "FoamDitheringAlpha": [
+            0.3499999940395355,
+            0.3499999940395355
+          ],
+          "FoamDitheringOffset": [
+            1.5,
+            1.5
+          ],
+          "FoamDitheringScale": [
+            40.0,
+            40.0
+          ],
+          "FoamHardnessIntensity": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "FoamHardnessWidth": [
+            0.3499999940395355,
+            0.3499999940395355
+          ],
+          "FoamNormalBlend": [
+            2.0,
+            2.0
+          ],
+          "FoamNormalScale": [
+            2.0,
+            2.0
+          ],
+          "FoamRoughness": [
+            0.20000000298023224,
+            0.20000000298023224
+          ],
+          "FoamShallowOffset": [
+            0.10000000149011612,
+            0.10000000149011612
+          ],
+          "FoamShallowScale": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "FoamSoftBase": [
+            0.30000001192092896,
+            0.30000001192092896
+          ],
+          "FoamSoftIntensity": [
+            0.0,
+            0.0
+          ],
+          "FoamSoftMax": [
+            0.800000011920929,
+            0.800000011920929
+          ],
+          "FoamSoftVelocity": [
+            0.5,
+            0.5
+          ],
+          "FoamSpecular": [
+            0.20000000298023224,
+            0.20000000298023224
+          ],
+          "FoamUVAdvectionOffset": [
+            -0.5,
+            -0.5
+          ],
+          "FoamUVRandomization": [
+            1.0,
+            1.0
+          ],
+          "FoamUVScale": [
+            0.001500000013038516,
+            0.001500000013038516
+          ],
+          "FoamUVSpeed": [
+            0.800000011920929,
+            0.800000011920929
+          ],
+          "FoamUVVelocity": [
+            1.0,
+            1.0
+          ],
+          "NormalMaskPower": [
+            0.75,
+            0.75
+          ],
+          "Offset": [
+            0.0,
+            0.0
+          ],
+          "OpPower": [
+            1.0,
+            1.0
+          ],
+          "SurfacePhaseG0": [
+            2.6235299110412598,
+            2.6235299110412598
+          ],
+          "VelScale": [
+            1.0,
+            1.0
+          ],
+          "WaterRoughnessMin": [
+            0.05000000074505806,
+            0.05000000074505806
+          ],
+          "WaveDetailFastFoam": [
+            1.0,
+            1.0
+          ],
+          "WaveDetailWPOScale": [
+            1.0,
+            1.0
+          ],
+          "WaveTextureHeight": [
+            300.0,
+            300.0
+          ],
+          "WaveTextureOffsetZ": [
+            -10000.0,
+            -10000.0
+          ],
+          "WorldUVScale": [
+            0.0010000000474974513,
+            0.0010000000474974513
+          ]
+        },
+        "vector": {
+          "CSSW_SimCenter": [
+            [
+              -3921.5537109375,
+              -4522.140625,
+              0.0,
+              0.0
+            ],
+            [
+              -3921.5537109375,
+              -4522.140625,
+              0.0,
+              0.0
+            ]
+          ],
+          "ColorBehind0": [
+            [
+              0.6520000100135803,
+              0.8094620108604431,
+              0.9353910088539124,
+              1.0
+            ],
+            [
+              0.6520000100135803,
+              0.8094620108604431,
+              0.9353910088539124,
+              1.0
+            ]
+          ],
+          "FoamColorBase": [
+            [
+              0.5,
+              0.5,
+              0.5,
+              0.30000001192092896
+            ],
+            [
+              0.5,
+              0.5,
+              0.5,
+              0.30000001192092896
+            ]
+          ],
+          "FoamEmissive": [
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.009999999776482582
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.009999999776482582
+            ]
+          ],
+          "SurfaceAbsorption0": [
+            [
+              200.0,
+              200.0,
+              140.0,
+              1.2000000476837158
+            ],
+            [
+              200.0,
+              200.0,
+              140.0,
+              1.2000000476837158
+            ]
+          ],
+          "SurfaceScattering0": [
+            [
+              0.20000000298023224,
+              0.30000001192092896,
+              0.4000000059604645,
+              0.0003000000142492354
+            ],
+            [
+              0.20000000298023224,
+              0.30000001192092896,
+              0.4000000059604645,
+              0.0003000000142492354
+            ]
+          ],
+          "WaterSpecular": [
+            [
+              0.07000000029802322,
+              0.30000001192092896,
+              12.0,
+              0.0
+            ],
+            [
+              0.07000000029802322,
+              0.30000001192092896,
+              12.0,
+              0.0
+            ]
+          ],
+          "WaveTextureOffsetScale": [
+            [
+              0.0,
+              0.0,
+              0.0001250000059371814,
+              0.0001250000059371814
+            ],
+            [
+              0.0,
+              0.0,
+              0.0001250000059371814,
+              0.0001250000059371814
+            ]
+          ]
+        },
+        "texture": {
+          "CSSW_DepthWet": [
+            "/PCGPlugins/SpaceColonization/CSSWData/T_CSSW_DepthWet_8141441.T_CSSW_DepthWet_8141441",
+            "/PCGPlugins/SpaceColonization/CSSWData/T_CSSW_DepthWet_8141441.T_CSSW_DepthWet_8141441"
+          ],
+          "CSSW_VelHeight": [
+            "/PCGPlugins/SpaceColonization/CSSWData/T_CSSW_VelHeight_8141441.T_CSSW_VelHeight_8141441",
+            "/PCGPlugins/SpaceColonization/CSSWData/T_CSSW_VelHeight_8141441.T_CSSW_VelHeight_8141441"
+          ],
+          "DetailWaveTexture": [
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_DetailWaveTexture_02.T_DetailWaveTexture_02",
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_DetailWaveTexture_02.T_DetailWaveTexture_02"
+          ],
+          "FoamNormalSoftHeightMap": [
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_Seafoam_03_NSH.T_Seafoam_03_NSH",
+            "/PCGPlugins/ShallowWater/Material30/Materials/Textures/T_Seafoam_03_NSH.T_Seafoam_03_NSH"
+          ],
+          "InteractionRT": [
+            "/PCGPlugins/ShallowWater/VelocityHeight/RT_InteractionNormal.RT_InteractionNormal",
+            "/PCGPlugins/ShallowWater/VelocityHeight/RT_InteractionNormal.RT_InteractionNormal"
+          ]
+        },
+        "static_switch": {
+          "SwithSim": [
+            true,
+            true
+          ],
+          "UseDetailWave": [
+            true,
+            true
+          ],
+          "UseDetailWaveWPO": [
+            true,
+            true
+          ],
+          "UseFoam": [
+            true,
+            true
+          ],
+          "UseFoamDistortion": [
+            true,
+            true
+          ]
+        }
+      },
+      "stats": {
+        "original": {
+          "num_vertex_shader_instructions": 290,
+          "num_pixel_shader_instructions": 1112,
+          "num_samplers": 6,
+          "num_vertex_texture_samples": 0,
+          "num_pixel_texture_samples": 13
+        },
+        "custom": {
+          "num_vertex_shader_instructions": 290,
+          "num_pixel_shader_instructions": 1120,
+          "num_samplers": 6,
+          "num_vertex_texture_samples": 0,
+          "num_pixel_texture_samples": 13
+        }
+      }
+    }
+  ],
+  "graphs": {
+    "M_FluxSurfaceOver": {
+      "expressions": 432,
+      "function_copies": []
+    },
+    "MF_FluidDetailWave": {
+      "expressions": 59,
+      "function_copies": [
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_SurfaceFluxSet_Custom.MF_SurfaceFluxSet_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_SurfaceFluxGet_Custom.MF_SurfaceFluxGet_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_SurfaceFluxSet_Custom.MF_SurfaceFluxSet_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_SurfaceFluxGet_Custom.MF_SurfaceFluxGet_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectWaveSample2D_Custom.MF_AdvectWaveSample2D_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_NormalAddDerivate_Custom.MF_NormalAddDerivate_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_DistantLayer_Custom.MF_DistantLayer_Custom"
+      ]
+    },
+    "MF_DistantLayer": {
+      "expressions": 21,
+      "function_copies": []
+    },
+    "MF_NormalAddDerivate": {
+      "expressions": 10,
+      "function_copies": []
+    },
+    "MF_AdvectWaveSample2D": {
+      "expressions": 32,
+      "function_copies": [
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectTexture2D_Custom.MF_AdvectTexture2D_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_WaveSampleDecode_Custom.MF_WaveSampleDecode_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_WaveSampleDecode_Custom.MF_WaveSampleDecode_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_WaveSampleDecode_Custom.MF_WaveSampleDecode_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectUV3_Custom.MF_AdvectUV3_Custom"
+      ]
+    },
+    "MF_AdvectUV3": {
+      "expressions": 38,
+      "function_copies": [
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectionData_Custom.MF_AdvectionData_Custom"
+      ]
+    },
+    "MF_AdvectionData": {
+      "expressions": 6,
+      "function_copies": []
+    },
+    "MF_WaveSampleDecode": {
+      "expressions": 29,
+      "function_copies": [
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_DecodeNormaDerivate_Custom.MF_DecodeNormaDerivate_Custom"
+      ]
+    },
+    "MF_DecodeNormaDerivate": {
+      "expressions": 12,
+      "function_copies": []
+    },
+    "MF_AdvectTexture2D": {
+      "expressions": 24,
+      "function_copies": []
+    },
+    "MF_SurfaceFluxGet": {
+      "expressions": 10,
+      "function_copies": []
+    },
+    "MF_SurfaceFluxSet": {
+      "expressions": 26,
+      "function_copies": [
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_SurfaceFluxGet_Custom.MF_SurfaceFluxGet_Custom"
+      ]
+    },
+    "MF_FluidFoam": {
+      "expressions": 66,
+      "function_copies": [
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_SurfaceFluxSet_Custom.MF_SurfaceFluxSet_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoamAdvect_Custom.MF_FluidFoamAdvect_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoamApply_Custom.MF_FluidFoamApply_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoamDistortion_Custom.MF_FluidFoamDistortion_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_SurfaceFluxGet_Custom.MF_SurfaceFluxGet_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoamShallow_Custom.MF_FluidFoamShallow_Custom"
+      ]
+    },
+    "MF_FluidFoamShallow": {
+      "expressions": 8,
+      "function_copies": []
+    },
+    "MF_FluidFoamDistortion": {
+      "expressions": 14,
+      "function_copies": []
+    },
+    "MF_FluidFoamApply": {
+      "expressions": 25,
+      "function_copies": [
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_NormalOverlay_Custom.MF_NormalOverlay_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_CombineTranslucent_Custom.MF_CombineTranslucent_Custom"
+      ]
+    },
+    "MF_CombineTranslucent": {
+      "expressions": 12,
+      "function_copies": []
+    },
+    "MF_NormalOverlay": {
+      "expressions": 9,
+      "function_copies": []
+    },
+    "MF_FluidFoamAdvect": {
+      "expressions": 30,
+      "function_copies": [
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectTexture2D_Custom.MF_AdvectTexture2D_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectionData_Custom.MF_AdvectionData_Custom",
+        "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_ReconstructNormal_Custom.MF_ReconstructNormal_Custom"
+      ]
+    },
+    "MF_ReconstructNormal": {
+      "expressions": 4,
+      "function_copies": []
+    }
+  },
+  "mismatches": [],
+  "flatten": {
+    "material": "/PCGPlugins/ShallowWater/Material30/Custom/M_CSSW_Surface_Custom_Flat",
+    "before": 88,
+    "after": 432,
+    "expanded_calls": 41,
+    "function_assets": [
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoam_Custom.MF_FluidFoam_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoamApply_Custom.MF_FluidFoamApply_Custom",
+      "/Engine/Functions/Engine_MaterialFunctions02/Utility/DitherTemporalAA.DitherTemporalAA",
+      "/Engine/Functions/Engine_MaterialFunctions02/Texturing/ScreenAlignedPixelToPixelUVs.ScreenAlignedPixelToPixelUVs",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidDetailWave_Custom.MF_FluidDetailWave_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_SurfaceFluxSet_Custom.MF_SurfaceFluxSet_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_SurfaceFluxGet_Custom.MF_SurfaceFluxGet_Custom",
+      "/Engine/Functions/Engine_MaterialFunctions02/Utility/BlendAngleCorrectedNormals.BlendAngleCorrectedNormals",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectWaveSample2D_Custom.MF_AdvectWaveSample2D_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectUV3_Custom.MF_AdvectUV3_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectionData_Custom.MF_AdvectionData_Custom",
+      "/Engine/Functions/Engine_MaterialFunctions02/Utility/MakeFloat3.MakeFloat3",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_WaveSampleDecode_Custom.MF_WaveSampleDecode_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_AdvectTexture2D_Custom.MF_AdvectTexture2D_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_DistantLayer_Custom.MF_DistantLayer_Custom",
+      "/Engine/Functions/Engine_MaterialFunctions02/Utility/BreakOutFloat3Components.BreakOutFloat3Components",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_NormalAddDerivate_Custom.MF_NormalAddDerivate_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_DecodeNormaDerivate_Custom.MF_DecodeNormaDerivate_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_CombineTranslucent_Custom.MF_CombineTranslucent_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoamAdvect_Custom.MF_FluidFoamAdvect_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_ReconstructNormal_Custom.MF_ReconstructNormal_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoamDistortion_Custom.MF_FluidFoamDistortion_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_FluidFoamShallow_Custom.MF_FluidFoamShallow_Custom",
+      "/PCGPlugins/ShallowWater/Material30/Custom/Functions/MF_NormalOverlay_Custom.MF_NormalOverlay_Custom"
+    ],
+    "node_types": {
+      "StaticSwitchParameter": 8,
+      "MakeMaterialAttributes": 7,
+      "BreakMaterialAttributes": 11,
+      "Constant": 31,
+      "Custom": 101,
+      "SceneDepthWithoutWater": 1,
+      "PixelDepth": 2,
+      "CameraVectorWS": 5,
+      "WorldPosition": 6,
+      "VectorParameter": 8,
+      "PixelNormalWS": 2,
+      "ScalarParameter": 47,
+      "Add": 9,
+      "VertexColor": 2,
+      "TextureSampleParameter2D": 3,
+      "VertexNormalWS": 5,
+      "ComponentMask": 115,
+      "Multiply": 7,
+      "ScreenPosition": 4,
+      "AppendVector": 8,
+      "ViewProperty": 2,
+      "TextureSample": 9,
+      "Divide": 2,
+      "Constant2Vector": 2,
+      "Normalize": 1,
+      "Subtract": 1,
+      "DotProduct": 1,
+      "CollectionParameter": 1,
+      "StaticSwitch": 9,
+      "VertexInterpolator": 4,
+      "Time": 3,
+      "StaticBool": 5,
+      "If": 2,
+      "CameraPositionWS": 2,
+      "TextureObjectParameter": 2,
+      "ShaderStageSwitch": 2,
+      "ActorPositionWS": 1,
+      "SingleLayerWaterMaterialOutput": 1
+    },
+    "foreign_connections": [],
+    "stats": {
+      "num_vertex_shader_instructions": 339,
+      "num_pixel_shader_instructions": 1134,
+      "num_samplers": 6,
+      "num_vertex_texture_samples": 4,
+      "num_pixel_texture_samples": 16
+    },
+    "recreated_without_function_owners": true,
+    "expanded_call_contexts": [
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_1:BlendAngleCorrectedNormals",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_2:DitherTemporalAA",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_2:DitherTemporalAA/MaterialExpressionMaterialFunctionCall_24:ScreenAlignedPixelToPixelUVs",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_1:DitherTemporalAA",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_1:DitherTemporalAA/MaterialExpressionMaterialFunctionCall_24:ScreenAlignedPixelToPixelUVs",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_2:MF_FluidFoamAdvect_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_2:MF_FluidFoamAdvect_Custom/MaterialExpressionMaterialFunctionCall_0:BreakOutFloat3Components",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_2:MF_FluidFoamAdvect_Custom/MaterialExpressionMaterialFunctionCall_1:MF_AdvectTexture2D_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_2:MF_FluidFoamAdvect_Custom/MaterialExpressionMaterialFunctionCall_1:MF_AdvectTexture2D_Custom/MaterialExpressionMaterialFunctionCall_2:BreakOutFloat3Components",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_2:MF_FluidFoamAdvect_Custom/MaterialExpressionMaterialFunctionCall_3:MF_AdvectionData_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_2:MF_FluidFoamAdvect_Custom/MaterialExpressionMaterialFunctionCall_4:MF_ReconstructNormal_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoamApply_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoamApply_Custom/MaterialExpressionMaterialFunctionCall_0:MF_NormalOverlay_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoamApply_Custom/MaterialExpressionMaterialFunctionCall_1:MF_CombineTranslucent_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_5:MF_FluidFoamDistortion_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_7:MF_SurfaceFluxGet_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_3:MF_FluidFoam_Custom/MaterialExpressionMaterialFunctionCall_8:MF_FluidFoamShallow_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_0:MF_SurfaceFluxSet_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_0:MF_SurfaceFluxSet_Custom/MaterialExpressionMaterialFunctionCall_0:MF_SurfaceFluxGet_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_13:MF_SurfaceFluxSet_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_13:MF_SurfaceFluxSet_Custom/MaterialExpressionMaterialFunctionCall_0:MF_SurfaceFluxGet_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_14:MF_SurfaceFluxGet_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_0:MF_AdvectTexture2D_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_11:BreakOutFloat3Components",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_14:MakeFloat3",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_1:MakeFloat3",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_4:MF_WaveSampleDecode_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_4:MF_WaveSampleDecode_Custom/MaterialExpressionMaterialFunctionCall_9:MF_DecodeNormaDerivate_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_5:MF_WaveSampleDecode_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_5:MF_WaveSampleDecode_Custom/MaterialExpressionMaterialFunctionCall_9:MF_DecodeNormaDerivate_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_6:MF_WaveSampleDecode_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_6:MF_WaveSampleDecode_Custom/MaterialExpressionMaterialFunctionCall_9:MF_DecodeNormaDerivate_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_7:MF_AdvectUV3_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_7:MF_AdvectUV3_Custom/MaterialExpressionMaterialFunctionCall_0:BreakOutFloat3Components",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_18:MF_AdvectWaveSample2D_Custom/MaterialExpressionMaterialFunctionCall_7:MF_AdvectUV3_Custom/MaterialExpressionMaterialFunctionCall_3:MF_AdvectionData_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_1:MF_SurfaceFluxGet_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_2:MF_NormalAddDerivate_Custom",
+      "M_CSSW_Surface_Custom/MaterialExpressionMaterialFunctionCall_4:MF_FluidDetailWave_Custom/MaterialExpressionMaterialFunctionCall_4:MF_DistantLayer_Custom"
+    ],
+    "source_preserved_due_to_external_lock": "/PCGPlugins/ShallowWater/Material30/Custom/M_CSSW_Surface_Custom"
+  },
+  "master_stats": {
+    "original": {
+      "num_vertex_shader_instructions": 339,
+      "num_pixel_shader_instructions": 1124,
+      "num_samplers": 6,
+      "num_vertex_texture_samples": 4,
+      "num_pixel_texture_samples": 16
+    },
+    "custom": {
+      "num_vertex_shader_instructions": 339,
+      "num_pixel_shader_instructions": 1134,
+      "num_samplers": 6,
+      "num_vertex_texture_samples": 4,
+      "num_pixel_texture_samples": 16
+    }
+  }
+}
