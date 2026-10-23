@@ -16,14 +16,51 @@ namespace
 void CSGroundDecor_EvalPair(const TArray<CSGroundDecor::FShaperRing>& Rings, int32 Self,
 	const FVector2f& P, float& OutOwn, float& OutField)
 {
-	OutOwn = CSGroundShaperField::EvalShaper(P, Rings[Self].Profile, Rings[Self].Top, Rings[Self].Noise);
+	OutOwn = CSGroundShaperField::EvalShaper(P, Rings[Self].Header, Rings[Self].Sdf);
 	OutField = OutOwn;
 	for (int32 Index = 0; Index < Rings.Num(); ++Index)
 	{
 		if (Index == Self) continue;
-		OutField = FMath::Max(OutField,
-			CSGroundShaperField::EvalShaper(P, Rings[Index].Profile, Rings[Index].Top, Rings[Index].Noise));
+		OutField = FMath::Max(OutField, CSGroundShaperField::EvalShaper(P, Rings[Index].Header, Rings[Index].Sdf));
 	}
+}
+
+/**
+ * mask 形状上的一个锚点：沿 `Dir` 从台心往外，找距离场 = `Target` 的**最外**一个交点
+ * （凹形 mask 一条射线可能穿好几次，取最外那次 ⇒ 锚点总在裙边外沿那一侧）。
+ * 找不到（这个方向整条都在里面 / 外面）返回 false。朝向 = 距离场梯度（等值带的外法向）。
+ */
+bool CSGroundDecor_FindBandPoint(const CSGroundDecor::FShaperRing& Ring, const FVector2f& Centre, const FVector2f& Dir,
+	float Target, float MaxR, FVector2f& OutP, FVector2f& OutNormal)
+{
+	auto Sd = [&Ring](const FVector2f& P)
+	{
+		return CSGroundShaperField::SignedDistance(P, Ring.Header,
+			[&Ring](uint32 Index) { return Ring.Sdf.IsValidIndex(int32(Index)) ? Ring.Sdf[int32(Index)] : 0.0f; });
+	};
+	const float Step = FMath::Max(Ring.Header.Frame.W, 5.0f);
+	float Lo = -1.0f;
+	float Prev = Sd(Centre) - Target;
+	for (float R = Step; R <= MaxR + Step; R += Step)
+	{
+		const float Cur = Sd(Centre + Dir * R) - Target;
+		if (Prev <= 0.0f && Cur > 0.0f) Lo = R - Step;   // 由内到外穿过一次；继续走，留最外那次
+		Prev = Cur;
+	}
+	if (Lo < 0.0f) return false;
+	float A = Lo, B = Lo + Step;
+	for (int32 Iter = 0; Iter < 16; ++Iter)
+	{
+		const float M = 0.5f * (A + B);
+		if (Sd(Centre + Dir * M) - Target > 0.0f) B = M; else A = M;
+	}
+	OutP = Centre + Dir * (0.5f * (A + B));
+	const float E = 0.5f * Step;
+	const FVector2f G(
+		Sd(OutP + FVector2f(E, 0.0f)) - Sd(OutP - FVector2f(E, 0.0f)),
+		Sd(OutP + FVector2f(0.0f, E)) - Sd(OutP - FVector2f(0.0f, E)));
+	OutNormal = G.SizeSquared() > 1e-12f ? G.GetSafeNormal() : Dir;
+	return true;
 }
 
 /**
@@ -47,8 +84,8 @@ uint32 RingKey(const FString& ShaperName)
 
 float RingRadius(const FShaperRing& Ring, const CSHouseDecor::FParams& Params)
 {
-	const float Radius = FMath::Max(Ring.Profile.Z, 0.0f);
-	const float Falloff = FMath::Max(Ring.Profile.W, 0.0f);
+	const float Radius = FMath::Max(Ring.Header.Profile.Z, 0.0f);
+	const float Falloff = FMath::Max(Ring.Header.Profile.W, 0.0f);
 	return Radius + Falloff * FMath::Clamp(Params.SkirtBandT, 0.0f, 1.0f);
 }
 
@@ -71,17 +108,22 @@ void BuildSkirtAnchors(const FSite& Site, const CSHouseDecor::FParams& Params,
 		const float R = RingRadius(Ring, Params);
 		if (R <= UE_KINDA_SMALL_NUMBER) continue;
 		// 台高为 0 的塑形物压根不隆起，它没有裙 —— 摆一圈桶在平地上读起来像凭空掉的。
-		if (CSGroundShaperField::PeakHeight(Ring.Top) <= UE_KINDA_SMALL_NUMBER) continue;
+		if (CSGroundShaperField::PeakHeight(Ring.Header.Top) <= UE_KINDA_SMALL_NUMBER) continue;
 
 		const int32 Count = FMath::Max(1, FMath::RoundToInt(UE_TWO_PI * R / Spacing));
-		const FVector2f Centre(Ring.Profile.X, Ring.Profile.Y);
+		const FVector2f Centre(Ring.Header.Profile.X, Ring.Header.Profile.Y);
+		const bool bMaskShape = Ring.Header.Noise.Z >= 2.0f && !Ring.Sdf.IsEmpty();
+		const float BandTarget = FMath::Max(Ring.Header.Profile.W, 0.0f) * FMath::Clamp(Params.SkirtBandT, 0.0f, 1.0f);
 
 		for (int32 Index = 0; Index < Count; ++Index)
 		{
 			// 半格偏移：整圈的第 0 个不落在 +X 轴上，否则一排塑形物的摆件会在同一条线上对齐。
 			const double Angle = UE_TWO_PI * (double(Index) + 0.5) / double(Count);
 			const FVector2f Dir(float(FMath::Cos(Angle)), float(FMath::Sin(Angle)));
-			const FVector2f P = Centre + Dir * R;
+			// 圆盘：解析圆，逐位同改 mask 之前。mask：沿这个方向找同一条等值带。
+			FVector2f P = Centre + Dir * R;
+			FVector2f Outward = Dir;
+			if (bMaskShape && !CSGroundDecor_FindBandPoint(Ring, Centre, Dir, BandTarget, R, P, Outward)) continue;
 			const FVector2D WorldXY(P.X, P.Y);
 
 			// ① 这一段地表是不是本座的裙（合成场取 max ⇒ 邻座更高就不是）。
@@ -107,7 +149,7 @@ void BuildSkirtAnchors(const FSite& Site, const CSHouseDecor::FParams& Params,
 			// 埋深：斜坡上摆件的底面与地表只在一点相切，不埋就有一半悬空（见 `SkirtEmbed`）。
 			Anchor.Location = FVector(WorldXY.X, WorldXY.Y, GroundZ - double(FMath::Max(Params.SkirtEmbed, 0.0f)));
 			// 朝外 = 背离台心，与墙脚那一家的 `Strip.N` 同一个读法。
-			Anchor.Facing = FVector(Dir.X, Dir.Y, 0.0).GetSafeNormal(UE_SMALL_NUMBER, FVector::ForwardVector);
+			Anchor.Facing = FVector(Outward.X, Outward.Y, 0.0).GetSafeNormal(UE_SMALL_NUMBER, FVector::ForwardVector);
 			// 立直，不跟着坡歪：歪着的桶读起来像穿模（屋顶那两家也是这么定的）。
 			Anchor.Up = FVector::UpVector;
 			OutAnchors.Add(Anchor);

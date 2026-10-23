@@ -152,7 +152,7 @@ bool Scan(
 	// 空 palette 也要跑：塑形物被删光时正是"全 0 高度场"把石阶清空的那一趟
 	// （counter 清零后没有一格跨层，实例数自然归 0，不需要额外的 clear 路径）。
 	TArray<FVector4f> UploadParams = ShaperParams;
-	const int32 ShaperCount = UploadParams.Num() / CSGroundShaperField::Float4sPerShaper;
+	const int32 ShaperCount = CSGroundShaperField::NumShapers(UploadParams);   // 前缀里读：池子跟在头后面，不能再按长度除
 	if (UploadParams.IsEmpty()) UploadParams.Add(FVector4f::Zero());   // 结构化 buffer 不能是 0 长度
 
 	ENQUEUE_RENDER_COMMAND(CSGroundStairsScan)(

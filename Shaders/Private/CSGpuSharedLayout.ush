@@ -40,5 +40,7 @@
 #define CS_HOUSE_FRAME_FLAG_MID_FLAT   8
 
 // ── 塑形物高度场（CSGroundShaperField.ush ↔ CSGroundShaperField.h）──────────────────────
-// 每座塑形物在 GroundShaperParams 里占几个 float4：Profile / Top / Noise。
-#define CS_GROUND_SHAPER_FLOAT4S 3
+// GroundShaperParams = [0] 前缀 (塑形物数, SDF 池起点 float4 下标, _, _) + 每座 CS_GROUND_SHAPER_FLOAT4S 个
+// float4（Profile / Top / Noise / Frame / Shape）+ 末尾的 SDF 池（每个 float4 装 4 个 texel）。布局详见 CSGroundShaperField.h。
+#define CS_GROUND_SHAPER_PREFIX_FLOAT4S 1
+#define CS_GROUND_SHAPER_FLOAT4S 5

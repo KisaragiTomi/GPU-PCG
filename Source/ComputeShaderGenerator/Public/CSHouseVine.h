@@ -167,7 +167,7 @@ struct FParams
 	 * `MaxLean` 默认 1.15 时上界是 **2.30 rad ≈ 131.8°**，藤在洞缘和墙角上"折断"式急拐。
 	 * 改法见 `BuildPlan` 里那段候选扫描：障碍处不再改写倾角，只在 `[±MaxTurn]` 的预算内**转向**。
 	 *
-	 * 反编译实证（`Docs/TinyGlade/VineObstacleTurning_20260912.md`）：TG 的 `ivy_grower` 里
+	 * 反编译实证（`Docs/TinyGlade/Vine_ObstacleTurning.md`）：TG 的 `ivy_grower` 里
 	 * **一次镜像/归零都没有** —— 方向来自 `IvyDirectionProposer::get_direction`，
 	 * 它是**位置的连续函数**（两层 FastNoise 在 `pos / 2.8 m` 上取样），而步长只有 0.21 m，
 	 * 一步只走过 7.5% 个波长，所以 TG 的小折角是结构性的、不是调出来的。

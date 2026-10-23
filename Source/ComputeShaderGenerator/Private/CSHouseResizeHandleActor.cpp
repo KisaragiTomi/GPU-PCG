@@ -13,7 +13,7 @@ ACSHouseResizeHandleActor::ACSHouseResizeHandleActor()
 	// 根组件、不 tick、Movable 都由基类构造好了。这边只加自己的示意箭头。
 	// （宿主是生成时就钉死的，不像特征标记要在拖拽期逐帧重解析，所以照旧不 tick。）
 
-	// 示意箭头：编辑器里"抓这儿推墙"的提示，游戏里不存在。与地形塑形物的示意圆柱同一路数。
+	// 示意箭头：编辑器里"抓这儿推墙"的提示，游戏里不存在。
 	ArrowComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Arrow"));
 	ArrowComponent->SetupAttachment(RootComponent);
 	MakeEditorGizmoProp(ArrowComponent);

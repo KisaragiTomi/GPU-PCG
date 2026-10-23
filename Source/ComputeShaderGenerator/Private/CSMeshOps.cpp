@@ -1514,7 +1514,7 @@ UCSMesh* UCSMeshOps::DisplaceGroundShapers(
 	if (!Target || VertsX < 2 || VertsY < 2 || CellSize <= 0.0f) return Target;
 
 	// 空 palette 也要跑：塑形物被删掉时正是"全 0 高度场"把隆起抹平的那一趟。
-	const int32 ShaperCount = ShaperParams.Num() / CSGroundShaperField::Float4sPerShaper;
+	const int32 ShaperCount = CSGroundShaperField::NumShapers(ShaperParams);   // 前缀里读：池子跟在头后面，不能再按长度除
 	TArray<FVector4f> UploadParams = ShaperParams;
 	if (UploadParams.IsEmpty()) UploadParams.Add(FVector4f::Zero());   // 结构化 buffer 不能是 0 长度
 
@@ -1557,12 +1557,15 @@ UCSMesh* UCSMeshOps::DisplaceGroundShapers(
 		if (Bounds.IsValid)
 		{
 			float MaxTop = 0.0f;
-			for (int32 Index = 0; Index + CSGroundShaperField::Float4sPerShaper <= ShaperParams.Num(); Index += CSGroundShaperField::Float4sPerShaper)
+			float MinBottom = 0.0f;   // 坑（负台高）往下撑
+			for (int32 Index = 0; Index < ShaperCount; ++Index)
 			{
-				// 峰值而不是台高：二次抬升在台顶又加了一档，按台高收边会把最顶那圈顶点裁掉。
-				MaxTop = FMath::Max(MaxTop, CSGroundShaperField::PeakHeight(ShaperParams[Index + 1]));
+				// 峰值而不是打包头里的台高（那份已除过二次抬升），按它收边会把最顶那圈顶点裁掉。
+				const float Peak = CSGroundShaperField::PeakHeight(CSGroundShaperField::GetHeader(ShaperParams, Index).Top);
+				MaxTop = FMath::Max(MaxTop, Peak);
+				MinBottom = FMath::Min(MinBottom, Peak);
 			}
-			Bounds.Min.Z = FMath::Min(Bounds.Min.Z, double(BaseZ) - 1.0);
+			Bounds.Min.Z = FMath::Min(Bounds.Min.Z, double(BaseZ + MinBottom) - 1.0);
 			Bounds.Max.Z = FMath::Max(Bounds.Max.Z, double(BaseZ + MaxTop) + 1.0);
 			Context.SetWorldBounds(Bounds);
 		}

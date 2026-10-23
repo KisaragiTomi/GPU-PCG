@@ -235,7 +235,7 @@ void ScanGroundStairsCS(uint3 Id : SV_DispatchThreadID)
 	// ⚠️ 只当门控：底下解等值线、算块底 Z 仍旧读完整的场，否则矮座压在高座上的那一片
 	//    会读到比真地面低的值，石阶陷进土里。
 	if (StairMinMoundHeight > 0.0f
-		&& GroundShaperHeightAtXYTallOnly(Centre, StairMinMoundHeight) <= 0.0f) return;
+		&& abs(GroundShaperHeightAtXYTallOnly(Centre, StairMinMoundHeight)) <= 0.0f) return;   // 坑按深度判
 
 	// 掐掉最顶上那一级：台顶那圈等值线贴着平台边缘，人已经站上去了，那一级只是个绊脚的沿。
 	// 顶层号由**整座的峰高**给（本格高度看不出自己离峰顶多远）：跨过的层是 L·Step < Peak，

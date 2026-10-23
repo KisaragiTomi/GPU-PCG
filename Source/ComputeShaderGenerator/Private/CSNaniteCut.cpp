@@ -2,6 +2,7 @@
 
 #include "CSMesh.h"
 #include "CSMeshOps.h"
+#include "CSGpuSurfaceBudget.h"
 #include "CSNaniteCutLayout.ush"
 
 #include "Components/InstancedStaticMeshComponent.h"
@@ -20,6 +21,7 @@
 #include "Rendering/NaniteStreamingManager.h"
 #include "RHICommandList.h"
 #include "ShaderParameterStruct.h"
+#include "ShaderCompilerCore.h"
 #include "StaticMeshResources.h"
 #if WITH_EDITOR
 #include "StaticMeshCompiler.h"
@@ -533,6 +535,21 @@ UCSMesh* UCSNaniteCutOps::AppendNaniteCuts(
 	}
 
 	// ---- 3. 计数趟（按 cluster 预算分趟），回读每趟用到的前缀 -------------------------------
+	uint64 ExistingBufferBytes = 0;
+	if (const FCSMeshResident* Resident = Target->GetResidentPtr())
+	{
+		for (const auto& Stream : Resident->Streams)
+		{
+			if (Stream.Pooled) ExistingBufferBytes += CSGpuSurfaceBudget::BufferBytes(Stream.Pooled->GetSize());
+		}
+	}
+	const auto CountBufferBytes = [ExistingBufferBytes](uint64 Requests, uint64 Nodes, uint64 Clusters)
+	{
+		using CSGpuSurfaceBudget::BufferBytes;
+		return ExistingBufferBytes + BufferBytes(16 * Requests)
+			+ BufferBytes(4 * (CSNC_HEADER_UINTS + Requests * CSNC_STATS_UINTS + Clusters * CSNC_RECORD_UINTS))
+			+ 2 * BufferBytes(8 * Nodes) + BufferBytes(16 * Clusters) + BufferBytes(12);
+	};
 	TArray<FCSNaniteCutRecord> Records;
 	TArray<uint32> Stats;   // 按全局请求号，CSNC_STATS_UINTS 个一组
 	Stats.SetNumZeroed(Ready.Num() * CSNC_STATS_UINTS);
@@ -546,6 +563,16 @@ UCSMesh* UCSNaniteCutOps::AppendNaniteCuts(
 		{
 			const FCSNaniteCutRuntimeInfo& Info = RuntimeInfos[Ready[ChunkEnd]];
 			if (ChunkEnd > ChunkStart && ChunkClusters + Info.NumClusters > CSNaniteCut_MaxClustersPerChunk) break;
+			const uint64 NextBytes = CountBufferBytes(uint64(ChunkEnd - ChunkStart + 1),
+				ChunkNodes + Info.NumHierarchyNodes, ChunkClusters + Info.NumClusters);
+			if (Options.MaxWorkingMemoryBytes > 0 && NextBytes > Options.MaxWorkingMemoryBytes)
+			{
+				if (ChunkEnd > ChunkStart) break;
+				UE_LOG(LogCSNaniteCut, Warning, TEXT("[CSNaniteCut] One source's traversal exceeds the working buffer budget (%llu > %llu bytes); no extraction allocated."), NextBytes, Options.MaxWorkingMemoryBytes);
+				CSNaniteCut_SetAllStatus(OutResult, Prepared, Ready, ECSNaniteCutStatus::Failed);
+				Finish();
+				return Target;
+			}
 			ChunkClusters += Info.NumClusters;
 			ChunkNodes += Info.NumHierarchyNodes;
 			++ChunkEnd;
@@ -682,6 +709,14 @@ UCSMesh* UCSNaniteCutOps::AppendNaniteCuts(
 		NextVertex += Record.Vertices;
 		NextIndex += uint64(Record.Triangles) * 3u;
 	}
+	if (Options.MaxTriangles > 0 && (NextIndex - BaseIndices) / 3u > uint64(Options.MaxTriangles))
+	{
+		UE_LOG(LogCSNaniteCut, Warning, TEXT("[CSNaniteCut] Triangle budget exceeded (%llu > %d); increase CutError or reduce the query region."),
+			(NextIndex - BaseIndices) / 3u, Options.MaxTriangles);
+		CSNaniteCut_SetAllStatus(OutResult, Prepared, Ready, ECSNaniteCutStatus::Failed);
+		Finish();
+		return Target;
+	}
 	if (NextVertex > uint64(MAX_int32) || NextIndex > uint64(MAX_int32))
 	{
 		UE_LOG(LogCSNaniteCut, Error, TEXT("[CSNaniteCut] Result too large for one mesh (%llu vertices, %llu indices)."), NextVertex, NextIndex);
@@ -744,6 +779,30 @@ UCSMesh* UCSNaniteCutOps::AppendNaniteCuts(
 		WrittenBounds += Entry.WorldBounds;
 	}
 	if (MaterialRemap.Num() == 0) MaterialRemap.Add(0u);
+	if (Options.MaxWorkingMemoryBytes > 0)
+	{
+		using CSGpuSurfaceBudget::BufferBytes;
+		FCSMeshResident DefaultResident;
+		DefaultResident.AddStandardTriangleStreams();
+		const FCSMeshResident* Resident = Target->GetResidentPtr();
+		if (!Resident || Resident->Streams.IsEmpty()) Resident = &DefaultResident;
+		const uint32 VertexCapacity = FMath::Max3(NewVertexCount, Resident->VertexCapacity, 3u);
+		const uint32 IndexCapacity = FMath::Max3(NewIndexCount, Resident->IndexCapacity, 3u);
+		// Include the old allocation during growth; one alignment allowance per new stream.
+		const uint64 DecodeBytes = ExistingBufferBytes + uint64(Resident->GetRequiredBytes(VertexCapacity, IndexCapacity))
+			+ uint64(Resident->Streams.Num()) * CSGpuSurfaceBudget::Alignment
+			+ BufferBytes(uint64(Plan.Num()) * sizeof(FCSNaniteCutPlanEntry))
+			+ BufferBytes(uint64(WriteMatrices.Num()) * sizeof(FVector4f))
+			+ BufferBytes(uint64(WriteInfo.Num()) * sizeof(FUintVector4))
+			+ BufferBytes(uint64(MaterialRemap.Num()) * sizeof(uint32));
+		if (DecodeBytes > Options.MaxWorkingMemoryBytes)
+		{
+			UE_LOG(LogCSNaniteCut, Warning, TEXT("[CSNaniteCut] Decode exceeds the working buffer budget (%llu > %llu bytes); no geometry allocated."), DecodeBytes, Options.MaxWorkingMemoryBytes);
+			CSNaniteCut_SetAllStatus(OutResult, Prepared, Ready, ECSNaniteCutStatus::Failed);
+			Finish();
+			return Target;
+		}
+	}
 
 	// ---- 5. 扩容 + 写出趟 ---------------------------------------------------------------------
 	// 计数趟与写出趟之间游戏线程一直阻塞着，不会渲染任何一帧，流送管理器也就不会挪动页 ——

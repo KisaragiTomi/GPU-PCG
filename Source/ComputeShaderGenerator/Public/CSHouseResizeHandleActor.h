@@ -15,7 +15,7 @@ class UStaticMeshComponent;
  * 多视口、VR 编辑这些全部白拿 —— 代价只是四个 `RF_Transient` actor。
  *
  * 它**不是** `ACSTinyGlade`：没有 `UCSMesh`、没有快照、不参与任何重求值。可见的只有一只
- * 编辑器示意箭头（`bIsEditorOnly`），与地形塑形物的圆柱同一路数。
+ * 编辑器示意箭头（`bIsEditorOnly`），游戏模式下不可见。
  *
  * ## 观感：TG 原版的推墙箭头
  *

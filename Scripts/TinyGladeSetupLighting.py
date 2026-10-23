@@ -3,7 +3,7 @@
 给两张演示关卡补上 PostProcessVolume（无限范围）+ ExponentialHeightFog，并把太阳的
 半影宽度调到 TG 的量级。
 
-**为什么需要这个脚本**：`Docs/TinyGlade/TinyGlade_模块对照与进度.md（卷四）` §7.2 实测 —— 两张演示关卡
+**为什么需要这个脚本**：`Docs/TinyGlade/Progress_ModuleComparison.md（卷四）` §7.2 实测 —— 两张演示关卡
 零 PostProcessVolume、零 ExponentialHeightFog，跑的全是 UE 出厂默认（默认色调曲线、
 默认 bloom、默认暗角、零 grading）。同一批 albedo 丢进出厂默认管线不会得到 TG 那张图，
 差的不是美术资产，是光照与后处理（同文 §5 归因表：≈60% 光照算法 + 25% 后处理 + 15% 资产）。

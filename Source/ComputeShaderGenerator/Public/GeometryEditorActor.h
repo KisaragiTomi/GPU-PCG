@@ -18,6 +18,7 @@
 class AStaticMeshActor;
 class UCSMesh;
 class UCSMeshRenderComponent;
+struct FCSVineTriangleSurfaceInputs;
 
 USTRUCT(BlueprintType, meta = (DisplayName = "SC Options"))
 struct COMPUTESHADERGENERATOR_API FSpaceColonizationOptions
@@ -114,6 +115,29 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Options)
 	bool bSurfaceAdsorption = true;
+
+	/** 直接使用 Nanite 误差截面 / 普通网格三角形吸附；关闭可对比旧体素路径。当前抽取准备为同步。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Options|Surface")
+	bool bUseNaniteTriangleSurface = true;
+
+	/** 世界空间 cm，越大面数越少。0 使用当前驻留最细层；不依赖玩家视角。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Options|Surface", meta = (ClampMin = "0"))
+	float NaniteSurfaceCutError = 1.0f;
+
+	/** 表面新增 GPU 缓冲预算（MiB），Nanite / 普通网格 / 地形共用，含抽取临时数据及 BVH。
+	 * 按实际缓冲布局换算三角形容量；超限拒绝，不截断表面。不含源资产、Nanite 流送池及藤蔓输出。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Options|Surface", meta = (ClampMin = "1", ClampMax = "128"))
+	int32 SurfaceMemoryBudgetMiB = 128;
+
+	/** 仅 GenerateVineGPUWithGlobalDistanceField 使用；原三角形 / 体素入口不读取这些参数。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Options|GlobalDistanceField", meta = (ClampMin = "1"))
+	float GDFMaxProjectionDistance = 200.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Options|GlobalDistanceField", meta = (ClampMin = "0.01"))
+	float GDFProjectionTolerance = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Options|GlobalDistanceField", meta = (ClampMin = "1", ClampMax = "32"))
+	int32 GDFProjectionIterations = 8;
 
 	// --- moved from FVisVineParameters ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Options, meta = (ClampMin = "0"))
@@ -279,6 +303,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = ContainerCheck)
 	bool GenerateVineGPU();
 
+	/** 独立 GDF 模式：在本世界真实渲染视图中采样全局距离场，不抽取三角形 / 构建表面体素。
+	 * 返回值仅表示递交；无可用视图 / GDF 时超时失败。原 GenerateVineGPU 保持原有模式选择。 */
+	UFUNCTION(BlueprintCallable, Category = ContainerCheck)
+	bool GenerateVineGPUWithGlobalDistanceField();
+
 	/** Drops everything a generation produced — the cached lines and surface triangles, the debug
 	 *  spline actor, and the vine geometry itself, which is unbound and released rather than merely
 	 *  emptied. Releasing is what keeps EnsureVineGeometry()'s contract: a retained mesh would answer
@@ -410,11 +439,14 @@ private:
 	 *  这个标志才是。没有它，连点两次生成会让第二次覆写第一次还在排队的那批常驻流，且两个完成
 	 *  回调都会去绑 mesh。 */
 	bool bVineBuildInFlight = false;
+	bool GenerateVineGPUInternal(bool bGlobalDistanceField);
+	uint64 VineGDFRequestGeneration = 0;
 
 	// GenerateVineGPU 备好、等着交给构建那张图的体素输入。不是 UPROPERTY：里面是 PIMPL 持有的
 	// 三角形请求数组，且只在一次生成内有效 —— VisVineGPUInternal 会把它 MoveTemp 进 build
 	// bundle，消费后即失效，所以每次 GenerateVineGPU 都重新准备。
 	FCSSurfaceVoxelPassInputs PendingSurfaceVoxelInputs;
+	TSharedPtr<FCSVineTriangleSurfaceInputs, ESPMode::ThreadSafe> PendingTriangleSurface;
 
 	// One-shot data upgrade for packages saved while this actor still owned a UDynamicMeshComponent.
 	// That component used to hold the vine surface material on slot 0, so dropping it would silently

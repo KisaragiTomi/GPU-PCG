@@ -170,7 +170,7 @@ struct COMPUTESHADERGENERATOR_API FCSWallVineSettings
 };
 
 /**
- * **墙的基类** —— 「房子变成墙」第 4 步（2026-09-22「统一房子和墙的逻辑」），计划见 `Docs/TinyGlade/TinyGladeWall_Plan.md`。
+ * **墙的基类** —— 「房子变成墙」第 4 步（2026-09-22「统一房子和墙的逻辑」），计划见 `Docs/TinyGlade/Plan_Wall.md`。
  *
  * TG 里实体只有墙，"建筑"是"围合的墙 + 屋顶"。这一层是两种墙共同的部分：
  *

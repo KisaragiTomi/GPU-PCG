@@ -1,0 +1,41 @@
+#include "/Engine/Public/Platform.ush"
+
+Buffer<float> SurfacePositions;
+Buffer<uint> SurfaceIndices;
+Buffer<float4> OtherTriangles;
+Buffer<uint> OtherCounter;
+RWBuffer<float4> RW_SurfaceSoup;
+uint NaniteTriangleCount;
+uint OtherTriangleCapacity;
+float3 SurfaceBoundsMin;
+float3 SurfaceBoundsMax;
+
+[numthreads(64, 1, 1)]
+void BuildVineSurfaceSoupCS(uint3 DTid : SV_DispatchThreadID)
+{
+    uint T = DTid.x;
+    if (T >= NaniteTriangleCount + OtherTriangleCapacity) return;
+    float3 A = 0.0f, B = 0.0f, C = 0.0f;
+    if (T < NaniteTriangleCount)
+    {
+        uint IA = SurfaceIndices[T * 3u] * 3u;
+        uint IB = SurfaceIndices[T * 3u + 1u] * 3u;
+        uint IC = SurfaceIndices[T * 3u + 2u] * 3u;
+        A = float3(SurfacePositions[IA], SurfacePositions[IA + 1u], SurfacePositions[IA + 2u]);
+        B = float3(SurfacePositions[IB], SurfacePositions[IB + 1u], SurfacePositions[IB + 2u]);
+        C = float3(SurfacePositions[IC], SurfacePositions[IC + 1u], SurfacePositions[IC + 2u]);
+    }
+    else if (T - NaniteTriangleCount < min(OtherCounter[0], OtherTriangleCapacity))
+    {
+        uint Base = (T - NaniteTriangleCount) * 3u;
+        A = OtherTriangles[Base].xyz;
+        B = OtherTriangles[Base + 1u].xyz;
+        C = OtherTriangles[Base + 2u].xyz;
+    }
+    // Keep crossing triangles conservatively. Unused/rejected slots are degenerate leaves,
+    // which the shared LBVH builder excludes from its bounds.
+    if (any(max(A, max(B, C)) < SurfaceBoundsMin) || any(min(A, min(B, C)) > SurfaceBoundsMax)) A = B = C = 0.0f;
+    RW_SurfaceSoup[T * 3u] = float4(A, 1.0f);
+    RW_SurfaceSoup[T * 3u + 1u] = float4(B, 1.0f);
+    RW_SurfaceSoup[T * 3u + 2u] = float4(C, 1.0f);
+}

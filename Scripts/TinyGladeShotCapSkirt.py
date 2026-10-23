@@ -153,7 +153,7 @@ def build():
     unreal.log("CAPSKIRT drawable-reason=%r（空串 = 可画）" % why)
 
     c = shaper.get_actor_location()
-    radius = shaper.get_editor_property("Radius")
+    radius = 0.5 * shaper.get_editor_property("MaskSize")   # 塑形物的 Radius 已删（09-29）：圆盘直径 = MaskSize，设了 mask 时是近似
     falloff = shaper.get_editor_property("FalloffDistance")
     reach = radius + falloff
 

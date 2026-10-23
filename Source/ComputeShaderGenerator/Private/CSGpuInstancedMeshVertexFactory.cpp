@@ -4,10 +4,16 @@
 #include "MeshBatch.h"
 #include "MeshDrawShaderBindings.h"
 #include "MeshMaterialShader.h"
+#include "Misc/FileHelper.h"
+#include "Misc/SecureHash.h"
 #include "RHIStaticStates.h"
+#include "ShaderCore.h"            // GetShaderSourceFilePath：把着色器的虚拟路径换成磁盘路径
 #include "ShaderParameterUtils.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogCSGpuInstancedVF, Log, All);
+
 IMPLEMENT_TYPE_LAYOUT(FCSGpuInstancedMeshVFShaderParameters);
+IMPLEMENT_TYPE_LAYOUT(FCSGpuInstancedIndexedVFShaderParameters);
 
 bool FCSGpuInstancedMeshVertexFactory::ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters)
 {
@@ -145,6 +151,96 @@ IMPLEMENT_VERTEX_FACTORY_PARAMETER_TYPE(FCSGpuInstancedMeshVertexFactory, SF_Pix
 // GPU-Scene instance data. No SupportsCachingMeshDrawCommands / SupportsStaticLighting either —
 // this factory only ever draws through the dynamic-relevance path of FCSGpuMeshSceneProxy.
 IMPLEMENT_VERTEX_FACTORY_TYPE(FCSGpuInstancedMeshVertexFactory, "/Engine/Private/LocalVertexFactory.ush",
+	  EVertexFactoryFlags::UsedWithMaterials
+	| EVertexFactoryFlags::SupportsDynamicLighting
+	| EVertexFactoryFlags::SupportsPrecisePrevWorldPos
+	| EVertexFactoryFlags::SupportsManualVertexFetch
+	| EVertexFactoryFlags::DoesNotSupportNullPixelShader
+	| EVertexFactoryFlags::SupportsPSOPrecaching
+);
+
+// -----------------------------------------------------------------------------
+// FCSGpuInstancedIndexedVertexFactory —— 可见源行号版
+// -----------------------------------------------------------------------------
+
+void FCSGpuInstancedIndexedVFShaderParameters::GetElementShaderBindings(
+	const class FSceneInterface* Scene,
+	const FSceneView* View,
+	const FMeshMaterialShader* Shader,
+	const EVertexInputStreamType InputStreamType,
+	ERHIFeatureLevel::Type FeatureLevel,
+	const FVertexFactory* VertexFactory,
+	const FMeshBatchElement& BatchElement,
+	FMeshDrawSingleShaderBindings& ShaderBindings,
+	FVertexInputStreamArray& VertexStreams) const
+{
+	const auto* IndexedVF = static_cast<const FCSGpuInstancedIndexedVertexFactory*>(VertexFactory);
+
+	FRHIUniformBuffer* VertexFactoryUniformBuffer = static_cast<FRHIUniformBuffer*>(BatchElement.VertexFactoryUserData);
+	if (!VertexFactoryUniformBuffer) VertexFactoryUniformBuffer = IndexedVF->GetUniformBuffer();
+
+	FLocalVertexFactoryShaderParametersBase::GetElementShaderBindingsBase(
+		Scene, View, Shader, InputStreamType, FeatureLevel, VertexFactory, BatchElement,
+		VertexFactoryUniformBuffer, ShaderBindings, VertexStreams);
+
+	// 这一级 LOD 在可见源行号缓冲里的区段起点；着色器拿 SV_InstanceID 加上它去查源行号。
+	ShaderBindings.Add(InstanceOffsetParameter, (uint32)FMath::Max(BatchElement.UserIndex, 0));
+	ShaderBindings.Add(InstanceRowsParameter, IndexedVF->GetInstanceRowsSRV());
+	ShaderBindings.Add(VisibleSourceIndicesParameter, IndexedVF->GetVisibleIndicesSRV());
+	ShaderBindings.Add(CustomDataIndexMaskParameter, IndexedVF->GetCustomDataIndexMask());
+
+	// 材质的 Per Instance Custom Data 仍经引擎的 InstanceVF 取（下标已是源行号，见生成的着色器）。
+	ShaderBindings.Add(Shader->GetUniformBufferParameter<FInstancedStaticMeshVertexFactoryUniformShaderParameters>(),
+		IndexedVF->GetInstanceUniformBuffer());
+
+	ShaderBindings.Add(InstancingOffsetParameter, FVector4f(ForceInit));
+	ShaderBindings.Add(Shader->GetUniformBufferParameter<FInstancedStaticMeshVFLooseUniformShaderParameters>(),
+		BatchElement.LooseParametersUniformBuffer);
+}
+
+void FCSGpuInstancedIndexedVertexFactory::VerifyShaderSourceUpToDate()
+{
+#if WITH_EDITOR
+	static bool bChecked = false;
+	if (bChecked) return;
+	bChecked = true;
+
+	const FString EnginePath = GetShaderSourceFilePath(TEXT("/Engine/Private/LocalVertexFactory.ush"));
+	const FString GeneratedPath = GetShaderSourceFilePath(TEXT("/Plugin/PCGPlugins/Shaders/Private/CSGpuInstancedIndexedVertexFactory.ush"));
+
+	FString EngineSource;
+	FString Generated;
+	// 读不到 = 没有源码可比（比如只带了编好的着色器），那就没有"过期"可言。
+	if (!FFileHelper::LoadFileToString(EngineSource, *EnginePath) || !FFileHelper::LoadFileToString(Generated, *GeneratedPath)) return;
+
+	// 与生成脚本同一口径：换行归一成 LF 之后的 UTF-8 字节。
+	EngineSource.ReplaceInline(TEXT("\r\n"), TEXT("\n"));
+	const FTCHARToUTF8 Utf8(*EngineSource);
+	FSHA1 Sha;
+	Sha.Update(reinterpret_cast<const uint8*>(Utf8.Get()), Utf8.Length());
+	Sha.Final();
+	uint8 Digest[FSHA1::DigestSize];
+	Sha.GetHash(Digest);
+	const FString Actual = BytesToHex(Digest, FSHA1::DigestSize).ToLower();
+
+	const FString Marker = TEXT("// SourceSHA1: ");
+	const int32 MarkerAt = Generated.Find(Marker, ESearchCase::CaseSensitive);
+	const FString Recorded = MarkerAt != INDEX_NONE ? Generated.Mid(MarkerAt + Marker.Len(), 40).ToLower() : FString();
+	if (Recorded != Actual)
+	{
+		UE_LOG(LogCSGpuInstancedVF, Error,
+			TEXT("CSGpuInstancedIndexedVertexFactory.ush 是照着另一份 LocalVertexFactory.ush 生成的（记录 %s，这台机器的引擎是 %s）。")
+			TEXT("引擎那份里改过的地方这边没跟上 —— 跑 Plugins/PCGPlugins/Scripts/GenerateGpuInstancedVertexFactoryShader.py 重新生成。"),
+			*Recorded, *Actual);
+	}
+#endif
+}
+
+IMPLEMENT_VERTEX_FACTORY_PARAMETER_TYPE(FCSGpuInstancedIndexedVertexFactory, SF_Vertex, FCSGpuInstancedIndexedVFShaderParameters);
+IMPLEMENT_VERTEX_FACTORY_PARAMETER_TYPE(FCSGpuInstancedIndexedVertexFactory, SF_Pixel, FCSGpuInstancedIndexedVFShaderParameters);
+
+// 标志与上面那个工厂逐项相同（同样不要 SupportsPrimitiveIdStream，理由见那边），只换着色器文件。
+IMPLEMENT_VERTEX_FACTORY_TYPE(FCSGpuInstancedIndexedVertexFactory, "/Plugin/PCGPlugins/Shaders/Private/CSGpuInstancedIndexedVertexFactory.ush",
 	  EVertexFactoryFlags::UsedWithMaterials
 	| EVertexFactoryFlags::SupportsDynamicLighting
 	| EVertexFactoryFlags::SupportsPrecisePrevWorldPos

@@ -5,7 +5,7 @@
 #include "CSHouseProfile.generated.h"
 
 /**
- * 洞的 2D 剖面求值器（TinyGladeHouse_Plan.md D4/D6/D8）。
+ * 洞的 2D 剖面求值器（Plan_House.md D4/D6/D8）。
  *
  * **开洞不走布尔**（用户裁决 2026-08-29「尽可能不用 MeshBoolean」）：洞的形状本来就是有限的
  * 原型集合（拱 / 矩形 / 圆…），每种配一条手写 2D 剖面，墙板生成时按剖面直接砌出带洞几何，

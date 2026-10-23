@@ -86,6 +86,14 @@ struct COMPUTESHADERGENERATOR_API FCSNaniteCutOptions
 {
 	GENERATED_BODY()
 
+	/** 本次新增三角形的上限；0 不限制。计数后、分配和解码前拒绝超限，绝不截断表面。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS NaniteCut", meta = (ClampMin = "0"))
+	int32 MaxTriangles = 0;
+
+	/** Optional C++ caller budget for live extraction buffers, including traversal and decode scratch.
+	 * Zero preserves the existing unlimited contract. Source Nanite streaming resources are excluded. */
+	uint64 MaxWorkingMemoryBytes = 0;
+
 	/** 追加到 Target 已有内容之后；关掉则替换。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS NaniteCut")
 	bool bAppend = true;

@@ -25,11 +25,14 @@
 //
 // ⚠️ **位置不成簇，朝向成簇** —— 两件事别混：撒点仍是分层抖动网格（均匀、不扎堆），
 // 但**朝向**照 TG 走一层 2.5 m 的簇结构（见下面 `CoverClumpSize` 那一段）。
+// 花另有一道可选的「聚散」（`CoverPatchSize`，2026-09-29）：那是**密度**随位置成片变化，
+// 片内仍是均匀抖动网格，不是让点扎堆。
 // TG 的草看起来"朝向丰富"正是这个：全随机读成噪声，全对齐读成梳过的地毯，成簇才像草。
 
 #include "/Engine/Public/Platform.ush"
 #include "/Plugin/PCGPlugins/Shaders/Private/CSGroundShaperField.ush"
 #include "/Plugin/PCGPlugins/Shaders/Private/CSGpuSharedLayout.ush"
+#include "/Plugin/PCGPlugins/Shaders/Private/CSGroundMaskWarp.ush"
 
 #ifndef THREADGROUPSIZE_X
 #define THREADGROUPSIZE_X 8
@@ -62,15 +65,29 @@ float  CoverGroundCellSize;
 uint2  CoverGroundVerts;
 float  CoverGroundBaseZ;             // 地面 actor 的世界 Z
 
-// --- 遮罩：地面顶点色的某一个通道 -------------------------------------------
+// --- 遮罩：地面遮罩（默认），或地面顶点色的某一个通道 ----------------------------
 //
-// 一律读**GPU 色流**而不是让 CPU 上传一份镜像拷贝，理由同石阶：色流就是笔刷双写出来的那一份
-// 权威投影，读它意味着"画面上看到的路"与"这里长不长草"构造上同源。上传一份拷贝是第三条路，
-// 迟早与另外两条错开一帧，而症状（草比路慢一笔）只在快速涂抹时才看得见。
+// 一律读 **GPU** 上的那一份而不是让 CPU 上传一份镜像拷贝，理由同石阶：地面遮罩是从笔刷双写出来的
+// 色流现算的（同一条渲染命令 FIFO），读它意味着"画面上看到的路"与"这里长不长草"构造上同源。
+// 上传一份拷贝是第三条路，迟早与另外两条错开一帧，而症状（草比路慢一笔）只在快速涂抹时才看得见。
 float4 CoverMaskChannel;             // one-hot，与色流 dot；默认 (1,0,0,0) = R = 道路权重
 float  CoverMaskStart;               // 遮罩值 ≤ Start：完全不受抑制
 float  CoverMaskEnd;                 // 遮罩值 ≥ End：完全长不出来
 float  CoverMaskShorten;             // 遮罩值 → 高度压缩比例（TG 在路上把草高压到 0.3 倍）
+
+// --- 地面遮罩（2026-09-29 用户："地形 mask 决定草；经过处理的地面 mask 作为地面 mesh 的遮罩控制贴图"）---
+//
+// 笔刷画的路权重是逐顶点的，一格 50 cm 之内就从 0 跳到 1。地面 actor 先把它处理成一张**地面遮罩**
+// 贴图（`ACSGroundActor::GroundMask`：平滑 + 向外延伸，`CSGroundRoadField.usf`），地面材质用它混
+// 土路 / 深土 / 草地三层贴图，这里的拒绝、压矮、弯曲也全读它 —— 贴图上是土的地方就不长草，
+// 两边构造上同源，不会再出现"草在路缘满高一刀切、土路边却是另一条线"。
+// 一个 texel 对一个地面格点（与色流同一张格），按格点 Load 再双线性，寻址口径与读色流完全相同。
+// 贴图是 RG32F，这里只取 R（成品）；G 是只糊的场，给材质的浅土路取阈值，草不读。
+Texture2D<float> CoverGroundMask;
+uint             CoverUseGroundMask;   // 1 = 读地面遮罩；0 = 读色流的原始通道（选了 G/B/A 的物种、或地面还没有遮罩）
+// 读地面遮罩前把采样点挪一下（x = 强度 cm，y = 1/波长 cm⁻¹；`CSGroundMaskWarp.ush`）。地面材质按同一个位移采，
+// 草线与土边因此一起抖（用户 2026-09-29："交界过于生硬"）。只作用在地面遮罩这条路上。
+float2           CoverMaskWarp;
 
 float  CoverChance;                  // 一格出一株的概率（草 ≈ 1，花是稀疏支线）
 float  CoverJitter;                  // 落点抖动幅度，格距的比例（0 = 规则网格，1 = 整格）
@@ -148,6 +165,23 @@ float  CoverRingMinScale;                  // 环带缩放低于它就不长（T
 // 父子两个物种的全部参数与盐相同 ⇒ 前面每一道判据逐位复现，这里只多一道签。1 = 不抽。
 float  CoverOverlayChance;
 
+// --- 聚散（2026-09-29 用户："让花的分布有一些聚散"，参考图 Docs/TinyGlade/img/tiny-glade-ref-flower-clusters-20260929.png）---
+//
+// 抖动网格从构造上就**不成簇**（文件头那条），草要的正是这个；花在 TG 里却是一片一片的：密的地方花瓣挨着花瓣，
+// 其间是只剩零星几朵的空草地。做法是在抖动网格上再叠一道**按位置变化的密度**：三层值噪声 → 分位数 →
+// 片内全留、片外只留 `CoverPatchSparse`，片边按 `CoverPatchSoftness` 渐变。抽签用格身份，所以重扫不闪。
+// 位置本身仍是抖动网格：片内是"均匀地密"，不会自发扎成一坨一坨的穿模。
+// `CoverPatchSize ≤ 0` 的物种（草、灌木）整段跳过，与加这道门控之前逐位相同。
+float  CoverPatchSize;               // 成片的特征尺寸（cm）：三层值噪声的底格
+float  CoverPatchCoverage;           // 成片区域占地面的比例
+float  CoverPatchSoftness;           // 片边过渡在分位数上的宽度（0 = 一刀切）
+float  CoverPatchSparse;             // 片外相对片内的密度比例
+
+// 三层值噪声（权重 4/7、2/7、1/7，倍频 2.03）的标准差，离线实测 0.1403（200 万点，分布接近正态）。
+// 分位数用正态 CDF 的 logistic 近似 1/(1+e^(−1.702z)) 换算：覆盖比例 0.1 / 0.2 / 0.35 / 0.5 / 0.7 实测
+// 0.105 / 0.222 / 0.368 / 0.499 / 0.677。改了噪声的层数或权重就得重测这个数（脚本思路见 Docs/TinyGlade/Ground_Cover.md）。
+#define CSCOVER_PATCH_SIGMA 0.1403f
+
 /** 与 CSGpuInstancedMesh.usf:120-126 / CSGroundStairs.usf 同一份哈希的收尾段（uint → [0,1)）。 */
 float CSCover_Hash01(uint H)
 {
@@ -184,27 +218,56 @@ float4 CSCover_ReadColor(uint X, uint Y)
 }
 
 /**
- * 与 `ACSGroundActor::SampleColor` 同一口径的双线性采样，出界返回 0。
+ * 世界 XY → 地面格双线性的左下角格点与权重；出界返回 false。
+ * 色流与地面遮罩是同一张格，共用这一份寻址 —— 两份各写一遍的话，漂掉的那份会让两条路
+ * 在路缘错开半格，而两边各自看起来都对。
+ */
+bool CSCover_GroundBilinear(float2 P, out uint X0, out uint Y0, out float2 F)
+{
+	X0 = 0u;
+	Y0 = 0u;
+	F = float2(0.0f, 0.0f);
+	if (CoverGroundVerts.x < 2u || CoverGroundVerts.y < 2u) return false;
+	const float2 G = (P - CoverGroundOriginXY) / max(CoverGroundCellSize, 1e-3f);
+	if (G.x < 0.0f || G.y < 0.0f || G.x > float(CoverGroundVerts.x - 1u) || G.y > float(CoverGroundVerts.y - 1u)) return false;
+
+	X0 = min(uint(floor(G.x)), CoverGroundVerts.x - 2u);
+	Y0 = min(uint(floor(G.y)), CoverGroundVerts.y - 2u);
+	F = float2(saturate(G.x - float(X0)), saturate(G.y - float(Y0)));
+	return true;
+}
+
+/**
+ * 遮罩的双线性采样：地面遮罩（默认），或色流的原始通道（`CoverUseGroundMask = 0`）。出界返回 0。
  *
  * 出界取 0 而不是"照 BaseColor 补"：地被的格是按地面矩形铺的，理论上不会出界；真出界时
  * （浮点边界）取 0 意味着"没有路" ⇒ 照常长草，比凭空冒出一片秃地安全。
  */
 float CSCover_SampleMask(float2 P)
 {
-	if (CoverGroundVerts.x < 2u || CoverGroundVerts.y < 2u) return 0.0f;
-	const float2 G = (P - CoverGroundOriginXY) / max(CoverGroundCellSize, 1e-3f);
-	if (G.x < 0.0f || G.y < 0.0f || G.x > float(CoverGroundVerts.x - 1u) || G.y > float(CoverGroundVerts.y - 1u)) return 0.0f;
+	// 扰动的输入是地面局部坐标（与材质的 UV0 × UVWorldPeriod 同一个原点），位移之后再照常寻址。
+	if (CoverUseGroundMask != 0u) P += CSGroundMaskWarp_Offset(P - CoverGroundOriginXY, CoverMaskWarp.y, CoverMaskWarp.x);
 
-	const uint X0 = min(uint(floor(G.x)), CoverGroundVerts.x - 2u);
-	const uint Y0 = min(uint(floor(G.y)), CoverGroundVerts.y - 2u);
-	const float Fx = saturate(G.x - float(X0));
-	const float Fy = saturate(G.y - float(Y0));
+	uint X0, Y0;
+	float2 F;
+	if (!CSCover_GroundBilinear(P, X0, Y0, F)) return 0.0f;
 
-	const float C00 = dot(CSCover_ReadColor(X0, Y0), CoverMaskChannel);
-	const float C10 = dot(CSCover_ReadColor(X0 + 1u, Y0), CoverMaskChannel);
-	const float C01 = dot(CSCover_ReadColor(X0, Y0 + 1u), CoverMaskChannel);
-	const float C11 = dot(CSCover_ReadColor(X0 + 1u, Y0 + 1u), CoverMaskChannel);
-	return lerp(lerp(C00, C10, Fx), lerp(C01, C11, Fx), Fy);
+	float C00, C10, C01, C11;
+	if (CoverUseGroundMask != 0u)
+	{
+		C00 = CoverGroundMask.Load(int3(X0, Y0, 0));
+		C10 = CoverGroundMask.Load(int3(X0 + 1u, Y0, 0));
+		C01 = CoverGroundMask.Load(int3(X0, Y0 + 1u, 0));
+		C11 = CoverGroundMask.Load(int3(X0 + 1u, Y0 + 1u, 0));
+	}
+	else
+	{
+		C00 = dot(CSCover_ReadColor(X0, Y0), CoverMaskChannel);
+		C10 = dot(CSCover_ReadColor(X0 + 1u, Y0), CoverMaskChannel);
+		C01 = dot(CSCover_ReadColor(X0, Y0 + 1u), CoverMaskChannel);
+		C11 = dot(CSCover_ReadColor(X0 + 1u, Y0 + 1u), CoverMaskChannel);
+	}
+	return lerp(lerp(C00, C10, F.x), lerp(C01, C11, F.x), F.y);
 }
 
 /**
@@ -289,6 +352,41 @@ float CSCover_ValueNoise(float2 P)
 	return lerp(lerp(V00, V10, W.x), lerp(V01, V11, W.x), W.y);
 }
 
+/** 聚散噪声的格点值：通道盐 67 + 层号（与环带噪声的 61 分开），带物种盐 ⇒ 每种花各有各的片。 */
+float CSCover_PatchLattice(int2 C, uint Octave)
+{
+	uint H = uint(C.x) * 0x9E3779B1u;
+	H ^= uint(C.y) * 0x85EBCA77u;
+	H ^= (67u + Octave) * 0x27D4EB2Fu;
+	H ^= CoverSalt * 0xC2B2AE3Du;
+	H ^= CoverSeed * 0x9E3779B9u;
+	return CSCover_Hash01(H);
+}
+
+/** 三层值噪声，约 [0,1]、均值 0.5、标准差 CSCOVER_PATCH_SIGMA。每层错开一个偏移，免得三层的格点叠在原点上。 */
+float CSCover_PatchNoise(float2 P)
+{
+	float2 G = P / max(CoverPatchSize, 1.0f);
+	float Sum = 0.0f;
+	float Amp = 0.5f;
+	float Norm = 0.0f;
+	[unroll] for (uint Octave = 0u; Octave < 3u; ++Octave)
+	{
+		const int2 C = int2(floor(G));
+		const float2 F = G - float2(C);
+		const float2 W = F * F * (3.0f - 2.0f * F);
+		const float V00 = CSCover_PatchLattice(C, Octave);
+		const float V10 = CSCover_PatchLattice(C + int2(1, 0), Octave);
+		const float V01 = CSCover_PatchLattice(C + int2(0, 1), Octave);
+		const float V11 = CSCover_PatchLattice(C + int2(1, 1), Octave);
+		Sum += Amp * lerp(lerp(V00, V10, W.x), lerp(V01, V11, W.x), W.y);
+		Norm += Amp;
+		G = G * 2.03f + float2(17.1f, 31.7f);
+		Amp *= 0.5f;
+	}
+	return Sum / Norm;
+}
+
 /**
  * 簇站点：把格坐标 + R2 低差异序列抖动成一个点。R2 常数 `(0.75487, 0.56984)` 与撒叶用的是
  * **同一组**（TG 也是），所以簇的分布与叶的分布同源，不会出现"簇边界正好压在一排叶子上"。
@@ -365,9 +463,25 @@ void ScatterGroundCoverCS(uint3 Id : SV_DispatchThreadID)
 		if (RingScale < CoverRingMinScale) return;
 	}
 
+	// 2.6) 聚散（花）：按位置变化的保留概率，排在遮罩之前 —— 片外那一大半在读遮罩、求高度场之前就退掉。
+	if (CoverPatchSize > 0.0f)
+	{
+		const float Noise = CSCover_PatchNoise(P);
+		// 噪声 → 近似分位数（均匀 0..1）：覆盖比例因此就是"多大比例的地面在片里"，不必知道噪声本身的分布。
+		const float Quantile = 1.0f / (1.0f + exp(-1.702f * (Noise - 0.5f) / CSCOVER_PATCH_SIGMA));
+		const float Edge = 1.0f - CoverPatchCoverage;
+		const float Half = 0.5f * CoverPatchSoftness;
+		// smoothstep 两端相等时是 0/0：软度为 0 就退成阶跃。
+		const float InPatch = Half > 1e-4f ? smoothstep(Edge - Half, Edge + Half, Quantile) : step(Edge, Quantile);
+		const float Keep = lerp(CoverPatchSparse, 1.0f, InPatch);
+		if (CSCover_Hash01(CSCover_CellSeed(Cell, 59u)) >= Keep) return;
+	}
+
 	// 3) 遮罩门控。**用概率拒绝而不是硬阈值**：硬阈值会沿等值线切出一条肉眼可见的直边，
 	//    而草的边界在自然界里是"越靠近路越稀"。抽签用的是格身份，所以边界同样是稳定的
 	//    （重扫不会让边缘那圈草闪烁）。
+	//    读的是**地面遮罩**（处理过的路权重，地面材质混贴图用的也是它）：土露出来的地方草自然稀掉，
+	//    草线与土路边是同一张图上的等值线，不会各走各的。
 	const float Mask = CSCover_SampleMask(P);
 	const float Reject = smoothstep(CoverMaskStart, CoverMaskEnd, Mask);
 	if (CSCover_Hash01(CSCover_CellSeed(Cell, 17u)) < Reject) return;
@@ -473,6 +587,7 @@ void ScatterGroundCoverCS(uint3 Id : SV_DispatchThreadID)
 	const float Uniform = lerp(CoverScaleRange.x, CoverScaleRange.y, lerp(BladeS, ClumpS, CoverScaleClumpShare)) * RingScale;
 	float HeightScale = Uniform * (1.0f + CoverHeightJitter * (CSCover_Hash01(CSCover_CellSeed(Cell, 37u)) * 2.0f - 1.0f));
 	// 遮罩压高：TG 在路上把草高乘 (1 − path × 0.7)，路边因此是"矮草过渡"而不是一刀切。
+	// 地面遮罩向路外平滑延伸过，所以离路越近越矮（原始路权重一格之内就从 0 到 1，那时这段过渡只有十几厘米）。
 	HeightScale *= saturate(1.0f - Mask * CoverMaskShorten);
 	if (HeightScale < 1e-4f) return;                    // 压到看不见就干脆不占槽位
 

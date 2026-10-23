@@ -5,7 +5,7 @@
 ⚠️ **先看这一条**：链 B 的碎裂图案**已经有原件**，在
 ``D:/MyProject/Tiny Glade/extracted/meshes/rocky_terrain_shell.glb``
 （TG 自己的那张：49,598 三角 / 148,794 顶点 / 609 胞腔）。
-导入与接线见 ``Docs/TinyGlade/CSRockShellPattern.md``，导入脚本是 ``TinyGladeImportRockShell.py``，
+导入与接线见 ``Docs/TinyGlade/RockShell_Pattern.md``，导入脚本是 ``TinyGladeImportRockShell.py``，
 核对脚本是 ``VerifyRockShellGlb.py``。**默认走原件。**
 
 本脚本是**原件不可用时的后备**，只在下面两种情况下才有价值：
@@ -18,13 +18,13 @@
 逐三角展开（顶点不共享，``Tri*3 + k`` 布局），写成紧凑二进制供
 ``FCSMeshResident::AddStream`` 的两条 ``ECSGpuStreamRole::AuxVertex`` 流直接 memcpy 上传。
 
-**与原件的三处已知形态差异**（实测，见 ``Docs/TinyGlade/CSRockShellPattern.md``「原件 vs 后备」）：
+**与原件的三处已知形态差异**（实测，见 ``Docs/TinyGlade/RockShell_Pattern.md``「原件 vs 后备」）：
 本脚本的顶盖直接铺到 Voronoi 边界、裙边向外压在邻居盖上；原件的顶盖是**内缩的孤岛**，
 裙边精确填满缝（盖 86.60% + 裙 13.40% = 100.0000%）。本脚本的 ``DirToCentroid`` 按计划契约
 写成**朝外**；原件实测是**朝质心**。本脚本相邻胞腔共享角点坐标；原件一个顶点都不共享。
 
-数据契约见 ``TinyGladeHouse_Plan.md`` 的 D9「侧面碎石：Tiny Glade 式披挂岩壳 / 数据契约」，
-字段与本文件 :class:`BakedVertex` 一一对应；文件布局与接线见 ``Docs/TinyGlade/CSRockShellPattern.md``。
+数据契约见 ``Plan_House.md`` 的 D9「侧面碎石：Tiny Glade 式披挂岩壳 / 数据契约」，
+字段与本文件 :class:`BakedVertex` 一一对应；文件布局与接线见 ``Docs/TinyGlade/RockShell_Pattern.md``。
 
 **这里不产生任何 Z / 高度。** 三维形态 100% 由运行时披挂产生（计划裁决一）；
 裙边高度是「两圈各自采自己 XY 的高度」的副产品（裁决四），烘焙侧一行都不算它。
@@ -70,7 +70,7 @@ WORLD_SPAN_CM = 12800.0
 # 胞腔标称尺寸。1,820 个胞腔 = (12800/300)^2，即计划表的「~3 m（~1,820 个）」。
 CELL_SIZE_CM = 300.0
 
-# 三角边长目标。1.2 m = 与 Tiny Glade 同**绝对**密度（TG 实测 1.25 m，见 Docs/TinyGlade/CSGroundShaper.md）。
+# 三角边长目标。1.2 m = 与 Tiny Glade 同**绝对**密度（TG 实测 1.25 m，见 Docs/TinyGlade/Ground_Shaper.md）。
 TRI_EDGE_CM = 120.0
 
 # 底圈相对顶圈的**横向**错开量。
@@ -115,16 +115,16 @@ FORMAT_VERSION = 1
 HEADER_BYTES = 64
 
 # 后备产物不进版本控制：本脚本 0.7 s 就能重跑出逐位相同的结果，没必要压一个 3.4 MB 的 blob。
-# 正式路线的预览图是 Docs/TinyGlade/CSRockShellPattern.preview.png（原件），别覆盖它。
+# 正式路线的预览图是 Docs/TinyGlade/RockShell_Pattern.preview.png（原件），别覆盖它。
 DEFAULT_BIN_RELPATH = os.path.join("Intermediate", "RockShell", "CSRockShellPattern.bin")
-DEFAULT_PREVIEW_RELPATH = os.path.join("Docs", "TinyGlade", "CSRockShellPattern.fallback.preview.png")
+DEFAULT_PREVIEW_RELPATH = os.path.join("Docs", "TinyGlade", "RockShell_Pattern.fallback.preview.png")
 
 # 打包位（blob B 的 uint32）
 CELL_ID_BITS = 24
 CELL_ID_MASK = (1 << CELL_ID_BITS) - 1
 BIT_TOP_RIM = 1 << 24
 BIT_CORNER = 1 << 25
-# bit 26..31 保留（写 0）。见 Docs/TinyGlade/CSRockShellPattern.md「留给 kernel 作者的一个坑」。
+# bit 26..31 保留（写 0）。见 Docs/TinyGlade/RockShell_Pattern.md「留给 kernel 作者的一个坑」。
 
 # flags 位（header 0x0C）
 FLAG_TRIANGLE_SOUP = 1 << 0   # 顶点不共享，Tri*3+k

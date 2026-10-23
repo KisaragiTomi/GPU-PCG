@@ -279,7 +279,7 @@ void BuildPlan(const TArray<FWallStrip>& Strips, const TArray<FCSWallOpening>& O
 				// 那正是 2026-09-12 修掉的画面缺陷：倾角是相对竖直的**绝对**偏角，取反一次
 				// 相邻段就折过 `2·|Angle|`（MaxLean 1.15 ⇒ 131.8°），藤在洞缘和墙角上"折断"
 				// 式急拐；归零同样是一次离散跳变。
-				// 反编译实证（`Docs/TinyGlade/VineObstacleTurning_20260912.md`）：TG 的
+				// 反编译实证（`Docs/TinyGlade/Vine_ObstacleTurning.md`）：TG 的
 				// `ivy_grower` 里**一次镜像/归零都没有** —— 方向来自
 				// `IvyDirectionProposer::get_direction`，是位置的连续函数（两层 FastNoise 在
 				// `pos / 2.8 m` 上取样、步长 0.21 m ⇒ 一步只走过 7.5% 个波长）。

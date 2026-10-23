@@ -1,5 +1,10 @@
 #include "/Engine/Public/Platform.ush"
 #include "/Plugin/PCGPlugins/Shaders/Private/VinePerlinNoise.ush"
+#if VINE_USE_GLOBAL_DISTANCE_FIELD
+#include "/Plugin/PCGPlugins/Shaders/Private/VineGlobalDistanceFieldProjection.ush"
+#else
+#include "/Plugin/PCGPlugins/Shaders/Private/VineTriangleProjection.ush"
+#endif
 
 #ifndef THREADGROUPSIZE_X
 #define THREADGROUPSIZE_X 64
@@ -755,6 +760,7 @@ bool SampleVoxelNeighborsExpanded(float3 Query, out float3 OutTarget, out float3
     return false;
 }
 
+#if !VINE_USE_GLOBAL_DISTANCE_FIELD
 bool FindNearestVoxelSample(float3 Query, out float3 OutTarget, out float3 OutNormal, out uint OutSampleMode)
 {
     OutTarget = Query;
@@ -777,6 +783,13 @@ bool FindNearestVoxelSample(float3 Query, out float3 OutTarget, out float3 OutNo
         return false;
     }
 
+    if (VineSurfaceTriangleCount > 0u)
+    {
+        bool bFound = FindNearestVineTriangle(Query, OutTarget, OutNormal);
+        OutSampleMode = bFound ? 4u : VINE_VOXEL_SAMPLE_MODE_FAIL;
+        return bFound;
+    }
+
     // Prefer the local expanding voxel interpolation around the query point.
     // The target bucket search is only a fallback for sparse surface regions.
     uint NeighborSampleMode = VINE_VOXEL_SAMPLE_MODE_FAIL;
@@ -793,6 +806,21 @@ bool FindNearestVoxelSample(float3 Query, out float3 OutTarget, out float3 OutNo
     }
 
     return false;
+}
+
+#endif // !VINE_USE_GLOBAL_DISTANCE_FIELD
+
+bool FindVineSurfaceSample(float3 Query, out float3 Target, out float3 Normal, out uint SampleMode)
+{
+#if VINE_USE_GLOBAL_DISTANCE_FIELD
+    Target = Query;
+    Normal = float3(0, 0, 1);
+    SampleMode = 0u;
+    if (VineSurfaceAdsorption == 0u) return false;
+    return FindNearestVineGlobalDistanceField(Query, Target, Normal, SampleMode);
+#else
+    return FindNearestVoxelSample(Query, Target, Normal, SampleMode);
+#endif
 }
 
 // Rotate V by the minimal rotation that aligns unit FromDir onto unit ToDir (Rodrigues).
@@ -828,7 +856,7 @@ void BuildRawVoxelVineFrame(uint PointIndex, out float3 OutTangent, out float3 O
     float3 Target;
     float3 SampledNormal;
     uint SampleMode = VINE_VOXEL_SAMPLE_MODE_FAIL;
-    bool bHasVoxelSample = FindNearestVoxelSample(PathPoints[PointIndex].xyz, Target, SampledNormal, SampleMode);
+    bool bHasVoxelSample = FindVineSurfaceSample(PathPoints[PointIndex].xyz, Target, SampledNormal, SampleMode);
     float3 FallbackNormal = GetFallbackFrameNormal(OutTangent);
     SampledNormal = bHasVoxelSample ? SafeNormalize3(SampledNormal, FallbackNormal) : FallbackNormal;
     OutNormal = BuildFrameNormalFromTangent(OutTangent, SampledNormal);
@@ -863,7 +891,7 @@ void ApplyVVNoiseCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         float3 Target;
         float3 SampledNormal;
         uint SampleMode = VINE_VOXEL_SAMPLE_MODE_FAIL;
-        if (FindNearestVoxelSample(Position, Target, SampledNormal, SampleMode))
+        if (FindVineSurfaceSample(Position, Target, SampledNormal, SampleMode))
         {
             Position = Target;
         }
@@ -1284,7 +1312,7 @@ void FinalProjectVVVoxelCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     float3 ProjectedTarget;
     float3 ProjectedNormal;
     uint SampleMode = VINE_VOXEL_SAMPLE_MODE_FAIL;
-    if (!FindNearestVoxelSample(PackedTarget.xyz, ProjectedTarget, ProjectedNormal, SampleMode))
+    if (!FindVineSurfaceSample(PackedTarget.xyz, ProjectedTarget, ProjectedNormal, SampleMode))
     {
         return;
     }

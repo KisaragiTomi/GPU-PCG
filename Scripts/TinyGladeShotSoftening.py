@@ -2,7 +2,7 @@
 """「像不像 Tiny Glade」的改前/改后同机位对照图 + 可量化判据。
 
 回答的是三件只有像素能答、readback 一个字都说不了的事，正好对应对照文档
-`Docs/TinyGlade/TinyGlade_模块对照与进度.md（卷四）` §5 归因表里排 2、3 两条与本轮的石阶标定：
+`Docs/TinyGlade/Progress_ModuleComparison.md（卷四）` §5 归因表里排 2、3 两条与本轮的石阶标定：
 
   A  **背光面**（`backlit`）：土台朝背光那一侧。TG 的背光面**永远压不黑**
      （§3.3 `mix(0.6, 1.0, ao)`）而且**带地面草色**（§3.4 每个 RGB 通道各带一条 L1 方向）。

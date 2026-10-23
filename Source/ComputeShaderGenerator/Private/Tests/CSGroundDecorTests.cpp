@@ -49,9 +49,9 @@ CSGroundDecor::FShaperRing CSSkirtTest_MakeRing(double X, double Y, const TCHAR*
 	CSGroundDecor::FShaperRing Ring;
 	// 布局与 `CSGroundShaperField.h` 逐字对应：Profile = (中心 X, 中心 Y, Radius, Falloff)。
 	// 噪声幅度留 0：本文件量的是"锚点落在哪一圈"，开着噪声只会给每条断言加一个与它无关的容差。
-	Ring.Profile = FVector4f(float(X), float(Y), Radius, Falloff);
-	Ring.Top = FVector4f(Lift, 0.0f, 0.0f, 0.021f);
-	Ring.Noise = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
+	Ring.Header.Profile = FVector4f(float(X), float(Y), Radius, Falloff);
+	Ring.Header.Top = FVector4f(Lift, 0.0f, 0.0f, 0.021f);
+	Ring.Header.Noise = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);
 	Ring.Key = CSGroundDecor::RingKey(Name);
 	return Ring;
 }
@@ -134,7 +134,7 @@ bool FCSGroundDecorRidesTheBandTest::RunTest(const FString&)
 	{
 		const float BandS = CSGroundShaperField::EvalShaper(
 			FVector2f(float(Anchors[0].Location.X), float(Anchors[0].Location.Y)),
-			Site.Rings[0].Profile, Site.Rings[0].Top, Site.Rings[0].Noise);
+			Site.Rings[0].Header, Site.Rings[0].Sdf);
 		AddInfo(FString::Printf(TEXT("带上的解析高度 %.1f cm（台高 %.0f）"), BandS, CSSkirtTest_Lift));
 		TestTrue(TEXT("锚点站在坡上（0 < 解析高度 < 台高）"), BandS > 1.0f && BandS < CSSkirtTest_Lift);
 		TestTrue(TEXT("落高 = 解析高度 − 埋深"),
@@ -235,8 +235,8 @@ bool FCSGroundDecorIdentityIsStableTest::RunTest(const FString&)
 	CSGroundDecor::FSite Moved = A;
 	for (CSGroundDecor::FShaperRing& Ring : Moved.Rings)
 	{
-		Ring.Profile.X += Shift.X;
-		Ring.Profile.Y += Shift.Y;
+		Ring.Header.Profile.X += Shift.X;
+		Ring.Header.Profile.Y += Shift.Y;
 	}
 	const TArray<CSHouseDecor::FRecord> RecMoved = CSSkirtTest_Flatten(CSSkirtTest_Plan(Moved, Params));
 	if (!TestEqual(TEXT("平移之后件数不变"), RecMoved.Num(), RecA.Num())) return false;
@@ -417,9 +417,10 @@ bool FCSGroundDecorSurvivesBakeTest::RunTest(const FString&)
 	ACSGroundShaperActor* Mound = World->SpawnActor<ACSGroundShaperActor>(
 		FVector(CSSkirtTest_Centre, CSSkirtTest_Centre, 0.0), FRotator::ZeroRotator);
 	if (!TestNotNull(TEXT("Shaper mound"), Mound)) return false;
-	Mound->Radius = CSSkirtTest_Radius;
+	Mound->MaskSize = 2.0f * float(CSSkirtTest_Radius);   // 圆盘直径（2026-09-29 起形状是 mask，没设 mask = 解析圆盘）
 	Mound->FalloffDistance = CSSkirtTest_Falloff;
-	Mound->LiftHeight = CSSkirtTest_Lift;
+	// 台顶 = actor 高度（2026-09-29）；乘 (1 + 二次抬升) 保持与旧口径「抬 LiftHeight、台顶再照抬 2%」逐项相同的剖面。
+	Mound->SetActorLocation(Mound->GetActorLocation() + FVector(0.0, 0.0, double(CSSkirtTest_Lift) * (1.0 + double(Mound->SecondaryLiftScale))));
 	Mound->RebuildTerrain();
 	Ground->RebuildSkirtDecor();
 

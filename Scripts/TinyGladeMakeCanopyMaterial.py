@@ -2,7 +2,7 @@
 """
 建 `M_TinyGladeCanopy` 母材质 + `MI_TinyGladeCanopy`：把 TG 树冠着色的四条移植缺口落地。
 
-逐条机制与 TG 侧证据在 `Docs/TinyGlade/TinyGlade_树冠着色.md`，本文件头只记**为什么这么落**。
+逐条机制与 TG 侧证据在 `Docs/TinyGlade/Tree_CanopyShading.md`，本文件头只记**为什么这么落**。
 
 --- 为什么不能直接用 `M_TG_Canopy` / `M_TG_LeafCards` --------------------------------
 `TinyGladeAsset/Materials/` 下那 8 个 `M_TG_*` 是**提取资产的看图材质**（gallery 用），

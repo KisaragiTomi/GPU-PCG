@@ -60,7 +60,7 @@ struct FCSInstancedFamily
 };
 
 /**
- * Tiny Glade 交互对象的共同基类（TinyGladeHouse_Plan.md）：地面 / 房屋 / 塑形物 / 样条块
+ * Tiny Glade 交互对象的共同基类（Plan_House.md）：地面 / 房屋 / 塑形物 / 样条块
  * 都是"CPU 权威数据 → FCSGpuMeshCPUData 快照 → UCSMesh"的同构 actor，这里收敛三件事：
  *
  *  1. 网格槽：渲染组件 + transient UCSMesh 的上传、材质绑定、在途只留最新、摆位增量、撤槽。

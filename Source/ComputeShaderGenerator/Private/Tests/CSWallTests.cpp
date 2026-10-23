@@ -13,7 +13,7 @@
 #include "Tests/AutomationEditorCommon.h"
 
 // -----------------------------------------------------------------------------
-// 样条墙（「房子变成墙」第 1 步，计划 `Docs/TinyGlade/TinyGladeWall_Plan.md`）
+// 样条墙（「房子变成墙」第 1 步，计划 `Docs/TinyGlade/Plan_Wall.md`）
 //
 // 纯函数那一层逐条钉口径：斜接皮线、墙体闭合且朝外、墙顶砖的奇偶与断点、角石落位、藤的两面墙；
 // actor 那一层走真路径：地面 + 土包 + 默认 L 形样条，断言贴地、GPU 回读的砖数 / 叶数、幂等、改样条重建。
@@ -627,9 +627,10 @@ bool FCSWallActorOnGroundTest::RunTest(const FString& Parameters)
 	// 墙拐角旁一个土包：墙的后一段从平地爬上坡。
 	ACSGroundShaperActor* Mound = World->SpawnActor<ACSGroundShaperActor>(FVector(1750.0, 1300.0, 0.0), FRotator::ZeroRotator);
 	if (!TestNotNull(TEXT("Mound"), Mound)) return false;
-	Mound->Radius = 200.0f;
+	Mound->MaskSize = 2.0f * float(200.0f);   // 圆盘直径（2026-09-29 起形状是 mask，没设 mask = 解析圆盘）
 	Mound->FalloffDistance = 300.0f;
-	Mound->LiftHeight = 150.0f;
+	// 台顶 = actor 高度（2026-09-29）；乘 (1 + 二次抬升) 保持与旧口径「抬 LiftHeight、台顶再照抬 2%」逐项相同的剖面。
+	Mound->SetActorLocation(Mound->GetActorLocation() + FVector(0.0, 0.0, double(150.0f) * (1.0 + double(Mound->SecondaryLiftScale))));
 	Mound->RebuildTerrain();
 
 	// 墙：默认 L 形样条（本地 (0,0) → (600,0) → (600,450)），落在 (1000, 1000)。

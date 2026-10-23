@@ -225,8 +225,9 @@ void BuildAnchors(const FSite& Site, const FParams& Params, TArray<FAnchor>& Out
 		const FCSRoofDesc& Roof = Site.Roof;
 		const float EaveZ = CSHouseRoof_EaveOuterZ(Roof) + Params.RoofStandOff;
 
-		// 檐口：**每条边都是檐口**。双坡时只有两条（另两条是山墙），四坡没有山墙这个构件，
-		// 所以每条边都挂得住鸟窝。边框架取 `CSHouse_GetEdge` —— 墙在哪儿、朝哪儿只能有一个真源；
+		// 檐口：**有坡面的边才是檐口**。四坡时每条边都是；双坡（2026-10-02，脊长 = 房长）时两端是山墙，
+		// 那两条边没有檐口可挂 —— `CSHouseRoof_FaceSpanAtInset` 对山墙边恒返回 false，这里不必另判。
+		// 边框架取 `CSHouse_GetEdge` —— 墙在哪儿、朝哪儿只能有一个真源；
 		// 檐口外沿那一段取 `CSHouseRoof_FaceSpanAtInset(−Overhang)`，与瓦的最外一排是同一段。
 		const FCSHouseFootprint& Footprint = Roof.Footprint;
 		const float EaveSpacing = FMath::Max(Params.EaveSpacing, 20.0f);
@@ -234,7 +235,7 @@ void BuildAnchors(const FSite& Site, const FParams& Params, TArray<FAnchor>& Out
 		{
 			const FCSHouseEdgeFrame Edge = CSHouse_GetEdge(Side, Footprint, 0.0f);
 			double T0 = 0.0, T1 = 0.0;
-			if (Edge.Len <= 0.0f || !CSHouseRoof_FaceSpanAtInset(Footprint, Side, -double(Roof.Overhang), T0, T1)) continue;
+			if (Edge.Len <= 0.0f || !CSHouseRoof_FaceSpanAtInset(Roof, Side, -double(Roof.Overhang), T0, T1)) continue;
 			const FVector2D Outward(-Edge.In.X, -Edge.In.Y);
 			const FVector2D Base = Edge.Start - Edge.In * double(Roof.Overhang);
 			const double Run = T1 - T0;
@@ -257,10 +258,10 @@ void BuildAnchors(const FSite& Site, const FParams& Params, TArray<FAnchor>& Out
 			}
 		}
 
-		// 屋脊：最高的那段脊（骨架的 TopA → TopB）。矩形上只有 |X − Y| 长，正方形 / 正多边形处为 0 ——
-		// 那时屋顶收成一个尖点，下面的 `Max(1, ...)` 正好给出尖上那一个锚点。
+		// 屋脊：最高的那段脊（骨架的 TopA → TopB）。等坡度矩形上只有 |X − Y| 长，正方形 / 正多边形处为 0 ——
+		// 那时屋顶收成一个尖点，下面的 `Max(1, ...)` 正好给出尖上那一个锚点。脊长调过的屋面按它实际的脊排。
 		FCSRoofSkeleton Skeleton;
-		CSHouseRoof_BuildSkeleton(Footprint, double(Roof.Overhang), Skeleton);
+		CSHouseRoof_BuildSkeleton(Roof, Skeleton);
 		const FVector2D RidgeVec = Skeleton.TopB - Skeleton.TopA;
 		const double RidgeLength = RidgeVec.Size();
 		// 字典序定端点 ⇒ 脊向在 X 为主时是 +X、否则 +Y；尖点没有脊向，取 +X（与矩形时代「平局归 X」同口径）。

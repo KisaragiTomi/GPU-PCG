@@ -39,9 +39,10 @@ ACSGroundShaperActor* CSShaperFieldTest_SpawnMound(UWorld* World, double X, doub
 {
 	ACSGroundShaperActor* Shaper = World->SpawnActor<ACSGroundShaperActor>(FVector(X, Y, 0.0), FRotator::ZeroRotator);
 	if (!Shaper) return nullptr;
-	Shaper->Radius = float(CSShaperFieldTest_Radius);
+	Shaper->MaskSize = 2.0f * float(CSShaperFieldTest_Radius);   // 圆盘直径（2026-09-29 起形状是 mask，没设 mask = 解析圆盘）
 	Shaper->FalloffDistance = float(CSShaperFieldTest_Falloff);
-	Shaper->LiftHeight = float(CSShaperFieldTest_Lift);
+	// 台顶 = actor 高度（2026-09-29）；乘 (1 + 二次抬升) 保持与旧口径「抬 LiftHeight、台顶再照抬 2%」逐项相同的剖面。
+	Shaper->SetActorLocation(Shaper->GetActorLocation() + FVector(0.0, 0.0, CSShaperFieldTest_Lift * (1.0 + double(Shaper->SecondaryLiftScale))));
 	return Shaper;
 }
 
@@ -129,13 +130,15 @@ bool FCSGroundShaperSkirtNoiseTest::RunTest(const FString& Parameters)
 	// 服务于旧路 `BuildStepPlan` 的闭式环半径（噪声一开闭式解失效 ⇒ 退回数值求交），旧路删掉
 	// 之后它连一个消费者都没有。剖面本身"关掉噪声就逐位回到纯 smoothstep"这条不变量由下面
 	// 两条数值断言守着，比一个布尔谓词强。
+	// 台顶 = actor 高度（2026-09-29）：关掉二次抬升后台顶仍是 actor 高度，剖面是纯 smoothstep。
 	Mound->SkirtNoiseAmount = 0.0f;
 	Mound->SecondaryLiftScale = 0.0f;
+	const double ActorTop = Mound->ComputeTopHeight();
 	TestEqual(TEXT("Turning both off restores the plain smoothstep plateau"),
-		double(Mound->SampleShapeHeight(Centre)), Top, 1.0e-2);
+		double(Mound->SampleShapeHeight(Centre)), ActorTop, 1.0e-2);
 	const FVector2D SkirtMid = Centre + FVector2D(CSShaperFieldTest_Radius + 0.5 * CSShaperFieldTest_Falloff, 0.0);
 	TestEqual(TEXT("Turning both off restores the plain smoothstep skirt midpoint"),
-		double(Mound->SampleShapeHeight(SkirtMid)), 0.5 * Top, 1.0e-2);
+		double(Mound->SampleShapeHeight(SkirtMid)), 0.5 * ActorTop, 1.0e-2);
 
 	World->DestroyActor(Mound);
 	return true;

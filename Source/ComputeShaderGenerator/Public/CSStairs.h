@@ -16,7 +16,7 @@ enum class ECSStairsRailing : uint8
 /**
  * 玩家绘制楼梯的纯函数层（TG §4.1 `playermade` 的对位物，2026-09-16）。
  *
- * 逐条出处与常量见 `Docs/TinyGlade/TinyGlade_楼梯逆向_附录D_玩家绘制楼梯.md`（下称「附录 D」）。
+ * 逐条出处与常量见 `Docs/TinyGlade/RE_PlayerStairs.md`（下称「附录 D」）。
  * `ACSStairsActor` 只负责把样条与地面翻成这里的输入、把输出的砖交给实例组件；**判据全在这里**，
  * 所以无头单测不需要 world。
  *

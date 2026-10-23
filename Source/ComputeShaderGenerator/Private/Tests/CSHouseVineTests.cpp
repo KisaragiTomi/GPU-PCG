@@ -446,7 +446,7 @@ bool FCSHouseVineRootEscapesHolesTest::RunTest(const FString& Parameters)
 	//     倾角镜像（一次折 131.8° 的"折断"式急拐），藤不再靠在 20 cm 窄道里来回弹跳攒段数。
 	//     下面那条"平均爬到多高"是配套的判据 —— 段数掉了 6.5 个百分点，而**高度不掉**
 	//     （288 vs 无洞对照 288），所以掉的是"皱"不是"覆盖"。改动与标定表见
-	//     `Docs/TinyGlade/VineObstacleTurning_20260912.md` 与 `FParams::MaxTurn`。
+	//     `Docs/TinyGlade/Vine_ObstacleTurning.md` 与 `FParams::MaxTurn`。
 	//   · 第一档的同一场景在解析上**不可能**超过 13% —— 它的规则是"藤脚在洞里就整根不长"，
 	//     而自由墙脚只有 13%。所以 0.45 既在实测之下有余量，又远在第一档之上，不会两头都松。
 	const float Kept = float(Holed.Branch.Num()) / FMath::Max(float(Clear.Branch.Num()), 1.0f);
@@ -962,7 +962,7 @@ bool FCSHouseVineNoVineWhenAirborneTest::RunTest(const FString& Parameters)
 //
 // 反编译对照：TG 的 `ivy_grower` 里一次镜像/归零都没有，方向来自
 // `IvyDirectionProposer::get_direction`（位置的连续函数，两层 FastNoise / 2.8 m 波长 /
-// 0.21 m 步长）。详见 `Docs/TinyGlade/VineObstacleTurning_20260912.md`。
+// 0.21 m 步长）。详见 `Docs/TinyGlade/Vine_ObstacleTurning.md`。
 // -----------------------------------------------------------------------------
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -1068,7 +1068,7 @@ bool FCSHouseVineTurnRateTest::RunTest(const FString& Parameters)
 	// ⓐ **反向门**：把预算放到 2 × MaxLean 以上（= 旧代码那句镜像的全部权限），同一场景
 	//    量出来的折角必须**超过**默认上界。破了它就说明这个场景本来就没有大转向的需求，
 	//    上面那条"没有一对折过 40.1°"是恒真的空话。
-	//    （旧代码在同型场景里量出 100.4°，见 `Docs/TinyGlade/VineObstacleTurning_20260912.md`。）
+	//    （旧代码在同型场景里量出 100.4°，见 `Docs/TinyGlade/Vine_ObstacleTurning.md`。）
 	{
 		CSHouseVine::FParams Loose = CSVineTest_MakeParams();
 		Loose.MaxTurn = Loose.MaxLean * 2.0f + 0.1f;

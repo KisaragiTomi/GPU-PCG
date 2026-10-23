@@ -415,6 +415,11 @@ namespace EPathFamily
 	/** 'WCOP' / 'WMRL' —— 样条墙（`CSWall::BuildTopElements`）墙顶的压顶砖与垛口。 */
 	static constexpr uint32 WallCoping = 0x57434F50u;
 	static constexpr uint32 WallMerlon = 0x574D524Cu;
+	/**
+	 * 'GCOP' —— 阶梯山墙的压顶砖（`CSHouseBrickWall::BuildGableCourses` 的露砖带那一支，2026-10-02）。
+	 * 与砖层同一条规矩：拿 `GableCoping + 层号` 当盐，**它后面 65536 个值都归它**。
+	 */
+	static constexpr uint32 GableCoping = 0x47434F50u;
 }
 
 /**

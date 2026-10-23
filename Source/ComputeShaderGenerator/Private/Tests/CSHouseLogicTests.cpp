@@ -39,7 +39,7 @@
 // TinyGladeHouse 的判定纯函数用例：不碰 RHI / world，只钉数学 ——
 // 屋面求值器（四坡，唯一真源，瓦/梁/落窗谓词都调它）、边缘分割、离地收窄。
 //
-// 计划纪律（TinyGladeHouse_Plan.md 阶段计划）：门洞区间、接触段、柱布点、openings 排布
+// 计划纪律（Plan_House.md 阶段计划）：门洞区间、接触段、柱布点、openings 排布
 // 这类判定全部做成无 GPU 依赖的纯函数 + automation 测试。
 // -----------------------------------------------------------------------------
 
@@ -5213,8 +5213,8 @@ bool FCSHouseResizeHandleTest::RunTest(const FString& Parameters)
 	House->EnterResizeMode();
 	TestTrue(TEXT("Entering resize mode reports the mode is on"), House->IsInResizeMode());
 
-	// 七个抓手：四个水平锥子 + 檐口框 + 房底框 + 屋顶框。
-	TestEqual(TEXT("Seven handles: four cones plus eave, base and roof frames"), House->GetResizeHandles().Num(), 7);
+	// 九个抓手：四个水平锥子 + 檐口框 + 房底框 + 屋顶框 + 脊两端的脊长箭头（2026-10-02）。
+	TestEqual(TEXT("Nine handles: four cones, the eave / base / roof frames and two ridge arrows"), House->GetResizeHandles().Num(), 9);
 	TestNotNull(TEXT("The eave frame is there"), House->GetHeightHandle());
 	TestNotNull(TEXT("The base frame is there"), House->GetBaseHandle());
 	TestTrue(TEXT("The eave frame and the base frame are two different actors"), House->GetHeightHandle() != House->GetBaseHandle());
@@ -5256,7 +5256,7 @@ bool FCSHouseResizeHandleTest::RunTest(const FString& Parameters)
 
 	// 幂等：再进一次不许生出第二组（详情面板上的按钮会被连点）。
 	House->EnterResizeMode();
-	TestEqual(TEXT("Re-entering resize mode does not spawn a second set"), House->GetResizeHandles().Num(), 7);
+	TestEqual(TEXT("Re-entering resize mode does not spawn a second set"), House->GetResizeHandles().Num(), 9);
 
 	// ---- ② 拖 1 m 墙恰好走 1 m：父子回路那个 2x 缺陷的钉子 ----
 	ACSHouseResizeHandleActor* East = nullptr;
@@ -5363,7 +5363,7 @@ bool FCSHouseResizeHandleTest::RunTest(const FString& Parameters)
 		House->EnterResizeMode();
 		TArray<TWeakObjectPtr<ACSHouseHandleActor>> Weak;
 		for (ACSHouseHandleActor* Handle : House->GetResizeHandles()) Weak.Add(Handle);
-		if (!TestEqual(TEXT("Handles for the destroy pass"), Weak.Num(), 7)) return false;
+		if (!TestEqual(TEXT("Handles for the destroy pass"), Weak.Num(), 9)) return false;
 
 		World->DestroyActor(House);
 		for (const TWeakObjectPtr<ACSHouseHandleActor>& Handle : Weak)
@@ -5494,7 +5494,7 @@ bool FCSHouseResizeHandlePolylineTest::RunTest(const FString& Parameters)
 	if (!TestEqual(TEXT("the shaped house really is a hexagon"), Before.NumEdges(), 6)) return false;
 
 	House->EnterResizeMode();
-	TestEqual(TEXT("nine handles: six cones plus eave, base and roof frames"), House->GetResizeHandles().Num(), 9);
+	TestEqual(TEXT("eleven handles: six cones, the eave / base / roof frames and two ridge arrows"), House->GetResizeHandles().Num(), 11);
 	TArray<ACSHouseResizeHandleActor*> Handles = House->GetEdgeHandles();
 	if (!TestEqual(TEXT("one cone per hexagon edge"), Handles.Num(), 6)) return false;
 
@@ -5584,14 +5584,14 @@ bool FCSHouseResizeHandlesFollowEdgeCountTest::RunTest(const FString& Parameters
 	House->MinFootprint = 200.0f;
 	House->ReevaluateSite();
 
-	// 一个阶段的完整判据：边数、锥子数、N + 3、边号铺满 0..N-1、每个锥子都在自己那面墙外的规范位置上。
+	// 一个阶段的完整判据：边数、锥子数、N + 5、边号铺满 0..N-1、每个锥子都在自己那面墙外的规范位置上。
 	auto CheckCones = [this, House](const TCHAR* Stage, int32 WantEdges)
 	{
 		const FCSHouseFootprint Footprint = House->GetFootprint();
 		if (!TestEqual(FString::Printf(TEXT("%s: the footprint has %d edges"), Stage, WantEdges), Footprint.NumEdges(), WantEdges)) return false;
 		const TArray<ACSHouseResizeHandleActor*> Cones = House->GetEdgeHandles();
 		if (!TestEqual(FString::Printf(TEXT("%s: one cone per edge"), Stage), Cones.Num(), WantEdges)) return false;
-		TestEqual(FString::Printf(TEXT("%s: N + 3 handles in all"), Stage), House->GetResizeHandles().Num(), WantEdges + 3);
+		TestEqual(FString::Printf(TEXT("%s: N + 5 handles in all"), Stage), House->GetResizeHandles().Num(), WantEdges + 5);
 		TestTrue(FString::Printf(TEXT("%s: still in resize mode"), Stage), House->IsInResizeMode());
 
 		TSet<int32> Edges;

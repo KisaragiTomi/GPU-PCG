@@ -1,0 +1,90 @@
+#pragma once
+
+float3 VineGDFTranslationHigh;
+float3 VineGDFTranslationLow;
+float VineGDFMaxDistance;
+float VineGDFTolerance;
+uint VineGDFIterations;
+
+#ifndef VINE_GDF_TEST_SAMPLER
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/DistanceField/GlobalDistanceFieldShared.ush"
+
+#if PLATFORM_SUPPORTS_DISTANCE_FIELDS
+bool ReadVineGDFPage(float3 UV, uint Clip, out float Encoded)
+{
+    UV = frac(UV);
+    Encoded = 1.0f;
+    FGlobalDistanceFieldPage Page = GetGlobalDistanceFieldPage(UV, Clip);
+    if (!Page.bValid) return false;
+    Encoded = Texture3DSampleLevel(GlobalDistanceFieldPageAtlasTexture,
+        GlobalDistanceFieldPageAtlasTextureSampler, ComputeGlobalDistanceFieldPageUV(UV, Page), 0).x;
+    return isfinite(Encoded) && Encoded > 0.01f && Encoded < 0.99f;
+}
+#endif
+
+// Distance and normal must come from the SAME valid clipmap. The generic engine gradient
+// helper supplies a fallback direction on a missing page; that is not a valid surface hit.
+bool SampleVineGlobalDistanceField(float3 P, out float Distance, out float3 Normal)
+{
+    Distance = 0.0f;
+    Normal = float3(0, 0, 1);
+#if PLATFORM_SUPPORTS_DISTANCE_FIELDS
+    [loop] for (uint Clip = 0u; Clip < min(NumGlobalSDFClipmaps, (uint)MAX_GLOBAL_DF_CLIPMAPS); ++Clip)
+    {
+        float4 CenterExtent = GlobalVolumeTranslatedCenterAndExtent[Clip];
+        float VoxelExtent = CenterExtent.w * GlobalVolumeTexelSize;
+        if (any(abs(P - CenterExtent.xyz) >= CenterExtent.www - 2.0f * VoxelExtent)) continue;
+        float3 UV = ComputeGlobalUV(P, Clip);
+        float Encoded, R, L, F, B, U, D;
+        float H = 0.5f * GlobalVolumeTexelSize;
+        // A missing/saturated neighbor must not manufacture a normal at a page boundary.
+        if (!ReadVineGDFPage(UV, Clip, Encoded)
+            || !ReadVineGDFPage(UV + float3(H, 0, 0), Clip, R)
+            || !ReadVineGDFPage(UV - float3(H, 0, 0), Clip, L)
+            || !ReadVineGDFPage(UV + float3(0, H, 0), Clip, F)
+            || !ReadVineGDFPage(UV - float3(0, H, 0), Clip, B)
+            || !ReadVineGDFPage(UV + float3(0, 0, H), Clip, U)
+            || !ReadVineGDFPage(UV - float3(0, 0, H), Clip, D)) continue;
+        float3 Gradient = float3(R - L, F - B, U - D);
+        float GradientSq = dot(Gradient, Gradient);
+        if (!all(isfinite(Gradient)) || GradientSq <= 1.0e-12f) continue;
+        Distance = DecodeGlobalDistanceFieldPageDistance(Encoded,
+            2.0f * GLOBAL_DISTANCE_FIELD_INFLUENCE_RANGE_IN_VOXELS * VoxelExtent);
+        Normal = Gradient * rsqrt(GradientSq);
+        return isfinite(Distance);
+    }
+#endif
+    return false;
+}
+#endif
+
+// Independent projection implementation; never calls the triangle/voxel query routines.
+bool FindNearestVineGlobalDistanceField(float3 Query, out float3 Target, out float3 Normal, out uint SampleMode)
+{
+    Target = Query;
+    Normal = float3(0, 0, 1);
+    SampleMode = 0u;
+    if (!all(isfinite(Query))) return false;
+    float3 Start = (Query + VineGDFTranslationHigh) + VineGDFTranslationLow;
+    float3 P = Start;
+    float MaxDistanceSq = VineGDFMaxDistance * VineGDFMaxDistance;
+    [loop] for (uint Iteration = 0u; Iteration <= min(VineGDFIterations, 32u); ++Iteration)
+    {
+        float Distance;
+        float3 Gradient;
+        if (!SampleVineGlobalDistanceField(P, Distance, Gradient)) return false;
+        if (!isfinite(Distance) || !all(isfinite(Gradient)) || dot(Gradient, Gradient) < 0.5f) return false;
+        if (abs(Distance) <= VineGDFTolerance)
+        {
+            Target = Query + (P - Start);
+            Normal = Gradient;
+            SampleMode = 5u;
+            return true;
+        }
+        if (Iteration == VineGDFIterations || abs(Distance) > VineGDFMaxDistance) return false;
+        P -= Distance * Gradient;
+        if (!all(isfinite(P)) || dot(P - Start, P - Start) > MaxDistanceSq) return false;
+    }
+    return false;
+}

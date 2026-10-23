@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """核对 Tiny Glade 原件碎裂图案 `rocky_terrain_shell.glb`，并画出接线文档用的预览图。
 
-这是 `Docs/TinyGlade/CSRockShellPattern.md` 里每一个实测数字的**来源**：改了那份文档的表，
+这是 `Docs/TinyGlade/RockShell_Pattern.md` 里每一个实测数字的**来源**：改了那份文档的表，
 先重跑本脚本；本脚本报什么就写什么。它**只读** GLB，不写任何游戏资产。
 
 原件出处：`D:/MyProject/Tiny Glade/extract/rocky_terrain2glb.py` 从
@@ -32,13 +32,13 @@ from typing import Dict, List, Sequence, Tuple
 # =============================================================================
 
 DEFAULT_GLB = r"D:\MyProject\Tiny Glade\extracted\meshes\rocky_terrain_shell.glb"
-DEFAULT_PREVIEW_RELPATH = os.path.join("Docs", "TinyGlade", "CSRockShellPattern.preview.png")
+DEFAULT_PREVIEW_RELPATH = os.path.join("Docs", "TinyGlade", "RockShell_Pattern.preview.png")
 
 TOP_Y_M = 3.12          # 顶圈的 y（米，已 ×65）；底圈是 0。只有这两个值。
 TILE_HALF_M = 68.25     # tile 半跨（米）
 GROUND_SPAN_M = 128.0   # 本项目地面跨度（NumCells 256 × CellSize 50 cm）
 
-# 文档 `Docs/TinyGlade/CSGroundShaper.md`「烘焙资产」表里的数字，用来逐项对照
+# 文档 `Docs/TinyGlade/Ground_Shaper.md`「烘焙资产」表里的数字，用来逐项对照
 EXPECTED = {
     "vertices": 148794,
     "triangles": 49598,
@@ -131,6 +131,92 @@ class Shell:
             a[1] += self.pos[i][2]
             a[2] += 1
         self.centroid = {c: (v[0] / v[2], v[1] / v[2]) for c, v in acc.items()}
+
+
+def connectivity_stats(sh: Shell) -> dict:
+    """按真实位置还原连接；cell_id 是顶点的位移归属，不能用来切分整块裙边。"""
+    edges = Counter()
+    attributes = defaultdict(set)
+    skirt_owners = Counter()
+    for t in range(sh.tris):
+        points = []
+        if sh.tri_is_top[t * 3] == 0.0:
+            skirt_owners[len(set(sh.cell_id[t * 3:t * 3 + 3]))] += 1
+        for k in range(3):
+            i = t * 3 + k
+            point = tuple(sh.pos[i])
+            points.append(point)
+            attributes[point].add((sh.cell_id[i], sh.is_corner[i], sh.cell_bby[i], tuple(sh.uv0[i])))
+        for a, b in zip(points, points[1:] + points[:1]):
+            edges[tuple(sorted((a, b)))] += 1
+    limits = {axis: (min(p[axis] for p in attributes), max(p[axis] for p in attributes))
+              for axis in (0, 2)}
+    interior_open_edges = 0
+    for (a, b), count in edges.items():
+        if count != 1:
+            continue
+        on_border = any(abs(a[axis] - bound) < 1e-5 and abs(b[axis] - bound) < 1e-5
+                        for axis in (0, 2) for bound in limits[axis])
+        interior_open_edges += not on_border
+    return {"vertices": len(attributes), "edges": len(edges), "triangles": sh.tris,
+            "euler": len(attributes) - len(edges) + sh.tris,
+            "edge_incidence": dict(Counter(edges.values())),
+            "interior_open_edges": interior_open_edges,
+            "position_attribute_conflicts": sum(len(a) > 1 for a in attributes.values()),
+            "skirt_cell_owner_counts": dict(skirt_owners)}
+
+
+def tg_cell_random(cell_id: int) -> float:
+    """TG displace:251-269 的 _316.._341；同一随机数同时驱动平面收缩和顶盖浮高。"""
+    h = cell_id
+    h = (h + (h << 10)) & 0xFFFFFFFF
+    h ^= h >> 6
+    h = (h + (h << 3)) & 0xFFFFFFFF
+    h ^= h >> 11
+    h = (h + (h << 15)) & 0xFFFFFFFF
+    return (h & 0x7FFFFF) / 8388608.0
+
+
+def transition_stats(sh: Shell) -> dict:
+    """量顶盖边到裙底的平面垂距，分别在 TG 收缩前后测量；不冒充最终披挂宽度。"""
+    widths = {"rest": defaultdict(list), "after_tg_jitter": defaultdict(list)}
+    counts = Counter()
+    flipped = Counter()
+    for t in range(sh.tris):
+        if sh.tri_is_top[t * 3] != 0.0:
+            continue
+        indices = range(t * 3, t * 3 + 3)
+        top = [i for i in indices if sh.ring_top[i]]
+        bottom = [i for i in indices if not sh.ring_top[i]]
+        if len(top) != 2:
+            continue
+        kind = "same_owner" if sh.cell_id[bottom[0]] == sh.cell_id[top[0]] else "mixed_owner"
+        signed = []
+        for stage, do_jitter in (("rest", False), ("after_tg_jitter", True)):
+            points = []
+            for i in top + bottom:
+                amount = 0.065 * (-3.0 + 11.0 * tg_cell_random(sh.cell_id[i])) if do_jitter else 0.0
+                points.append((sh.pos[i][0] + sh.uv0[i][0] * amount,
+                               sh.pos[i][2] + sh.uv0[i][1] * amount))
+            a, b, c = points
+            ex, ey = b[0] - a[0], b[1] - a[1]
+            length = math.hypot(ex, ey)
+            if length <= 1e-12:
+                raise ValueError("Degenerate TG cap edge")
+            distance = (ex * (c[1] - a[1]) - ey * (c[0] - a[0])) / length
+            signed.append(distance)
+            widths[stage][kind].append(abs(distance) * 100.0)
+        counts[kind] += 1
+        flipped[kind] += signed[0] * signed[1] <= 0.0
+
+    def quantiles(values):
+        ordered = sorted(values)
+        return {f"p{p}": round(ordered[int((len(ordered) - 1) * p / 100)], 3) for p in (10, 50, 90)}
+
+    return {"two_top_one_bottom_counts": dict(counts),
+            "planar_width_cm": {stage: {kind: quantiles(values) for kind, values in groups.items()}
+                                for stage, groups in widths.items()},
+            "planar_orientation_changes_after_jitter": dict(flipped)}
 
 
 def tri_area_xz(a, b, c) -> float:
@@ -248,7 +334,7 @@ def verify(sh: Shell, glb: Glb) -> None:
         "bottom_ring_verts": sh.n - top_verts,
         "corner_verts": corner_verts,
     }
-    out("\n[计数 vs Docs/TinyGlade/CSGroundShaper.md「烘焙资产」表]")
+    out("\n[计数 vs Docs/TinyGlade/Ground_Shaper.md「烘焙资产」表]")
     for key, want in EXPECTED.items():
         mark = "OK " if got[key] == want else "!! "
         out(f"  {mark}{key:20} {got[key]:>8}   文档 {want:>8}")
@@ -327,7 +413,13 @@ def verify(sh: Shell, glb: Glb) -> None:
         f"，底圈 {sum(len(v) for v in bot_ring.values()) / nc:.1f}")
     out(f"     逐胞腔三角: 盖 {cap / nc:.1f}、裙 {(sh.tris - cap) / nc:.1f}")
 
-    out("\n[相邻胞腔是否共享顶点]")
+    out("\n[真实连接：跨 cell_id 的裙三角与共同位移顶点]")
+    out(f"     {connectivity_stats(sh)}")
+    out("     cell_id 属于顶点；一个裙三角可以连接 2 或 3 个 cell_id。唯一归属不代表网格断开。")
+    out("\n[盖—裙平面过渡：TG 径向收缩前后；尚未采地形或沿法线位移]")
+    out(f"     {transition_stats(sh)}")
+
+    out("\n[同位置顶点的 cell_id 归属（不能据此判断三角形连接）]")
     for nd, lbl in ((5, "10 um"), (2, "1 cm"), (1, "10 cm")):
         occ_t, occ_b = defaultdict(set), defaultdict(set)
         for i in range(sh.n):
@@ -336,7 +428,7 @@ def verify(sh: Shell, glb: Glb) -> None:
         out(f"  !! 容差 {lbl:6}: 顶圈去重 {len(occ_t):6}，被 ≥2 个胞腔共享 "
             f"{sum(1 for s in occ_t.values() if len(s) >= 2):5}"
             f" | 底圈去重 {len(occ_b):6}，共享 {sum(1 for s in occ_b.values() if len(s) >= 2):5}")
-    out("     ⇒ 相邻胞腔**一个顶点都不共享**：盖是内缩的孤岛，缝由两侧的裙填")
+    out("     ⇒ 同位置的重复顶点具有一致的 cell_id；跨石块连接必须检查三角形及边的关联。")
 
     out("\n[LipOffset：底圈相对盖边界的横向错开]")
     dists, cos_dir, outward = [], [], 0
@@ -393,15 +485,7 @@ def verify(sh: Shell, glb: Glb) -> None:
     out(f"     盖 {cap_area:.3f} m² = {100 * cap_area / tile_area:.2f}%"
         f" | 裙（XZ 投影）{skirt_area:.3f} m² = {100 * skirt_area / tile_area:.2f}%")
     out(f"  !! 合计 {cap_area + skirt_area:.3f} m² / tile {tile_area:.3f} m² = "
-        f"{100 * (cap_area + skirt_area) / tile_area:.4f}%  ⇒ 盖 + 裙**精确**铺满，零重叠零空隙")
-
-    out("\n[相邻胞腔的外轮廓是否重合（抽样 60 个胞腔）]")
-    outer = _outer_loops(sh)
-    coin = _outer_coincidence(outer)
-    if coin:
-        out(f"     外轮廓点到**其它**胞腔外轮廓边的距离：中位 {coin['median'] * 100:.3f} cm，"
-            f"落在 1 mm 内的占 {coin['within_mm']:.1f}%")
-        out("     ⇒ 外轮廓边两侧重合（所以能精确铺满），但**顶点不重合**（两侧各自细分）")
+        f"{100 * (cap_area + skirt_area) / tile_area:.4f}%（面积总和本身不能证明无重叠或空隙）")
 
     out("\n[平铺]")
     E = sh.acc_pos["max"][0]

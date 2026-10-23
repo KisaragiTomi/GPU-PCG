@@ -21,7 +21,7 @@
 两版共用的口径不变：所有长度常数都是 TG 原生的**图案空间**（5.53 m 胞腔），材质用标量
 `RockShellPatternScale` 把世界距离与世界坐标换算回图案空间 —— 运行时壳由
 `ACSGroundActor::EnsureRockShellMesh` 的动态子实例写入本 actor 的图案缩放，直摆资产吃默认值 1。
-机制、通道字典与参数见 `Docs/TinyGlade/CSRockShellEdgeBevel.md`。
+机制、通道字典与参数见 `Docs/TinyGlade/RockShell_EdgeBevel.md`。
 
 用法::
 
@@ -222,7 +222,7 @@ return float3(p.x + Phase * 1370.0 + p.z * 0.5,
     p_strength = _scalar_param(mat, "BevelStrength", 0.5, x - 500, y + 850)   # TG :194 的 0.5
     # 0 = TG 原式（`mix(自身面法线, 邻面面法线, t × 0.5)`）；1 = band 内取 chamfer 小面的常数
     # 法线，两条边界各一道真硬边。**默认 0 = TG 原样**（2026-09-04 用户：先按 TG 的方案做一版）。
-    # 硬边那一档保留为可选：它偏离 TG，见 Docs/TinyGlade/CSRockShellEdgeBevel.md 的「硬边」节。
+    # 硬边那一档保留为可选：它偏离 TG，见 Docs/TinyGlade/RockShell_EdgeBevel.md 的「硬边」节。
     p_hardness = _scalar_param(mat, "BevelHardness", 0.0, x - 500, y + 950)
     p_hard_th = _scalar_param(mat, "BevelHardThreshold", 0.5, x - 500, y + 1050)
 

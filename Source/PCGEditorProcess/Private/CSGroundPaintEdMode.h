@@ -6,7 +6,7 @@
 class ACSGroundActor;
 
 /**
- * Paints vertex colours onto ACSGroundActor's ground mesh (TinyGladeHouse_Plan.md D2).
+ * Paints vertex colours onto ACSGroundActor's ground mesh (Plan_House.md D2).
  *
  * The stroke lifecycle belongs to FCSBrushEdModeBase; two things differ here:
  *  - the cursor trace: the ground's GPU mesh has no collision, so TraceCandidatePoint is

@@ -2,27 +2,36 @@
 
 #include "CSGroundActor.h"
 #include "CSGroundShaperField.h"
-#include "CSHouseHandleActor.h"   // MakeEditorGizmoProp —— 示意道具的共享配法
 #include "Components/BillboardComponent.h"
-#include "Components/StaticMeshComponent.h"
-#include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "EngineUtils.h"
+#include "ImageCore.h"
+#include "Serialization/CustomVersion.h"
 #include "UObject/ConstructorHelpers.h"
+
+namespace
+{
+// Unity/jumbo 构建共享 TU，file-local 一律 CSShaper_ 前缀。
+
+/** 存盘版本：2026-09-29 形状改 mask、台高改 actor 高度（Radius / LiftHeight 迁移用）。 */
+const FGuid CSShaper_VersionGuid(0x5A1C7E21, 0x4B8D4F03, 0x9E61C2B7, 0x3D0F8A94);
+enum : int32
+{
+	CSShaper_InitialVersion = 0,
+	CSShaper_MaskAndActorHeight = 1,
+	CSShaper_LatestVersion = CSShaper_MaskAndActorHeight,
+};
+FCustomVersionRegistration CSShaper_VersionRegistration(CSShaper_VersionGuid, CSShaper_LatestVersion, TEXT("CSGroundShaperActor"));
+
+uint32 CSShaper_HashFloat(uint32 Hash, float Value)
+{
+	return HashCombine(Hash, ::GetTypeHash(Value));
+}
+}
 
 ACSGroundShaperActor::ACSGroundShaperActor()
 {
 	PrimaryActorTick.bCanEverTick = false;
-
-	// 示意圆柱：只是编辑器里"这里有座土台"的把手，游戏里不存在。
-	EditorShapeComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("EditorShape"));
-	EditorShapeComponent->SetupAttachment(RootComponent);
-	// 与拉尺寸抓手的示意锥同一份配法。本类是 `ACSTinyGlade`（要产石阶网格），继承不到
-	// `ACSHouseHandleActor`，但"编辑器示意道具"这六行没理由各写一遍。
-	ACSHouseHandleActor::MakeEditorGizmoProp(EditorShapeComponent);
-
-	static ConstructorHelpers::FObjectFinderOptional<UStaticMesh> CylinderMesh(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
-	EditorShapeMesh = CylinderMesh.Get();
 
 #if WITH_EDITORONLY_DATA
 	SpriteComponent = CreateEditorOnlyDefaultSubobject<UBillboardComponent>(TEXT("Sprite"));
@@ -34,6 +43,8 @@ ACSGroundShaperActor::ACSGroundShaperActor()
 		static ConstructorHelpers::FObjectFinderOptional<UTexture2D> SpriteTexture(TEXT("/Engine/EditorResources/S_Terrain.S_Terrain"));
 		SpriteComponent->Sprite = SpriteTexture.Get();
 		SpriteComponent->SetupAttachment(RootComponent);
+		// 图标位于 actor（台顶或坑底）上方 1m。
+		SpriteComponent->SetRelativeLocation(FVector(0, 0, 100.0));
 		SpriteComponent->SetRelativeScale3D(FVector(1.5));
 		SpriteComponent->bIsScreenSizeScaled = true;
 		SpriteComponent->SetHiddenInGame(true);
@@ -71,38 +82,109 @@ void ACSGroundShaperActor::UnregisterFromGround(bool bRefreshGround)
 
 double ACSGroundShaperActor::ComputeTopHeight() const
 {
-	const FVector Loc = GetActorLocation();
-	const double GroundZ = Ground ? Ground->GetActorLocation().Z : Loc.Z;
-	return FMath::Max(0.0, (Loc.Z - GroundZ) + LiftHeight);   // 把 actor 往上拖 = 整座台加高
+	// 台顶 = actor 相对地面的高度（用户 2026-09-29："actor 在 600，地形最高就是 600"）。
+	// 没有地面（纯 CPU 单测）时相对世界 0。
+	// 可以为负（2026-09-30）：actor 在地面以下 = 坑，坑底就是 actor 的高度。
+	const double GroundZ = Ground ? Ground->GetActorLocation().Z : 0.0;
+	return GetActorLocation().Z - GroundZ;
+}
+
+float ACSGroundShaperActor::GetContourRadius() const
+{
+	return MaskSdfN >= 2 && MaskSdf.Num() == MaskSdfN * MaskSdfN ? MaskSdfContourRadius : 0.5f * MaskSize;
 }
 
 float ACSGroundShaperActor::SampleShapeHeight(const FVector2D& WorldXY) const
 {
 	// 走的是与 GPU 逐行对照的那一份公式（Public/CSGroundShaperField.h ↔ CSGroundShaperField.ush），
-	// 而且喂进去的是**同一份打包参数** —— 早先这里各写各的 double 版本，噪声一进来就没法保证
-	// 两侧同数了（症状：房子/石阶浮在坡面上方几厘米，不报任何错）。
-	FVector4f Profile, Top, Noise;
-	GetHeightFieldParams(Profile, Top, Noise);
-	return CSGroundShaperField::EvalShaper(FVector2f(float(WorldXY.X), float(WorldXY.Y)), Profile, Top, Noise);
+	// 而且喂进去的是**同一份打包头 + 同一批 SDF 浮点数** —— 早先这里各写各的 double 版本，噪声一进来
+	// 就没法保证两侧同数了（症状：房子/石阶浮在坡面上方几厘米，不报任何错）。
+	return CSGroundShaperField::EvalShaper(FVector2f(float(WorldXY.X), float(WorldXY.Y)), GetFieldHeader(), GetMaskSdf());
 }
 
-void ACSGroundShaperActor::GetHeightFieldParams(FVector4f& OutProfile, FVector4f& OutTop, FVector4f& OutNoise) const
+CSGroundShaperField::FShaperHeader ACSGroundShaperActor::GetFieldHeader() const
 {
 	const FVector Loc = GetActorLocation();
-	OutProfile = FVector4f(float(Loc.X), float(Loc.Y), Radius, FMath::Max(FalloffDistance, UE_KINDA_SMALL_NUMBER));
+	const bool bHasSdf = MaskSdfN >= 2 && MaskSdf.Num() == MaskSdfN * MaskSdfN;
+	const float Lift = FMath::Max(SecondaryLiftScale, 0.0f);
+
+	CSGroundShaperField::FShaperHeader H;
+	H.Profile = FVector4f(float(Loc.X), float(Loc.Y), GetContourRadius(), FMath::Max(FalloffDistance, UE_KINDA_SMALL_NUMBER));
 	// 频率在这里算完再打包，而不是两侧各除一次：除法结果差 1 ulp 就够让 CPU/GPU 一致性断言报红。
+	// 台高先除 (1 + 二次抬升)：剖面在台顶取 1 + 二次抬升 ⇒ 台顶恰好 = actor 高度。
 	const float Frequency = 1.0f / FMath::Max(SkirtNoiseWavelength, 1.0f);
-	OutTop = FVector4f(float(ComputeTopHeight()), FMath::Max(SkirtNoiseAmount, 0.0f), Frequency, FMath::Max(SecondaryLiftScale, 0.0f));
+	H.Top = FVector4f(float(ComputeTopHeight() / (1.0 + double(Lift))), FMath::Max(SkirtNoiseAmount, 0.0f), Frequency, Lift);
 	// 种子过 float 再回 uint，所以只留 20 bit：更大的整数在 float 里就不是精确值了，
 	// CPU 与 GPU 会各自截断到不同的数。
-	OutNoise = FVector4f(float(uint32(SkirtNoiseSeed) & 0xFFFFFu), 0.0f, 0.0f, 0.0f);
+	H.Noise = FVector4f(float(uint32(SkirtNoiseSeed) & 0xFFFFFu), FMath::Max(Smoothing, 0.0f), bHasSdf ? float(MaskSdfN) : 0.0f, 0.0f);
+	const double Yaw = FMath::DegreesToRadians(GetActorRotation().Yaw);
+	const float Cell = FMath::Max(MaskSdfCellSize, UE_KINDA_SMALL_NUMBER);
+	H.Frame = FVector4f(float(FMath::Cos(Yaw)), float(FMath::Sin(Yaw)), 1.0f / Cell, Cell);
+	// 中心隆起的尺子：零等值线内最深处离边多远（圆盘 = 半径）。
+	H.Shape = FVector4f(FMath::Clamp(CenterBulge, 0.0f, 1.0f), bHasSdf ? MaskSdfDeepest : 0.5f * MaskSize, 0.0f, 0.0f);
+	return H;
 }
 
 FBox2D ACSGroundShaperActor::GetFootprintRect2D() const
 {
 	const FVector Loc = GetActorLocation();
-	const double Reach = Radius + FalloffDistance;
+	const double Reach = double(GetContourRadius()) + FalloffDistance;
 	return FBox2D(FVector2D(Loc.X - Reach, Loc.Y - Reach), FVector2D(Loc.X + Reach, Loc.Y + Reach));
+}
+
+// -----------------------------------------------------------------------------
+// Mask → SDF
+// -----------------------------------------------------------------------------
+
+uint32 ACSGroundShaperActor::ComputeMaskSdfKey() const
+{
+	uint32 Key = 0x5DF0u;
+#if WITH_EDITOR
+	if (Mask)
+	{
+		Key = HashCombine(Key, GetTypeHash(Mask->GetPathName()));
+		Key = HashCombine(Key, GetTypeHash(Mask->Source.GetId()));
+	}
+#endif
+	Key = CSShaper_HashFloat(Key, MaskSize);
+	Key = CSShaper_HashFloat(Key, FalloffDistance);
+	Key = CSShaper_HashFloat(Key, Smoothing);
+	Key = CSShaper_HashFloat(Key, SdfCellSize);
+	return Key;
+}
+
+void ACSGroundShaperActor::EnsureMaskSdf()
+{
+#if WITH_EDITOR
+	if (!Mask)
+	{
+		// 圆盘模式：不占存盘空间。
+		if (MaskSdfN != 0 || MaskSdf.Num() > 0) { MaskSdf.Empty(); MaskSdfN = 0; MaskSdfKey = 0; }
+		return;
+	}
+	const uint32 Key = ComputeMaskSdfKey();
+	if (Key == MaskSdfKey && MaskSdfN >= 2 && MaskSdf.Num() == MaskSdfN * MaskSdfN) return;
+
+	FImage Source;
+	if (!Mask->Source.IsValid() || !Mask->Source.GetMipImage(Source, 0))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CSGroundShaper] %s: 读不到 mask %s 的源数据，沿用上一次烘好的距离场。"), *GetName(), *Mask->GetName());
+		return;
+	}
+	FImage Gray;
+	Source.CopyTo(Gray, ERawImageFormat::R32F, EGammaSpace::Linear);
+	const TArrayView64<float> Pixels = Gray.AsR32F();
+
+	CSGroundShaperField::FMaskSdf Baked;
+	CSGroundShaperField::BakeMaskSdf(TConstArrayView<float>(Pixels.GetData(), int32(Pixels.Num())), Gray.SizeX, Gray.SizeY,
+		MaskSize, FalloffDistance, Smoothing, SdfCellSize, Baked);
+	MaskSdf = MoveTemp(Baked.Values);
+	MaskSdfN = Baked.N;
+	MaskSdfCellSize = Baked.CellSize;
+	MaskSdfContourRadius = Baked.ContourRadius;
+	MaskSdfDeepest = Baked.DeepestInside;
+	MaskSdfKey = Key;
+#endif
 }
 
 // -----------------------------------------------------------------------------
@@ -118,7 +200,7 @@ void ACSGroundShaperActor::RebuildTerrain(bool bCommitted)
 {
 	if (IsTemplate() || !GetWorld()) return;   // CDO / 未进世界的模板不碰场景
 	ResolveGroundAndRegister();
-	UpdateEditorShape();
+	EnsureMaskSdf();
 
 	if (Ground)
 	{
@@ -131,32 +213,31 @@ void ACSGroundShaperActor::RebuildTerrain(bool bCommitted)
 	}
 }
 
-void ACSGroundShaperActor::UpdateEditorShape()
-{
-#if WITH_EDITORONLY_DATA
-	// 图标浮在台顶上方 1m：示意圆柱底面贴 z=0、高 LiftHeight，图标搁原点就埋在土台里点不着了。
-	constexpr double SpriteClearance = 100.0;
-	if (SpriteComponent) SpriteComponent->SetRelativeLocation(FVector(0, 0, LiftHeight + SpriteClearance));
-#endif
-
-	if (!EditorShapeComponent) return;
-	if (EditorShapeComponent->GetStaticMesh() != EditorShapeMesh) EditorShapeComponent->SetStaticMesh(EditorShapeMesh);
-	if (!EditorShapeMesh) return;
-
-	// 与网格自身的轴心无关：按局部包围盒换算出"直径 2R、高 LiftHeight、底面贴 z=0"的摆放。
-	const FBox Local = EditorShapeMesh->GetBoundingBox();
-	const FVector Size = Local.GetSize();
-	const FVector Scale(
-		Size.X > UE_KINDA_SMALL_NUMBER ? 2.0 * Radius / Size.X : 1.0,
-		Size.Y > UE_KINDA_SMALL_NUMBER ? 2.0 * Radius / Size.Y : 1.0,
-		Size.Z > UE_KINDA_SMALL_NUMBER ? LiftHeight / Size.Z : 1.0);
-	EditorShapeComponent->SetRelativeScale3D(Scale);
-	EditorShapeComponent->SetRelativeLocation(FVector(0, 0, -Local.Min.Z * Scale.Z));
-}
-
 // -----------------------------------------------------------------------------
 // AActor
 // -----------------------------------------------------------------------------
+
+void ACSGroundShaperActor::Serialize(FArchive& Ar)
+{
+	Super::Serialize(Ar);
+	Ar.UsingCustomVersion(CSShaper_VersionGuid);
+}
+
+void ACSGroundShaperActor::PostLoad()
+{
+	Super::PostLoad();
+	if (GetLinkerCustomVersion(CSShaper_VersionGuid) >= CSShaper_MaskAndActorHeight) return;
+
+	// 老关卡迁移（2026-09-29 前的存盘）：圆盘半径 → 直径；「相对 actor 再抬 LiftHeight、台顶再照抬
+	// 二次抬升」→ 把 actor 本身抬到旧台顶。剖面按新公式（台高 / (1 + 二次抬升) × ...）与旧的逐项相同，
+	// 画面不变。模板（蓝图 CDO）只迁尺寸，不动位置。
+	MaskSize = FMath::Max(2.0f * Radius, 1.0f);
+	if (!IsTemplate() && RootComponent && LiftHeight != 0.0f)
+	{
+		const double Raise = double(LiftHeight) * (1.0 + double(FMath::Max(SecondaryLiftScale, 0.0f)));
+		RootComponent->SetRelativeLocation_Direct(RootComponent->GetRelativeLocation() + FVector(0.0, 0.0, Raise));
+	}
+}
 
 void ACSGroundShaperActor::PostRegisterAllComponents()
 {

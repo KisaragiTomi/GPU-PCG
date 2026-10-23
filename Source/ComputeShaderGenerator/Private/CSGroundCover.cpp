@@ -8,12 +8,14 @@
 #include "CSMesh.h"                    // UCSMesh::CountedBlockingFlush —— 阻塞刷新的唯一计数入口
 #include "ComputeShaderGenerateHelper.h"
 #include "DataDrivenShaderPlatformInfo.h"
+#include "Engine/TextureRenderTarget2D.h"
 #include "GlobalShader.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
 #include "RenderingThread.h"
 #include "RHIGPUReadback.h"
 #include "ShaderParameterStruct.h"
+#include "TextureResource.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogCSGroundCover, Log, All);
 
@@ -55,6 +57,9 @@ class FCSGroundCoverScatterCS : public FGlobalShader
 		SHADER_PARAMETER(float, CoverMaskStart)
 		SHADER_PARAMETER(float, CoverMaskEnd)
 		SHADER_PARAMETER(float, CoverMaskShorten)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, CoverGroundMask)
+		SHADER_PARAMETER(uint32, CoverUseGroundMask)
+		SHADER_PARAMETER(FVector2f, CoverMaskWarp)
 		SHADER_PARAMETER(float, CoverChance)
 		SHADER_PARAMETER(float, CoverJitter)
 		SHADER_PARAMETER(float, CoverMinSlopeCos)
@@ -83,6 +88,10 @@ class FCSGroundCoverScatterCS : public FGlobalShader
 		SHADER_PARAMETER(float, CoverRingNoiseThreshold)
 		SHADER_PARAMETER(float, CoverRingMinScale)
 		SHADER_PARAMETER(float, CoverOverlayChance)
+		SHADER_PARAMETER(float, CoverPatchSize)
+		SHADER_PARAMETER(float, CoverPatchCoverage)
+		SHADER_PARAMETER(float, CoverPatchSoftness)
+		SHADER_PARAMETER(float, CoverPatchSparse)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -218,7 +227,8 @@ bool Scatter(
 	const TArray<FCoverBuffers>& Buffers,
 	const TArray<FScatterParams>& Params,
 	const TArray<FVector4f>& ShaperParams,
-	const TArray<FVector4f>& BuildingPolygons)
+	const TArray<FVector4f>& BuildingPolygons,
+	UTextureRenderTarget2D* GroundMask)
 {
 	if (!GroundResident.IsValid()) return false;
 	// 长度不同 ⇒ 整趟拒绝。错位的症状是"花长成草的密度"，没有任何报错 —— 宁可一株都不长。
@@ -230,17 +240,40 @@ bool Scatter(
 
 	// 空 palette 也要跑：塑形物被删光时正是"全 0 高度场"把地被推回平地的那一趟。
 	TArray<FVector4f> UploadParams = ShaperParams;
-	const int32 ShaperCount = UploadParams.Num() / CSGroundShaperField::Float4sPerShaper;
+	const int32 ShaperCount = CSGroundShaperField::NumShapers(UploadParams);   // 前缀里读：池子跟在头后面，不能再按长度除
 	if (UploadParams.IsEmpty()) UploadParams.Add(FVector4f::Zero());   // 结构化 buffer 不能是 0 长度
 
 	TArray<FVector4f> UploadBuildings = BuildingPolygons;
 	const int32 BuildingCount = UploadBuildings.Num() / BuildingStride;
 	if (UploadBuildings.IsEmpty()) UploadBuildings.Add(FVector4f::Zero());   // 同上：一栋都没有也要绑一个
 
+	// 地面遮罩的资源指针在游戏线程取、渲染线程用（渲染目标的标准交接方式）。它由地面 actor 在同一条
+	// 渲染命令 FIFO 里先写好，所以这里读到的恒是这一笔之后的遮罩。
+	FTextureRenderTargetResource* GroundMaskResource = GroundMask ? GroundMask->GameThread_GetRenderTargetResource() : nullptr;
+
 	ENQUEUE_RENDER_COMMAND(CSGroundCoverScatter)(
-		[Resident = GroundResident, Work = Buffers, All = Params, UploadParams, ShaperCount, UploadBuildings, BuildingCount](FRHICommandListImmediate& RHICmdList)
+		[Resident = GroundResident, Work = Buffers, All = Params, UploadParams, ShaperCount, UploadBuildings, BuildingCount, GroundMaskResource](FRHICommandListImmediate& RHICmdList)
 		{
 			FRDGBuilder GraphBuilder(RHICmdList, RDG_EVENT_NAME("CSGroundCover.Scatter"));
+
+			// 地面遮罩；没有就给一张清零的 1×1 占位（参数结构里的 SRV 不能空着，kernel 在 Use = 0 时不读它，
+			// 但没被写过的 RDG 贴图没有生产者，照样要清）。
+			FRHITexture* GroundMaskRHI = GroundMaskResource ? GroundMaskResource->GetRenderTargetTexture() : nullptr;
+			FRDGTextureRef GroundMaskTexture = nullptr;
+			if (GroundMaskRHI)
+			{
+				GroundMaskTexture = RegisterExternalTexture(GraphBuilder, GroundMaskRHI, TEXT("CSGround.GroundMask"));
+				// 地面材质在基础 pass 里还要采它：读完留在 SRV（RDG 的默认收尾也是这个，写明白免得被人改掉）。
+				GraphBuilder.SetTextureAccessFinal(GroundMaskTexture, ERHIAccess::SRVMask);
+			}
+			else
+			{
+				GroundMaskTexture = GraphBuilder.CreateTexture(
+					FRDGTextureDesc::Create2D(FIntPoint(1, 1), PF_R32_FLOAT, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV),
+					TEXT("CSGroundCover.NoGroundMask"));
+				AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(GroundMaskTexture), 0.0f);
+			}
+			const FRDGTextureSRVRef GroundMaskSRV = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(GroundMaskTexture));
 
 			TArray<FRDGBufferRef> PackedRefs;
 			TArray<FRDGBufferRef> CounterRefs;
@@ -326,6 +359,10 @@ bool Scatter(
 						// 表现是"路边一刀切"或"整片草消失"，而两个数各自看起来都正常。
 						PassParams->CoverMaskEnd = FMath::Max(P.MaskEnd, P.MaskStart + 1e-3f);
 						PassParams->CoverMaskShorten = FMath::Clamp(P.MaskShorten, 0.0f, 1.0f);
+						PassParams->CoverGroundMask = GroundMaskSRV;
+						// 没传地面遮罩时退回色流：读占位贴图的话全是 0，路上照样长满草，而且不报错。
+						PassParams->CoverUseGroundMask = (P.bUseGroundMask && GroundMaskRHI) ? 1u : 0u;
+						PassParams->CoverMaskWarp = FVector2f(FMath::Max(P.MaskWarpStrength, 0.0f), 1.0f / FMath::Max(P.MaskWarpWavelength, 1.0f));
 						PassParams->CoverChance = FMath::Clamp(P.Chance, 0.0f, 1.0f);
 						PassParams->CoverJitter = FMath::Clamp(P.Jitter, 0.0f, 1.0f);
 						PassParams->CoverMinSlopeCos = FMath::Clamp(P.MinSlopeCos, 0.0f, 1.0f);
@@ -364,6 +401,11 @@ bool Scatter(
 						PassParams->CoverRingNoiseThreshold = FMath::Clamp(P.RingNoiseThreshold, 0.0f, 1.0f);
 						PassParams->CoverRingMinScale = FMath::Clamp(P.RingMinScale, 0.0f, 1.0f);
 						PassParams->CoverOverlayChance = FMath::Clamp(P.OverlayChance, 0.0f, 1.0f);
+						// 聚散：尺寸 ≤ 0 = 关（kernel 里整段跳过，与加这道门控之前逐位相同）。
+						PassParams->CoverPatchSize = FMath::Max(P.PatchSize, 0.0f);
+						PassParams->CoverPatchCoverage = FMath::Clamp(P.PatchCoverage, 0.0f, 1.0f);
+						PassParams->CoverPatchSoftness = FMath::Clamp(P.PatchSoftness, 0.0f, 1.0f);
+						PassParams->CoverPatchSparse = FMath::Clamp(P.PatchSparseDensity, 0.0f, 1.0f);
 
 						FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("CSGroundCover.Scatter[%d]", Index), Shader, PassParams,
 							FComputeShaderUtils::GetGroupCount(FIntPoint(P.GridDims.X, P.GridDims.Y),

@@ -41,8 +41,8 @@ bool FCSHouseResizeWatcherSelectionTest::RunTest(const FString& Parameters)
 
 	House->EnterResizeMode();
 	TArray<ACSHouseHandleActor*> Handles = House->GetResizeHandles();
-	// N + 2：四个锥子 + 檐口框 + 房底框（2026-09-14 加房底框）。
-	if (!TestEqual(TEXT("The house is in resize mode with six handles"), Handles.Num(), 6)) return false;
+	// N + 5：四个锥子 + 檐口框 + 房底框 + 屋顶框（2026-09-20）+ 脊两端的脊长箭头（2026-10-02）。
+	if (!TestEqual(TEXT("The house is in resize mode with nine handles"), Handles.Num(), 9)) return false;
 
 	// ⚠️ `SpawnActor<AActor>` 出来的 actor **没有根组件**，`AttachToActor` 会直接不生效，
 	// 而没有根的 actor 恒不"attached to"任何东西 —— 拿它当反例会让断言靠错误的理由通过，
@@ -92,7 +92,7 @@ bool FCSHouseResizeWatcherSelectionTest::RunTest(const FString& Parameters)
 	// 另一栋房的抓手同样不算 —— 它挂在别人的 attach 链下。
 	Other->EnterResizeMode();
 	TArray<ACSHouseHandleActor*> OtherHandles = Other->GetResizeHandles();
-	if (TestEqual(TEXT("The other house has handles too"), OtherHandles.Num(), 6))
+	if (TestEqual(TEXT("The other house has handles too"), OtherHandles.Num(), 9))
 	{
 		TestFalse(TEXT("Another house's handle does not keep this edit alive"),
 			FCSHouseResizeSelectionWatcher::IsStillEditing(House, Selection({ OtherHandles[0] })));

@@ -78,9 +78,10 @@ bool FCSGroundPlacementTraceTest::RunTest(const FString& Parameters)
 	// ④ 塑形物松手（提交）抬高地形：碰撞跟着重烘。中心点正落在镜像格点上，三角插值与双线性一致。
 	ACSGroundShaperActor* Mound = World->SpawnActor<ACSGroundShaperActor>(FVector(Center, 0.0), FRotator::ZeroRotator);
 	if (!TestNotNull(TEXT("塑形物"), Mound)) return false;
-	Mound->Radius = 300.0f;
+	Mound->MaskSize = 2.0f * float(300.0f);   // 圆盘直径（2026-09-29 起形状是 mask，没设 mask = 解析圆盘）
 	Mound->FalloffDistance = 200.0f;
-	Mound->LiftHeight = 250.0f;
+	// 台顶 = actor 高度（2026-09-29）；乘 (1 + 二次抬升) 保持与旧口径「抬 LiftHeight、台顶再照抬 2%」逐项相同的剖面。
+	Mound->SetActorLocation(Mound->GetActorLocation() + FVector(0.0, 0.0, double(250.0f) * (1.0 + double(Mound->SecondaryLiftScale))));
 	Mound->RebuildTerrain(/*bCommitted*/ true);
 	if (!TestTrue(TEXT("抬高后的碰撞 cook 已落地"), WaitCook())) return false;
 	const double Raised = double(Ground->SampleHeight(Center));

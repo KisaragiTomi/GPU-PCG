@@ -1,0 +1,86 @@
+// 地面遮罩的采样扰动（domain warp）：读地面遮罩（`ACSGroundActor::GroundMask`）的每一方都先把采样点挪一下。
+//
+// 用户 2026-09-29："mask 还是需要有一些扰动的，现在看上去过于平均了" / "交界过于生硬"。遮罩本身是笔刷路权重
+// 糊开再延伸出来的（`CSGroundRoadField.usf`），等值线就是画出来的路缘等距外扩 —— 草线、深土、浅土路三条交界
+// 都是同一条轮廓的平移，看上去像拿圆规画的。
+//
+// TG 对照（`_paths_path_mask_visual` CS 第 48–164 行）：`path_mask_blurred` 不按原位置采，而是
+// `P + fbm(P × 0.75/m + 7) × 0.5 × 1.2 m`（再乘一个"坡越陡越小"的系数）处采；fbm 两层 value noise，
+// 振幅 0.5 起每层 ×0.55，频率每层 ×1.9 并旋转 36.87°（[0.8,−0.6; 0.6,0.8]）。常数照抄，哈希也照抄。
+// 与 TG 的两处差别：
+//  · TG 把**同一个标量**加到 x、z 两个分量上 —— 位移恒沿对角线，走向恰好是对角线的路缘一点都不抖。
+//    这里两个分量各取一份（第二份在远处另采一点），任何走向的路缘都抖。
+//  · 坡度衰减没有搬：本工程地面的坡由塑形物给，地被与材质各自拿到的法线口径不同（中心差分 vs 顶点法线），
+//    两边各算一个衰减会在坡上错开。要补的话得先让两边用同一份坡度。
+//
+// ⚠️ **必须所有读遮罩的一方用同一个位移**：地面材质（`Scripts/TinyGladeMakeGroundMaterial.py` 的 Custom 节点
+// 经 IncludeFilePaths 引本文件）与地被 / 灌木散布（`CSGroundCover.usf`）。只挪一边的话，土边与草线各抖各的，
+// 又回到"草长在土上"。两边的输入都是**地面局部坐标**（cm，原点 = 地面格点 (0,0)）：材质那边是 UV0 × UVWorldPeriod，
+// 散布那边是 P − CoverGroundOriginXY —— 地面整体挪动时扰动跟着走，不在世界里原地打滑。
+//
+// 遮罩贴图本身**不**带扰动：扰动是采样时加的（TG 的 path_mask_blurred 同样是干净的）。贴图的分辨率是地面格
+// （50 cm），在生成时就挪的话，1.33 m 波长的抖动只剩两三个 texel，会被双线性抹平。
+
+#pragma once
+
+/** TG 同款格点哈希：y 过 Jenkins one-at-a-time 的收尾混合，与 x 做一步 LCG，再过 MT19937 的 tempering。 */
+uint CSGroundMaskWarp_Hash(int2 Cell)
+{
+	uint Y = asuint(Cell.y);
+	Y += Y << 10u;
+	Y ^= Y >> 6u;
+	Y += Y << 3u;
+	Y ^= Y >> 11u;
+	Y += Y << 15u;
+	uint H = (asuint(Cell.x) * 1664525u + Y + 1013904223u) * 1664525u;
+	H ^= H >> 11u;
+	H ^= (H << 7u) & 0x9D2C5680u;
+	H ^= (H << 15u) & 0xEFC60000u;
+	H ^= H >> 18u;
+	return H;
+}
+
+/** [0, 1)：23 位尾数拼成 [1, 2) 的 float 再减 1（TG 同款）。 */
+float CSGroundMaskWarp_Hash01(int2 Cell)
+{
+	return asfloat((CSGroundMaskWarp_Hash(Cell) & 0x007FFFFFu) | 0x3F800000u) - 1.0f;
+}
+
+/** 整数格点 value noise，t²(3−2t) 插值，[0, 1)。 */
+float CSGroundMaskWarp_ValueNoise(float2 P)
+{
+	const float2 I = floor(P);
+	const float2 T = P - I;
+	const float2 U = T * T * (3.0f - 2.0f * T);
+	const int2 C = int2(I);
+	const float N00 = CSGroundMaskWarp_Hash01(C);
+	const float N10 = CSGroundMaskWarp_Hash01(C + int2(1, 0));
+	const float N01 = CSGroundMaskWarp_Hash01(C + int2(0, 1));
+	const float N11 = CSGroundMaskWarp_Hash01(C + int2(1, 1));
+	return (1.0f - U.y) * (N00 * (1.0f - U.x) + N10 * U.x) + (N01 * (1.0f - U.x) + N11 * U.x) * U.y;
+}
+
+/** 两层 fbm，约 [−0.775, 0.775]。 */
+float CSGroundMaskWarp_Fbm(float2 P)
+{
+	float Sum = 0.0f;
+	float Amp = 0.5f;
+	[unroll] for (int Octave = 0; Octave < 2; ++Octave)
+	{
+		Sum += Amp * (2.0f * CSGroundMaskWarp_ValueNoise(P) - 1.0f);
+		Amp *= 0.55f;
+		P = float2(P.x * 0.8f - P.y * 0.6f, P.x * 0.6f + P.y * 0.8f) * 1.9f;
+	}
+	return Sum;
+}
+
+/**
+ * 地面局部坐标（cm）处的采样位移（cm）。
+ * Strength = TG 的 0.5 × 1.2 m 那个系数（cm，0 = 不扰动）；InvWavelength = 1 / 噪声底层波长（cm⁻¹，TG 0.75/m ⇒ 1/133.3 cm）。
+ */
+float2 CSGroundMaskWarp_Offset(float2 LocalCm, float InvWavelength, float Strength)
+{
+	if (Strength <= 0.0f) return float2(0.0f, 0.0f);
+	const float2 P = LocalCm * InvWavelength + 7.0f;
+	return float2(CSGroundMaskWarp_Fbm(P), CSGroundMaskWarp_Fbm(P + float2(-53.0f, 91.0f))) * Strength;
+}

@@ -3,7 +3,7 @@
 
 **系统 python 直接跑，不依赖 UE**。产物是一份新 glb（原件不动），供
 `TinyGladeImportRockShell.py` 以 `ROCKSHELL_SRC_GLB` 环境变量指过去重导。
-通道字典与消费端材质见 `Docs/TinyGlade/CSRockShellEdgeBevel.md`。
+通道字典与消费端材质见 `Docs/TinyGlade/RockShell_EdgeBevel.md`。
 
 打包布局（与 `CSGroundRockShell.h` 的顶点色字典 v2 逐位一致，中性值必须是 1）::
 

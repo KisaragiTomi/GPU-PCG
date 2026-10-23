@@ -77,16 +77,40 @@ struct FCSHouseRoof_Vertex
 	int32 EdgeOut = INDEX_NONE;
 };
 
-FVector2D CSHouseRoof_Velocity(const FVector2D& InA, const FVector2D& InB)
+/**
+ * 「InA·x = A 且 InB·x = B」的解。两条内法线（近似）平行时没有解，返回零向量 ——
+ * 波前上那是夹在两条平行反向的边之间的顶点：两条线已经重合，顶点不再移动（矩形脊两端就是这种顶点）。
+ */
+FVector2D CSHouseRoof_Solve(const FVector2D& InA, const FVector2D& InB, double A, double B)
 {
-	const double Denom = 1.0 + FVector2D::DotProduct(InA, InB);
-	// 两条边平行反向：它们之间的波前宽度恒定，顶点不再移动（矩形脊两端就是这种顶点）。
-	if (Denom <= 1.0e-9) return FVector2D::ZeroVector;
-	return (InA + InB) / Denom;
-}
+	const double Det = InA.X * InB.Y - InA.Y * InB.X;
+	if (FMath::Abs(Det) <= 1.0e-9) return FVector2D::ZeroVector;
+	return FVector2D(A * InB.Y - B * InA.Y, B * InA.X - A * InB.X) / Det;
 }
 
-void CSHouseRoof_BuildSkeleton(const FCSHouseFootprint& Footprint, double Overhang, FCSRoofSkeleton& Out)
+/**
+ * 夹在两条活动边之间的波前顶点的速度（等效内距每增加 1 走多少）：两条边各以自己的 `Speed` 向内推。
+ * 两边都是 1（等坡度）时走原来那条式子 —— 等坡度骨架的每一步浮点运算因此与加倍率之前相同。
+ */
+FVector2D CSHouseRoof_Velocity(const FVector2D& InA, const FVector2D& InB, double SpeedA, double SpeedB)
+{
+	if (SpeedA == 1.0 && SpeedB == 1.0)
+	{
+		const double Denom = 1.0 + FVector2D::DotProduct(InA, InB);
+		// 两条边平行反向：它们之间的波前宽度恒定，顶点不再移动（矩形脊两端就是这种顶点）。
+		if (Denom <= 1.0e-9) return FVector2D::ZeroVector;
+		return (InA + InB) / Denom;
+	}
+	return CSHouseRoof_Solve(InA, InB, SpeedA, SpeedB);
+}
+
+/**
+ * 骨架的核。波前按**等效内距** e 推进（`FCSRoofDesc::EquivalentInset`）：倍率 w 的坡面，它的波前线在
+ * 内距 (e + Overhang) / w − Overhang 处，即以 1 / w 的速度向内走、e = 0 时停在 Overhang·(1 / w − 1)；
+ * 山墙边的那张竖直面不动，恒在内距 −GableOverhang 处。`EdgeSteep` 为空 = 全 1。
+ */
+void CSHouseRoof_BuildSkeletonCore(const FCSHouseFootprint& Footprint, double Overhang,
+	TConstArrayView<float> EdgeSteep, double GableOverhang, FCSRoofSkeleton& Out)
 {
 	Out = FCSRoofSkeleton();
 	const int32 N = Footprint.NumEdges();
@@ -96,12 +120,34 @@ void CSHouseRoof_BuildSkeleton(const FCSHouseFootprint& Footprint, double Overha
 	In.SetNum(N);
 	TArray<FVector2D, TInlineAllocator<16>> U;
 	U.SetNum(N);
+	// 每条边的推进速度（山墙边 0）与 e = 0 时波前线所在的内距。
+	TArray<double, TInlineAllocator<16>> Speed;
+	Speed.SetNum(N);
+	TArray<double, TInlineAllocator<16>> Rest;
+	Rest.SetNum(N);
 	for (int32 Edge = 0; Edge < N; ++Edge)
 	{
 		const FCSHouseEdgeFrame F = CSHouse_GetEdge(Edge, Footprint, 0.0f);
 		if (F.Len <= 0.0f) return;   // 零长边：不是合法 footprint，输出空骨架
 		In[Edge] = F.In;
 		U[Edge] = F.U;
+
+		const double W = EdgeSteep.IsValidIndex(Edge) ? double(EdgeSteep[Edge]) : 1.0;
+		if (!(W > 0.0))
+		{
+			Speed[Edge] = 0.0;
+			Rest[Edge] = -GableOverhang;
+		}
+		else if (W == 1.0)
+		{
+			Speed[Edge] = 1.0;
+			Rest[Edge] = 0.0;
+		}
+		else
+		{
+			Speed[Edge] = 1.0 / W;
+			Rest[Edge] = Overhang * (1.0 / W - 1.0);
+		}
 	}
 
 	// 顶点 i 在 Verts[i]，夹在 i−1 号边与 i 号边之间 ⇒ 它是角 i−1（角 k 在 Verts[k+1]）。
@@ -112,9 +158,14 @@ void CSHouseRoof_BuildSkeleton(const FCSHouseFootprint& Footprint, double Overha
 		V.EdgeIn = (Index + N - 1) % N;
 		V.EdgeOut = Index;
 		V.Corner = V.EdgeIn;
-		V.Velocity = CSHouseRoof_Velocity(In[V.EdgeIn], In[V.EdgeOut]);
+		V.Velocity = CSHouseRoof_Velocity(In[V.EdgeIn], In[V.EdgeOut], Speed[V.EdgeIn], Speed[V.EdgeOut]);
 		V.P = Footprint.Verts[Index];
-		// 角斜脊从檐口外角起算：内距 −Overhang 处的波前顶点。
+		// e = 0 时的波前顶点：两条线都停在墙外皮上（等坡度）时就是 footprint 顶点本身，否则是两条偏移线的交点。
+		if (Rest[V.EdgeIn] != 0.0 || Rest[V.EdgeOut] != 0.0)
+		{
+			V.P += CSHouseRoof_Solve(In[V.EdgeIn], In[V.EdgeOut], Rest[V.EdgeIn], Rest[V.EdgeOut]);
+		}
+		// 角上的弧从檐口外角起算：等效内距 −Overhang 处的波前顶点（所有坡面的檐口外沿同高）。
 		V.OriginP = V.P - V.Velocity * Overhang;
 		V.OriginInset = -Overhang;
 		Ring.Add(V);
@@ -124,7 +175,7 @@ void CSHouseRoof_BuildSkeleton(const FCSHouseFootprint& Footprint, double Overha
 	Hips.SetNum(N);
 	TArray<FCSRoofSkeletonArc> Ridges;
 
-	auto Emit = [&Hips, &Ridges](const FCSHouseRoof_Vertex& V, const FVector2D& EndP, double EndInset)
+	auto Emit = [&Hips, &Ridges, &Speed](const FCSHouseRoof_Vertex& V, const FVector2D& EndP, double EndInset)
 	{
 		FCSRoofSkeletonArc Arc;
 		Arc.A = V.OriginP;
@@ -133,6 +184,7 @@ void CSHouseRoof_BuildSkeleton(const FCSHouseFootprint& Footprint, double Overha
 		Arc.InsetB = EndInset;
 		Arc.FaceA = V.EdgeIn;
 		Arc.FaceB = V.EdgeOut;
+		Arc.bVerge = Speed[V.EdgeIn] == 0.0 || Speed[V.EdgeOut] == 0.0;
 		if (V.Corner != INDEX_NONE)
 		{
 			Hips[V.Corner] = Arc;               // 角斜脊一条不落，零长也记（按角号取）
@@ -183,7 +235,7 @@ void CSHouseRoof_BuildSkeleton(const FCSHouseFootprint& Footprint, double Overha
 		Merged.P = Node;
 		Merged.OriginP = Node;
 		Merged.OriginInset = Now;
-		Merged.Velocity = CSHouseRoof_Velocity(In[Merged.EdgeIn], In[Merged.EdgeOut]);
+		Merged.Velocity = CSHouseRoof_Velocity(In[Merged.EdgeIn], In[Merged.EdgeOut], Speed[Merged.EdgeIn], Speed[Merged.EdgeOut]);
 
 		// 先覆盖再删：NextIndex 为 0 时删掉的是环首，覆盖过的那一格顺移一位，环序不变。
 		Ring[Best] = Merged;
@@ -218,4 +270,111 @@ void CSHouseRoof_BuildSkeleton(const FCSHouseFootprint& Footprint, double Overha
 	Out.NumHips = N;
 	Out.Arcs = MoveTemp(Hips);
 	Out.Arcs.Append(Ridges);
+}
+}
+
+void CSHouseRoof_BuildSkeleton(const FCSRoofDesc& Roof, FCSRoofSkeleton& Out)
+{
+	CSHouseRoof_BuildSkeletonCore(Roof.Footprint, double(Roof.Overhang), Roof.EdgeSteep, double(Roof.GableOverhang), Out);
+}
+
+void CSHouseRoof_BuildSkeleton(const FCSHouseFootprint& Footprint, double Overhang, FCSRoofSkeleton& Out)
+{
+	CSHouseRoof_BuildSkeletonCore(Footprint, Overhang, TConstArrayView<float>(), 0.0, Out);
+}
+
+bool CSHouseRoof_ApplyRidge(FCSRoofDesc& Desc, float Ridge01, int32 RidgeAxis, float InGableOverhang)
+{
+	Desc.EdgeSteep.Reset();
+	Desc.GableOverhang = 0.0f;
+	if (!CSHouseRoof_IsRectangle(Desc.Footprint)) return false;
+
+	// 平行于脊的那对边 = 主坡面；另一对 = 两端。矩形上对边等长，各取一条量即可。
+	const int32 Axis = RidgeAxis & 1;
+	const int32 End = Axis ^ 1;
+	const double Along = double(CSHouse_GetEdge(Axis, Desc.Footprint, 0.0f).Len);
+	const double Across = double(CSHouse_GetEdge(End, Desc.Footprint, 0.0f).Len);
+	const double Overhang = FMath::Max(double(Desc.Overhang), 0.0);
+
+	Desc.EdgeSteep.Init(1.0f, 4);
+
+	// TG 的放样面：端坡面从檐口矩形的端边（墙外皮外 Overhang）爬到脊端，水平进深 `Run`；
+	// 主坡面从侧边爬到脊，进深 = 半跨 + Overhang。两者升到同一个脊高 ⇒ 倍率 = 进深之比。
+	double RidgeLength = CSHouseRoof_RidgeLengthFrom01(double(Ridge01), Along);
+	if (RidgeLength <= CSHouseRoof_RidgeMin) RidgeLength = 0.0;   // TG：不超过 0.1 m 的脊是一个尖
+	const double Run = Along * 0.5 + Overhang - RidgeLength * 0.5;
+
+	// `Roof::is_gable`：参数恰好到 1。外挑为 0 时差一点到 1 的端坡面进深趋零（倍率发散），一并按山墙收。
+	if (Ridge01 >= 1.0f || Run <= 0.5)
+	{
+		Desc.EdgeSteep[End] = 0.0f;
+		Desc.EdgeSteep[End + 2] = 0.0f;
+		Desc.GableOverhang = InGableOverhang;
+		return true;
+	}
+
+	const float Steep = float((Across * 0.5 + Overhang) / Run);
+	Desc.EdgeSteep[End] = Steep;
+	Desc.EdgeSteep[End + 2] = Steep;
+	return true;
+}
+
+bool CSHouseRoof_BuildGableProfile(const FCSRoofDesc& Roof, int32 Edge, TArray<FVector2D>& OutProfile)
+{
+	OutProfile.Reset();
+	const int32 N = Roof.Footprint.NumEdges();
+	if (N < 3 || Edge < 0 || Edge >= N || !Roof.IsGable(Edge)) return false;
+	const FCSHouseEdgeFrame F = CSHouse_GetEdge(Edge, Roof.Footprint, 0.0f);
+	if (F.Len <= 0.0f) return false;
+
+	// 沿墙线，每个坡面的等效内距都是 S 的一次函数 `A + B·S`；屋面是它们的下包络。
+	struct FLine { double A; double B; };
+	TArray<FLine, TInlineAllocator<16>> Lines;
+	for (int32 Other = 0; Other < N; ++Other)
+	{
+		if (Other == Edge || Roof.IsGable(Other)) continue;
+		const FCSHouseEdgeFrame G = CSHouse_GetEdge(Other, Roof.Footprint, 0.0f);
+		if (G.Len <= 0.0f) continue;
+		const double At0 = Roof.EquivalentInset(Other, FVector2D::DotProduct(F.Start - G.Start, G.In));
+		const double At1 = Roof.EquivalentInset(Other, FVector2D::DotProduct(F.Start + F.U * double(F.Len) - G.Start, G.In));
+		Lines.Add({ At0, (At1 - At0) / double(F.Len) });
+	}
+	if (Lines.IsEmpty()) return false;
+
+	// 下包络的折点只可能出在两条线的交点上：N 是个位数，全列出来排序即可。
+	TArray<double, TInlineAllocator<32>> Stops;
+	Stops.Add(0.0);
+	Stops.Add(double(F.Len));
+	for (int32 I = 0; I < Lines.Num(); ++I)
+	for (int32 J = I + 1; J < Lines.Num(); ++J)
+	{
+		const double Slope = Lines[I].B - Lines[J].B;
+		if (FMath::Abs(Slope) <= 1.0e-12) continue;
+		const double S = (Lines[J].A - Lines[I].A) / Slope;
+		if (S > 1.0e-6 && S < double(F.Len) - 1.0e-6) Stops.Add(S);
+	}
+	Stops.Sort();
+
+	auto Envelope = [&Lines](double S)
+	{
+		double Min = TNumericLimits<double>::Max();
+		for (const FLine& L : Lines) Min = FMath::Min(Min, L.A + L.B * S);
+		return Min;
+	};
+	for (const double S : Stops)
+	{
+		const FVector2D Point(S, FMath::Max(Envelope(S), 0.0));
+		if (OutProfile.Num() > 0 && S - OutProfile.Last().X <= 1.0e-6) continue;   // 重合的交点
+		// 与前两点共线的中间点（不在下包络上的交点）不留。
+		while (OutProfile.Num() >= 2)
+		{
+			const FVector2D& P0 = OutProfile[OutProfile.Num() - 2];
+			const FVector2D& P1 = OutProfile.Last();
+			const double Cross = (P1.X - P0.X) * (Point.Y - P0.Y) - (P1.Y - P0.Y) * (Point.X - P0.X);
+			if (FMath::Abs(Cross) > 1.0e-6 * FMath::Max(double(F.Len), 1.0)) break;
+			OutProfile.Pop(EAllowShrinking::No);
+		}
+		OutProfile.Add(Point);
+	}
+	return OutProfile.Num() >= 2;
 }

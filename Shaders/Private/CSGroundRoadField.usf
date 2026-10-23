@@ -1,0 +1,126 @@
+// 地面「路场」：把地面常驻色流的某一个通道（默认 R = 道路权重）糊成一张平滑场，
+// 一个地面格点一个 float（V = Y * VertsX + X，与色流同一张格）。两趟可分离高斯，一线程一格点。
+//
+// 为什么要糊：路权重是**逐顶点**画的，格距 50 cm ⇒ 路缘在一格之内从 0 跳到 1，双线性插值出来是
+// 一道 50 cm 的直坡，谁直接读它谁就在路缘一刀切。两个消费者各自踩过一次，共用这一份 kernel
+// （2026-09-29 由岩壳的「第零趟」提出来，岩壳那边逐位不变）：
+//
+//  · 岩壳（用户裁决 2026-09-11：路对壳的下压太激烈）：PreGain = RoadFade（TG 的 10×），**先截足迹、
+//    再糊**，PostGain = 1。⚠️ 顺序承重 —— 反过来「先糊原始权重、再 ×10」的话，增益只取模糊场最底下
+//    那 10% 的尾巴，缓坡又被压回一刀（只是往路外挪了一截），半径几乎白给。现在的形状：足迹边缘处
+//    沉降权重 = 0.5，内外各按高斯累积分布走完，缓坡宽度由半径直接决定。
+//  · 地面遮罩（用户 2026-09-29："道路的 mask 变化太剧烈，结果需要做平滑延申" + "经过处理的地面 mask
+//    作为地面 mesh 的遮罩控制贴图，地形 mask 决定草"）：PreGain = 1 直接糊原始权重，PostGain = 2 ——
+//    糊开之后画出来的路缘（原始权重的 0.5 等值线）正好落在 0.5，×2 把它推回 1：路缘以内恒为 1，
+//    路缘以外按 erfc(d / σ√2) 平滑衰减到 0，再与源值取 max。这就是"延伸"：路的影响从路缘往外平滑地
+//    伸出去。结果写进一张贴图（`ACSGroundActor::GroundMask`），地面材质与地被/灌木读的都是它。
+//    贴图的 **G 通道**另存"只糊、不加工"的场（不 ×PostGain、不取 max）= TG 的 path_mask_blurred：R 在路缘以内恒 1，
+//    分不出"离路中间多远"（用户 2026-09-29："深色图应该再向中间蔓延一些"）。G 在画出来的路缘处 = 0.5、往路中间才升到 1，
+//    地面材质照 TG 的 floor PS 拿它做深浅土的高度竞争（`Scripts/TinyGladeMakeGroundMaterial.py`）。
+//
+// TG 对照：path mask 也有一趟可分离高斯（`_gauss_blur_r16f.cs`：伸展 ceil(2σ)、逐抽头
+// exp(−k²/2σ²)），草读的就是糊过的那张（`_generate_grass:456` 的 `smoothstep(0.1, 0.2, path_mask)`）。
+// TG 的 σ 由 CPU 给，没查到值。
+//
+// 核：单侧 `RoadFieldTaps` 格（= ceil(半径 / 格距)，上限见 CSGroundRoadField.cpp），σ = 半径 / 3，
+// 截在 3σ（边缘权重 exp(−4.5) ≈ 1.1%）。TG 截在 2σ（边缘 13.5%）：σ = 2 格时核够不着的地方会断出
+// 约 3% 的台阶，乘上米级的沉降就是一道 10 cm 的坎。
+// 出界的抽头**跳过并按剩下的权重归一**（同 TG `_gauss_blur_mask.cs`）：路一直画到地面边上时，
+// 边上那圈不会因为"界外当 0"被糊淡。
+//
+// ⚠️ 两趟参数结构里的每一条都被 kernel 真读（`FComputeShaderUtils::AddPass` 会清掉没读的绑定、
+// 连带抹掉那条 RDG 依赖边，藤蔓 SC pass 就是这么挂过 GPU 的）。
+
+#include "/Engine/Public/Platform.ush"
+
+#ifndef ROADFIELD_GROUP
+#define ROADFIELD_GROUP 8
+#endif
+
+Buffer<uint>       RoadFieldColors;        // 地面常驻色流，packed BGRA / 顶点（X 趟读；Y 趟做"不小于源值"时也读）
+Buffer<float>      RoadFieldBlurRO;        // Y 趟：X 趟的输出
+RWBuffer<float>    RW_RoadField;           // X 趟 / Y 趟（buffer 出口）的输出（绑的是两块不同的 buffer）
+RWTexture2D<float2> RW_RoadFieldTex;       // Y 趟（贴图出口）的输出：地面遮罩，一个 texel 对一个地面格点；R = 成品，G = 只糊的场
+uint2              RoadFieldVerts;         // 地面格点数：两趟与读场的一方必须是同一张网格
+float4             RoadFieldChannel;       // one-hot（RGBA），与色流 dot
+float              RoadFieldPreGain;       // 读色流时 saturate(通道 × 本值)，在糊之前（岩壳 = RoadFade）
+float              RoadFieldPostGain;      // Y 趟：糊完之后 saturate(× 本值)（地面遮罩 = 2）
+uint               RoadFieldTaps;          // 单侧抽头数；0 = 不模糊（只做增益）
+float              RoadFieldInvTwoSigmaSq; // 1 / (2σ²)，σ 以**格**为单位；Taps = 0 时主机给 0
+uint               RoadFieldMaxWithSource; // Y 趟：1 = 结果不小于源值（延伸只许往外加，不许把路本身糊浅）
+
+/** 色流是 packed BGRA（同 CSMeshOps.usf 的 PackColorBGRA）：B=0..7, G=8..15, R=16..23, A=24..31。 */
+float CSRoadField_Read(uint X, uint Y)
+{
+	const uint Packed = RoadFieldColors[Y * RoadFieldVerts.x + X];
+	const float4 C = float4(
+		float((Packed >> 16u) & 0xFFu),
+		float((Packed >> 8u) & 0xFFu),
+		float(Packed & 0xFFu),
+		float((Packed >> 24u) & 0xFFu)) / 255.0f;
+	return saturate(dot(C, RoadFieldChannel) * RoadFieldPreGain);
+}
+
+[numthreads(ROADFIELD_GROUP, ROADFIELD_GROUP, 1)]
+void RoadFieldBlurXCS(uint3 Id : SV_DispatchThreadID)
+{
+	if (Id.x >= RoadFieldVerts.x || Id.y >= RoadFieldVerts.y) return;
+
+	const int Taps = int(RoadFieldTaps);
+	float Sum = 0.0f;
+	float WeightSum = 0.0f;
+	for (int K = -Taps; K <= Taps; ++K)
+	{
+		const int X = int(Id.x) + K;
+		if (X < 0 || X >= int(RoadFieldVerts.x)) continue;
+		const float W = exp(-float(K * K) * RoadFieldInvTwoSigmaSq);
+		Sum += CSRoadField_Read(uint(X), Id.y) * W;
+		WeightSum += W;
+	}
+	// K = 0 永远在界内且权重为 1 ⇒ WeightSum ≥ 1，max 只是写给读代码的人看的。
+	RW_RoadField[Id.y * RoadFieldVerts.x + Id.x] = Sum / max(WeightSum, 1e-6f);
+}
+
+/**
+ * Y 趟的累加 + 后增益 + 可选的"不小于源值"。buffer / 贴图两个出口共用这一份 ——
+ * 分两份的话，岩壳读的场与地面遮罩会在核的口径上悄悄错开。
+ *
+ * 不小于源值：窄路（一两个格点宽）、路头糊开再 ×PostGain 可能还不到源值，路本身反而变"浅"，
+ * 草就长进了画出来的路里。延伸的语义是只往外加，所以取 max。岩壳不开（它要的是对称的缓坡）。
+ *
+ * 返回 .x = 成品，.y = 只糊的场 saturate(模糊)（不 ×PostGain、不取 max）。.y 只有贴图出口写（G 通道），
+ * buffer 出口丢掉它 —— .x 的算式与拆出 .y 之前逐字相同，岩壳逐位不变。
+ */
+float2 CSRoadField_ResolveY(uint2 Id)
+{
+	const int Taps = int(RoadFieldTaps);
+	float Sum = 0.0f;
+	float WeightSum = 0.0f;
+	for (int K = -Taps; K <= Taps; ++K)
+	{
+		const int Y = int(Id.y) + K;
+		if (Y < 0 || Y >= int(RoadFieldVerts.y)) continue;
+		const float W = exp(-float(K * K) * RoadFieldInvTwoSigmaSq);
+		Sum += RoadFieldBlurRO[uint(Y) * RoadFieldVerts.x + Id.x] * W;
+		WeightSum += W;
+	}
+	const float Blurred = Sum / max(WeightSum, 1e-6f);
+	float Value = saturate(Blurred * RoadFieldPostGain);
+	if (RoadFieldMaxWithSource != 0u) Value = max(Value, CSRoadField_Read(Id.x, Id.y));
+	return float2(Value, saturate(Blurred));
+}
+
+[numthreads(ROADFIELD_GROUP, ROADFIELD_GROUP, 1)]
+void RoadFieldBlurYCS(uint3 Id : SV_DispatchThreadID)
+{
+	if (Id.x >= RoadFieldVerts.x || Id.y >= RoadFieldVerts.y) return;
+	RW_RoadField[Id.y * RoadFieldVerts.x + Id.x] = CSRoadField_ResolveY(Id.xy).x;
+}
+
+/** 同上，写进贴图（地面遮罩：材质按世界 XY 采 R、G 两通道，地被按格点 Load R）。 */
+[numthreads(ROADFIELD_GROUP, ROADFIELD_GROUP, 1)]
+void RoadFieldBlurYTexCS(uint3 Id : SV_DispatchThreadID)
+{
+	if (Id.x >= RoadFieldVerts.x || Id.y >= RoadFieldVerts.y) return;
+	RW_RoadFieldTex[Id.xy] = CSRoadField_ResolveY(Id.xy);
+}

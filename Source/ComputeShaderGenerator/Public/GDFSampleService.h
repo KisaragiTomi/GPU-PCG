@@ -83,6 +83,10 @@ struct FGDFJobOutputs
 
 struct FGDFJobRequest
 {
+	// Optional scene restriction/cancellation for view-dependent consumers. Legacy jobs leave these empty.
+	const FSceneInterface* Scene = nullptr;
+	TFunction<bool()> IsCancelled;
+
 	// 渲染线程：GDF 就绪那一帧构图。把需要跨帧持有的常驻 buffer 填进 Outputs（用 ConvertToExternalBuffer）。
 	TFunction<void(FRDGBuilder& GraphBuilder, const FSceneView& View, const FGlobalDistanceFieldParameterData& GDFData, FGDFJobOutputs& Outputs)> Build;
 

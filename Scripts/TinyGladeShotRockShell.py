@@ -4,7 +4,7 @@
 要回答的是三件只有像素能答的事（readback 断言对它们一个字都说不了）：
 
   A  **陡坡上真的长出岩壁**：`IsRockShellDrawable()` 只证明"组件/网格/流/材质都在"，
-     它证明不了那 49,598 个三角有没有真的变成屏幕上的颜色。所以这里拍**同一机位、
+     它证明不了槽位池里的三角有没有真的变成屏幕上的颜色。所以这里拍**同一机位、
      只切 `bRockShell`** 的两张，逐像素比 —— 差异像素率就是"它画出来了"的硬证据。
   B  **平地上没有**：台顶与羽化之外应当一块石头都没有（裁决四：裙边高度是坡度的副产品，
      平地自动塌成零高度）。
@@ -133,7 +133,7 @@ def build():
     shaper.call_method("RebuildTerrain")
 
     c = shaper.get_actor_location()
-    radius = shaper.get_editor_property("Radius")
+    radius = 0.5 * shaper.get_editor_property("MaskSize")   # 塑形物的 Radius 已删（09-29）：圆盘直径 = MaskSize，设了 mask 时是近似
     falloff = shaper.get_editor_property("FalloffDistance")
     reach = radius + falloff
     STATE["centre"], STATE["reach"] = c, reach

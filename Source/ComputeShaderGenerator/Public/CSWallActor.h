@@ -21,7 +21,7 @@ class UStaticMesh;
 
 /**
  * 样条墙 —— TG 的 freehand 墙（2026-09-22 用户："我需要一个新的 actor，它包含一个 spline component，
- * 可以根据 spline 生产出墙"）。计划与参考截图见 `Docs/TinyGlade/TinyGladeWall_Plan.md`。
+ * 可以根据 spline 生产出墙"）。计划与参考截图见 `Docs/TinyGlade/Plan_Wall.md`。
  *
  * **墙 = 样条的中线**：视口里拖点、加点、删点、闭合（样条的 Closed Loop）全是引擎现成的交互。
  * 样条按 `SampleSpacing` 密采成折线，墙以它为中线、两边各偏半个墙厚（斜接），墙脚贴地、墙顶离地

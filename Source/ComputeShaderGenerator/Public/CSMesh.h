@@ -324,7 +324,13 @@ struct COMPUTESHADERGENERATOR_API FCSMeshEditContext
 		BorrowedGraph,
 	};
 
-	FCSMeshEditContext(FRDGBuilder& InGraphBuilder, FCSMeshResident& InResident, EKind InKind = EKind::OwnedGraph);
+	/**
+	 * InStreamMask：第 i 位为 1 才登记 Resident.Streams[i]（下标 ≥ 64 的恒登记）。默认全登记。
+	 * 没登记的流在这次编辑里不存在 —— Find 返回空、收尾时也不碰它 —— 它停在上一次编辑留给它的访问状态上，
+	 * 那正是它平时该在的状态，所以"只登记要用的"是安全的。给每帧都跑的借图编辑用（实例路的剔除）：
+	 * 几百个代理各登记十几条根本不碰的流，建图时间就花在这上面。
+	 */
+	FCSMeshEditContext(FRDGBuilder& InGraphBuilder, FCSMeshResident& InResident, EKind InKind = EKind::OwnedGraph, uint64 InStreamMask = ~0ull);
 
 	FRDGBuilder& GraphBuilder;
 	FCSMeshResident& Resident;
@@ -441,7 +447,8 @@ private:
  */
 struct COMPUTESHADERGENERATOR_API FCSMeshRenderThreadEdit
 {
-	FCSMeshRenderThreadEdit(FRDGBuilder& InGraphBuilder, FCSMeshResident& InResident);
+	/** InStreamMask 见 FCSMeshEditContext 的构造函数：只登记要用的那几条流。默认全登记。 */
+	FCSMeshRenderThreadEdit(FRDGBuilder& InGraphBuilder, FCSMeshResident& InResident, uint64 InStreamMask = ~0ull);
 	~FCSMeshRenderThreadEdit();
 
 	// Non-copyable: two scopes over one edit would restore the access states twice, the first time

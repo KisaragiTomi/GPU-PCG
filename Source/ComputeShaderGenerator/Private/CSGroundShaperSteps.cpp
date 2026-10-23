@@ -173,9 +173,10 @@ bool HandoverBoundsDiffer(const FBox& Cached, const FBox& Wanted)
 		|| !Cached.Max.Equals(Wanted.Max, HandoverBoundsEpsilon);
 }
 
-void HandOverOne(const CSShaperSteps::FHandoverSource& Source, const FBox& LocalBounds)
+void HandOverOne(const CSShaperSteps::FHandoverSource& Source, const FBox& LocalBounds, bool bNotifiesChanges)
 {
 	FCSGpuInstanceSourceGPU Out;
+	Out.bNotifiesChanges = bNotifiesChanges;
 	// 保留自己那份引用：这批 buffer 下一轮重散布 / 重打包还要写。
 	Out.PackedInstances = Source.PackedInstances;
 	Out.Counter = Source.Counter;
@@ -241,13 +242,18 @@ EHandoverResult HandOverInstanceSources(
 		EHandoverResult Result = EHandoverResult::UpToDate;
 		for (int32 Index = 0; Index < Sources.Num(); ++Index)
 		{
-			if (!WantsHandover(Index)) continue;
+			if (!WantsHandover(Index))
+			{
+				// 不用重新交接，但 buffer 刚被原地改过（调用方重散完才会来这里）：承诺了通知的那一批在这里兑现。
+				if (Options.bNotifiesChanges) Sources[Index].Component->NotifyInstanceSourceChanged();
+				continue;
+			}
 			if (!Sources[Index].IsReady())
 			{
 				Result = EHandoverResult::NotReady;
 				continue;
 			}
-			HandOverOne(Sources[Index], LocalBounds);
+			HandOverOne(Sources[Index], LocalBounds, Options.bNotifiesChanges);
 			Cache.Capacities[Index] = Sources[Index].Capacity;
 			LogHandover(Index, Sources[Index].Capacity);
 			if (Result == EHandoverResult::UpToDate) Result = EHandoverResult::HandedOver;
@@ -260,7 +266,15 @@ EHandoverResult HandOverInstanceSources(
 
 	bool bNeedHandover = bCountChanged;
 	for (int32 Index = 0; !bNeedHandover && Index < Sources.Num(); ++Index) bNeedHandover = WantsHandover(Index);
-	if (!bNeedHandover) return EHandoverResult::UpToDate;
+	if (!bNeedHandover)
+	{
+		// 同上：整批都不用重新交接，但都刚被原地改过。WantsHandover 全为假 ⇒ 每个组件都有效。
+		if (Options.bNotifiesChanges)
+		{
+			for (const FHandoverSource& One : Sources) One.Component->NotifyInstanceSourceChanged();
+		}
+		return EHandoverResult::UpToDate;
+	}
 
 	// 全或无：调色板与组件按下标对齐，交一半等于错位，所以先整批验一遍再动手。
 	for (const FHandoverSource& One : Sources)
@@ -270,7 +284,7 @@ EHandoverResult HandOverInstanceSources(
 
 	for (int32 Index = 0; Index < Sources.Num(); ++Index)
 	{
-		HandOverOne(Sources[Index], LocalBounds);
+		HandOverOne(Sources[Index], LocalBounds, Options.bNotifiesChanges);
 		Cache.Capacities[Index] = Sources[Index].Capacity;
 		LogHandover(Index, Sources[Index].Capacity);
 	}

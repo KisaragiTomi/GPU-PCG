@@ -39,9 +39,10 @@ ACSGroundShaperActor* CSStairsTest_SpawnMound(UWorld* World, double X)
 	ACSGroundShaperActor* Shaper = World->SpawnActor<ACSGroundShaperActor>(
 		FVector(X, CSStairsTest_MoundY, 0.0), FRotator::ZeroRotator);
 	if (!Shaper) return nullptr;
-	Shaper->Radius = 300.0f;
+	Shaper->MaskSize = 2.0f * float(300.0f);   // 圆盘直径（2026-09-29 起形状是 mask，没设 mask = 解析圆盘）
 	Shaper->FalloffDistance = 400.0f;
-	Shaper->LiftHeight = 300.0f;
+	// 台顶 = actor 高度（2026-09-29）；乘 (1 + 二次抬升) 保持与旧口径「抬 LiftHeight、台顶再照抬 2%」逐项相同的剖面。
+	Shaper->SetActorLocation(Shaper->GetActorLocation() + FVector(0.0, 0.0, double(300.0f) * (1.0 + double(Shaper->SecondaryLiftScale))));
 	Shaper->RebuildTerrain();
 	return Shaper;
 }

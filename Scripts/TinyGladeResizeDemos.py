@@ -46,13 +46,13 @@ SHAPER_FALLOFF = 800.0
 
 # ⚠️ **台高必须跟着羽化一起抬** —— 这一条计划里没写，是链 B 动工时实测出来的：
 #
-#   裙边剖面是 smoothstep，它的最大斜率是 1.5，所以 max|∇h| = LiftHeight × 1.5 / Falloff。
+#   裙边剖面是 smoothstep，它的最大斜率是 1.5，所以 max|∇h| = 台高 × 1.5 / Falloff（台高 = actor 相对地面的高度）。
 #   岩壳的坡度软阈照抄 TG：smoothstep(0.75, 1.25, |∇h|)。
 #   把 Falloff 从 400 拉到 800（为了装下 5.53 m 的胞腔）之后，台高还是 300 的话
 #   max|∇h| = 300 × 1.5 / 800 = **0.5625**，**整个土台都在 0.75 阈下** ⇒ 一块碎石都不会长
 #   （实测：只有裙边噪声碰巧抄过阈的那几处出了 178 个三角，画面上是零星几块）。
 #
-#   反解：要让最陡处达到软阈上端 1.25（mask 满值），LiftHeight ≥ 1.25 × 800 / 1.5 = 667。
+#   反解：要让最陡处达到软阈上端 1.25（mask 满值），台高 ≥ 1.25 × 800 / 1.5 = 667。
 #   取 700：max|∇h| = 1.3125，陡坡带拿满 mask，而台顶与盘外仍然是平的（坡度 0）。
 #
 #   这正是计划自己那句话的量化版："1.5 m 的小土包本来就不该长岩壁，TG 里也只有大悬崖长"。
@@ -114,19 +114,17 @@ move("TG_SkyLight", TERRAIN_CENTRE, TERRAIN_CENTRE)
 move("TG_Start", TERRAIN_CENTRE, TERRAIN_CENTRE - 2400.0)
 s = find("Shaper_Mound")
 if s:
-    # ⚠️ 垂直归位不能省（2026-08-31 实测）：move() 有意保留 Z，而"塑形物上下拖动"实验会把
-    # 下压状态连 Z 一起存进关卡 —— ComputeTopHeight = (Z − 地面Z) + LiftHeight，Z 停在 −400
-    # 时台顶只有一半，回归的三条地形断言（台顶=Lift×1.021 / 裙边中点半高 / 双台交汇）全红，
-    # 而且看起来像高度场坏了。基准态的 Z 就是地面的 Z。
+    # ⚠️ 垂直归位不能省：2026-09-29 起台顶 = actor 相对地面的高度（ComputeTopHeight = Z − 地面Z），
+    # 基准态的 Z 就是"地面 Z + SHAPER_LIFT"。"塑形物上下拖动"实验会把拖过的 Z 存进关卡，
+    # 不归位的话回归的地形断言全红，看起来像高度场坏了。
     g = find("Ground_Demo")
     gz = g.get_actor_location().z if g else 0.0
     loc = s.get_actor_location()
-    if abs(loc.z - gz) > 0.01:
-        unreal.log("RESIZE Shaper_Mound z %.0f -> %.0f (vertical reset)" % (loc.z, gz))
-        s.set_actor_location(unreal.Vector(loc.x, loc.y, gz), False, False)
-    s.set_editor_property("Radius", SHAPER_RADIUS)
+    if abs(loc.z - (gz + SHAPER_LIFT)) > 0.01:
+        unreal.log("RESIZE Shaper_Mound z %.0f -> %.0f (vertical reset)" % (loc.z, gz + SHAPER_LIFT))
+        s.set_actor_location(unreal.Vector(loc.x, loc.y, gz + SHAPER_LIFT), False, False)
+    s.set_editor_property("MaskSize", 2.0 * SHAPER_RADIUS)
     s.set_editor_property("FalloffDistance", SHAPER_FALLOFF)
-    s.set_editor_property("LiftHeight", SHAPER_LIFT)
     s.call_method("RebuildTerrain")
     unreal.log("RESIZE Shaper_Mound -> Radius %.0f / Falloff %.0f / Lift %.0f  (max slope %.3f)"
                % (SHAPER_RADIUS, SHAPER_FALLOFF, SHAPER_LIFT, SHAPER_LIFT * 1.5 / SHAPER_FALLOFF))

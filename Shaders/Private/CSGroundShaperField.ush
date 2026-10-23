@@ -18,13 +18,31 @@
 
 #include "/Plugin/PCGPlugins/Shaders/Private/CSGpuSharedLayout.ush"
 
-// 每塑形物 CS_GROUND_SHAPER_FLOAT4S（3）个 float4（与 CSGroundShaperField.h 的 Float4sPerShaper 是同一份 #define）：
-//   [3i + 0] = (中心 X, 中心 Y, Radius, FalloffDistance)
-//   [3i + 1] = (台高, 裙边噪声幅度(归一化), 噪声频率 = 1/波长, 二次抬升系数)
-//   [3i + 2] = (噪声种子, _, _, _)
-// 打包处是 ACSGroundShaperActor::GetHeightFieldParams，收集处是 ACSGroundActor::BuildShaperGpuParams。
+// 布局（与 CSGroundShaperField.h 的 PackField 是同一份，下标宏在 CSGpuSharedLayout.ush）：
+//   [0]                 前缀   = (塑形物数, SDF 池起点的 float4 下标, _, _)
+//   [1 + 5i + 0]        Profile = (中心 X, 中心 Y, 零等值线最远半径, FalloffDistance)
+//   [1 + 5i + 1]        Top     = (有符号台高 / (1 + 二次抬升), 裙边噪声幅度(归一化), 噪声频率 = 1/波长, 二次抬升系数)
+//                                 台高 < 0 = 坑（actor 在地面以下），坑底 = actor 高度
+//   [1 + 5i + 2]        Noise   = (噪声种子, 合成平滑宽度 cm, SDF 边长 N（0 = 解析圆盘）, SDF 在池里的起点(float 下标))
+//   [1 + 5i + 3]        Frame   = (cos yaw, sin yaw, 1/格距, 格距)
+//   [1 + 5i + 4]        Shape   = (中心隆起比例 0..1, 零等值线内最深距离 cm, _, _)
+//   [池起点 ..]         SDF 池：各座的 N×N 有符号距离（cm，内负外正）首尾相接，每个 float4 装 4 个 texel
+// 打包处是 CSGroundShaperField::PackField（由 ACSGroundActor::BuildShaperGpuParams 调）。
 StructuredBuffer<float4> GroundShaperParams;
 uint GroundShaperCount;
+
+float4 CSGSF_Header(uint Shaper, uint Slot)
+{
+	return GroundShaperParams[CS_GROUND_SHAPER_PREFIX_FLOAT4S + Shaper * CS_GROUND_SHAPER_FLOAT4S + Slot];
+}
+
+/** SDF 池的第 FloatIndex 个 texel（池起点存在前缀里，CPU 侧 FetchPool 逐字对应）。 */
+float CSGSF_PoolFetch(uint FloatIndex)
+{
+	const uint PoolStart = uint(GroundShaperParams[0].y);
+	const float4 V = GroundShaperParams[PoolStart + (FloatIndex >> 2u)];
+	return V[FloatIndex & 3u];
+}
 
 // -----------------------------------------------------------------------------
 // 噪声：整数哈希 + value noise + fbm
@@ -36,7 +54,7 @@ uint GroundShaperCount;
 // 这种不报错的形式冒出来。
 //
 // 参数照 Tiny Glade 的 FBM 实测（gain 0.55 / lacunarity 1.9 / 每层旋转 [0.8,-0.6;0.6,0.8]
-// ≈ 36.87°，见 Docs/TinyGlade/CSGroundShaper.md「对照 Tiny Glade」⑥）。逐层旋转不是装饰：
+// ≈ 36.87°，见 Docs/TinyGlade/Ground_Shaper.md「对照 Tiny Glade」⑥）。逐层旋转不是装饰：
 // 不转的话各层的整数格点会对齐，出一片沿轴向的条纹。
 // -----------------------------------------------------------------------------
 
@@ -98,14 +116,64 @@ float CSGSF_Turbulence(float2 P, uint Seed)
 }
 
 /**
- * 单座塑形物的高度贡献（相对地面基面，恒 ≥ 0）。
+ * 本座 mask 的有符号距离（cm，零等值线内负外正），P 是世界 XY。
  *
- * 盘内恒为台高（原型里 circle 是 poly 面，xyzdist 面内为 0，所以台顶是平的），
- * 盘外按 FalloffDistance 做 smoothstep 羽化到 0。
+ * mask 由 CPU 预烘成 N×N 的 SDF（CSGroundShaperField::BakeMaskSdf，圆角平滑也在那一步做完），
+ * 这里只做双线性采样；网格外 = 边缘采样值 + 到网格的距离（距离函数的三角不等式上界，
+ * 网格留了 Falloff + 平滑的余量，那一带高度早已是 0，只是让场在任何地方都有定义）。
+ * N == 0 是解析圆盘（没设 mask 的塑形物，半径 = Profile.z），与改 mask 之前逐位相同。
  */
-float GroundShaperEvalOne(float2 P, float4 A, float4 B, float4 C)
+float CSGSF_SignedDistance(float2 P, float4 A, float4 C, float4 D)
 {
-	const float Skirt = max(0.0f, distance(P, A.xy) - A.z);
+	const float Dx = P.x - A.x;
+	const float Dy = P.y - A.y;
+	if (C.z < 2.0f) return sqrt(Dx * Dx + Dy * Dy) - A.z;
+
+	// 世界 → 本座局部（转 −yaw）→ 格坐标（texel 中心落在整数上）。
+	const float N = C.z;
+	const float Lx = Dx * D.x + Dy * D.y;
+	const float Ly = Dy * D.x - Dx * D.y;
+	const float Half = (N - 1.0f) * 0.5f;
+	const float Gx = Lx * D.z + Half;
+	const float Gy = Ly * D.z + Half;
+	const float Cx = clamp(Gx, 0.0f, N - 1.0f);
+	const float Cy = clamp(Gy, 0.0f, N - 1.0f);
+	const float Ex = Gx - Cx;
+	const float Ey = Gy - Cy;
+	const float Outside = sqrt(Ex * Ex + Ey * Ey) * D.w;
+
+	// min(floor, N−2)：落在最后一列/行上时仍取 [N−2, N−1] 这一格，t = 1。
+	const float Fx = min(floor(Cx), N - 2.0f);
+	const float Fy = min(floor(Cy), N - 2.0f);
+	const float Tx = Cx - Fx;
+	const float Ty = Cy - Fy;
+	const uint Nu = uint(N);
+	const uint Base = uint(C.w) + uint(Fy) * Nu + uint(Fx);
+	const float S00 = CSGSF_PoolFetch(Base);
+	const float S10 = CSGSF_PoolFetch(Base + 1u);
+	const float S01 = CSGSF_PoolFetch(Base + Nu);
+	const float S11 = CSGSF_PoolFetch(Base + Nu + 1u);
+	// 展开写而不用 lerp()：CPU 孪生逐字复刻同一个求值顺序。
+	const float Lo = S00 + (S10 - S00) * Tx;
+	const float Hi = S01 + (S11 - S01) * Tx;
+	return Lo + (Hi - Lo) * Ty + Outside;
+}
+
+/**
+ * 单座塑形物的**剖面值** p'（0 .. 1 + 二次抬升；台高乘上它就是本座的高度贡献）。
+ *
+ * mask 内恒为台顶（台顶是平的），mask 外沿 SDF 按 FalloffDistance 做 smoothstep 羽化到 0 ——
+ * 与 Tiny Glade 笔画的口径同形：剖面是"到形状的距离"的函数，形状本身只提供那张距离场。
+ * `RadiusBonus` 把零等值线整体外推（岩壳的「衰减比地面更晚」用），0 = 真地面。
+ *
+ * **中心隆起**（Shape.x = ρ，2026-09-30）：顺着轮廓往中间鼓 —— 从裙边外沿（sd = Falloff）到零等值线内
+ * 最深处（sd = −最深距离）整段走一条 smoothstep 山丘，与平台剖面按 ρ 混合。最深距离取自**模糊之后**
+ * 的距离场，所以最高点恒在最深处、恰好 = 台高；平滑只会把其余部分（星形臂上、凹口旁）往下压。
+ */
+float GroundShaperProfileEx(float2 P, float4 A, float4 B, float4 C, float4 D, float4 E, float RadiusBonus)
+{
+	const float Sd = CSGSF_SignedDistance(P, A, C, D) - RadiusBonus;
+	const float Skirt = max(0.0f, Sd);
 	if (Skirt >= A.w) return 0.0f;
 
 	const float T = A.w > 1e-6f ? Skirt / A.w : 0.0f;
@@ -116,9 +184,9 @@ float GroundShaperEvalOne(float2 P, float4 A, float4 B, float4 C)
 	// 两条性质必须保住：**只减不加**（abs 之后做减法，像侵蚀，绝不抬高地面），
 	// **权重是 (1−S)**（台顶 S≈1 一点不受扰，裙边 S→0 被打得最碎）。
 	//
-	// 噪声在**每座自己的贡献里**、加在下面调用方的 max **之前** —— 这是计划裁决六派给它的
-	// 活：高度场是"全部塑形物重叠取 max"，max 在等值线上 C¹ 不连续，两座相接处会留一条
-	// 干净的几何折痕。加在 max 之后等于给整片地形蒙一层噪声，折痕原样还在。
+	// 噪声在**每座自己的贡献里**、加在下面合成**之前** —— 这是计划裁决六派给它的活：
+	// 合成在等值线上 C¹ 不连续（平滑合成也只管 SmoothWidth 那一带），两座相接处会留一条
+	// 干净的几何折痕，噪声把它打碎。
 	// 噪声域取**本座局部坐标** (P − 中心)：一是折痕两侧因此拿到两份不同的噪声实现，
 	// 折痕线才会左右游走（同一份世界噪声在对称的两座之间会原样抵消，折痕纹丝不动，实测）；
 	// 二是图案钉在塑形物身上，拖动时不会整片"沸腾"。
@@ -130,72 +198,138 @@ float GroundShaperEvalOne(float2 P, float4 A, float4 B, float4 C)
 	}
 
 	// 二次抬升（原型 attribwrangle5）：pow(dist/maxheight, 1.5) · maxheight · scale，偏向台顶。
+	// B.x 打包时已经除过 (1 + B.w) ⇒ 台顶恰好 = 台高 = actor 高度（用户 2026-09-29）。
 	// 用 S·sqrt(S) 而不是 pow(S, 1.5)：GPU 的 pow 是 exp2(1.5·log2(S))，与 CPU 的 pow 不是
-	// 同一条路径，会在 CPU/GPU 一致性断言上冒出肉眼看不见但断言看得见的差；sqrt 两边都是
-	// 硬件正确舍入的同一个数。
-	return max(0.0f, B.x) * (S + B.w * S * sqrt(S));
+	// 同一条路径；sqrt 两边都是硬件正确舍入的同一个数。
+	const float Lift = max(B.w, 0.0f);
+	float Profile = S + Lift * S * sqrt(S);
+
+	const float Bulge = saturate(E.x);
+	if (Bulge > 0.0f)
+	{
+		const float U = saturate((A.w - Sd) / (A.w + max(E.y, 1e-3f)));
+		const float Hill = U * U * (3.0f - 2.0f * U);
+		Profile = (1.0f - Bulge) * Profile + Bulge * (1.0f + Lift) * Hill;
+	}
+	return Profile;
 }
 
-/** 该座的峰值高度（台顶，含二次抬升）—— 包围盒/MaxAbsHeight 用，别拿 B.x 当上界。 */
+/** 单座的有符号高度贡献（坑为负）。 */
+float GroundShaperEvalOneEx(float2 P, float4 A, float4 B, float4 C, float4 D, float4 E, float RadiusBonus)
+{
+	return B.x * GroundShaperProfileEx(P, A, B, C, D, E, RadiusBonus);
+}
+
+float GroundShaperEvalOne(float2 P, float4 A, float4 B, float4 C, float4 D, float4 E)
+{
+	return GroundShaperEvalOneEx(P, A, B, C, D, E, 0.0f);
+}
+
+/** 该座的有符号峰值（台顶 / 坑底，含二次抬升）。打包已归一化 ⇒ ≈ actor 相对地面的高度。 */
 float GroundShaperPeakHeight(float4 B)
 {
-	return max(0.0f, B.x) * (1.0f + max(0.0f, B.w));
+	return B.x * (1.0f + max(0.0f, B.w));
 }
 
 /**
- * 与 CSGroundShaperField::EvalField 同一公式：多座重叠**取 max**
- * （计划 D9 的合成裁决，与 Tiny Glade 的笔画合成逐字相同）。
+ * 平滑合成：max 在两座交汇的等值线上是 C¹ 折痕（永远是"谷"形 —— max 只会产生凸折），
+ * 这里用多项式 smooth-max 把它圆成倒角：`max + k·t²/4`，t = (k − |a−b|)/k（IQ 的 smax）。
  *
- * 返回值是**相对地面基面**的抬升，恒 ≥ 0；世界 Z = 地面 actor 的 Z + 本值。
+ *   · 只往上填（谷形折痕正该往上填）；|a − b| ≥ k 的地方逐位就是 max。
+ *   · k 再夹到 min(a, b)：否则一座刚冒头（b → 0⁺）时就会凭空抬 k/4，脚印边界上出一道台阶。
+ *   · 结果封顶到参与合成的各座峰高的最大值：两座同高的台顶重叠时 a == b，倒角项会把台顶抬
+ *     k/4，封顶让"最高 = actor 高度"这条契约不被合成破坏。
  */
-float GroundShaperHeightAtXY(float2 P)
+float CSGSF_SmoothMax(float A, float B, float K, float Cap)
+{
+	const float M = max(A, B);
+	const float Ke = min(K, min(A, B));
+	const float Gap = abs(A - B);
+	if (Ke <= 0.0f || Gap >= Ke) return M;
+	const float T = (Ke - Gap) / Ke;
+	return min(M + Ke * T * T * 0.25f, Cap);
+}
+
+/**
+ * 合成场，两趟：
+ *   ① 隆起（峰高 > 0）：逐座求值后做平滑合成（上面那个 smooth-max；各座的平滑宽度取已参与者里的最大值）；
+ *   ② 坑（峰高 < 0，2026-09-30）：逐座把当前高度按本座剖面权重 W ∈ [0,1] 拉向坑底 ——
+ *      `H = min(H, lerp(H, 坑底, W))`。坑底是**绝对**高度（= actor 相对地面的 Z），所以坑挖在土台上
+ *      也照样挖到 actor 那个高度；两座坑重叠时是 (1−W₁)(1−W₂) 的乘积形，本身就光滑，不需要倒角。
+ *      取 min 保证坑只往下挖、绝不把已有的更深处抬高。
+ * `MinPeak` > 0 时 |峰高| 不足它的座当作不存在（石阶的「矮塑形物不出台阶」门控）；
+ * `RadiusBonus` 见 GroundShaperProfileEx。CPU 孪生是 CSGroundShaperField::EvalField，逐行对照。
+ */
+float GroundShaperComposite(float2 P, float RadiusBonus, float MinPeak)
 {
 	float H = 0.0f;
+	float Cap = 0.0f;
+	float K = 0.0f;
 	for (uint i = 0; i < GroundShaperCount; ++i)
 	{
-		H = max(H, GroundShaperEvalOne(
-			P,
-			GroundShaperParams[i * CS_GROUND_SHAPER_FLOAT4S + 0u],
-			GroundShaperParams[i * CS_GROUND_SHAPER_FLOAT4S + 1u],
-			GroundShaperParams[i * CS_GROUND_SHAPER_FLOAT4S + 2u]));
+		const float4 B = CSGSF_Header(i, 1u);
+		const float Peak = GroundShaperPeakHeight(B);
+		if (Peak <= 0.0f || Peak < MinPeak) continue;
+		const float4 C = CSGSF_Header(i, 2u);
+		const float h = GroundShaperEvalOneEx(P, CSGSF_Header(i, 0u), B, C, CSGSF_Header(i, 3u), CSGSF_Header(i, 4u), RadiusBonus);
+		if (h <= 0.0f) continue;
+		Cap = max(Cap, Peak);
+		K = max(K, max(C.y, 0.0f));
+		H = CSGSF_SmoothMax(H, h, K, Cap);
+	}
+	for (uint j = 0; j < GroundShaperCount; ++j)
+	{
+		const float4 B = CSGSF_Header(j, 1u);
+		const float Peak = GroundShaperPeakHeight(B);
+		if (Peak >= 0.0f || -Peak < MinPeak) continue;
+		const float Weight = GroundShaperProfileEx(P, CSGSF_Header(j, 0u), B, CSGSF_Header(j, 2u), CSGSF_Header(j, 3u), CSGSF_Header(j, 4u), RadiusBonus)
+			/ (1.0f + max(B.w, 0.0f));
+		if (Weight <= 0.0f) continue;
+		H = min(H, H + (Peak - H) * Weight);
 	}
 	return H;
 }
 
 /**
- * 同一个高度场，但**每座塑形物的台顶半径临时加大 `RadiusBonus`** ⇒ 衰减开始得更靠外。
- *
- * 用途只有一个：披挂岩壳的「石头隆起的最大高度需要外扩一定距离，衰减比地面更晚」
- * （用户规格 2026-08-31 第 6 条）。加的是 `A.z`（`Radius`）而不是缩 `A.w`（`Falloff`）——
- * 前者把台顶整体外推、裙边形状原样保留；后者会把裙边压陡，连带改掉坡度 mask 与石阶的等值线。
- *
- * ⚠️ **这个函数没有 CPU 孪生**（`CSGroundShaperField.h` 里没有对应物），因为 CPU 侧没有任何
- * 消费者：镜像、拾取、房子落座读的都是真地面高度，只有壳需要这条外扩的。别顺手给它加一份
- * 孪生然后忘了同步 —— 真要加，就得连 `GroundShaper.CpuGpuFieldParity` 一起扩。
+ * 与 CSGroundShaperField::EvalField 同一公式。返回值是**相对地面基面**的有符号高度（坑为负）；
+ * 世界 Z = 地面 actor 的 Z + 本值。
  */
+float GroundShaperHeightAtXY(float2 P)
+{
+	return GroundShaperComposite(P, 0.0f, 0.0f);
+}
+
 /**
  * 同一个高度场，但**只把峰高 ≥ `MinPeak` 的塑形物算进来**，矮的一律当不存在。
  *
  * 用途只有一个：石阶的「矮塑形物不出台阶」门控（`ACSGroundActor::StairMinMoundHeight`）。
- * 本座的峰高取 `EvalOne` 在 `S → 1`（台顶）时的取值 = `台高 × (1 + 二次抬升系数)`，
- * **不是**裸的台高 —— 二次抬升会把台顶再顶上去一截，只比台高会把临界档判低。
- *
+ * 坑按深度（|峰高|）判，门控那边取绝对值。
  * ⚠️ 这个函数只许当**门控**用，别拿它的返回值当地面高度：矮座与高座重叠处它给的是
- * 高座那一份，比真地面低，拿去解等值线或算块底 Z 会让石阶陷进土里。
- *
- * ⚠️ 同 `GroundShaperHeightAtXYExpanded`，**没有 CPU 孪生**（`CSGroundShaperField.h` 里没有
- * 对应物），因为 CPU 侧没有消费者。真要加就得连 `GroundShaper.CpuGpuFieldParity` 一起扩。
+ * 高座那一份，比真地面低，拿去解等值线或算块底 Z 会让石阶陷进土里。没有 CPU 孪生。
  */
+float GroundShaperHeightAtXYTallOnly(float2 P, float MinPeak)
+{
+	return GroundShaperComposite(P, 0.0f, MinPeak);
+}
+
+/**
+ * 同一个高度场，但**每座塑形物的零等值线临时外推 `RadiusBonus`** ⇒ 衰减开始得更靠外。
+ *
+ * 用途只有一个：披挂岩壳的「石头隆起的最大高度需要外扩一定距离，衰减比地面更晚」
+ * （用户规格 2026-08-31 第 6 条）。外推的是 SDF 的零点而不是缩 `Falloff`（前者把台顶整体
+ * 外推、裙边形状原样保留；后者会把裙边压陡）。没有 CPU 孪生（CPU 侧没有消费者）。
+ */
+float GroundShaperHeightAtXYExpanded(float2 P, float RadiusBonus)
+{
+	return GroundShaperComposite(P, max(RadiusBonus, 0.0f), 0.0f);
+}
+
 /**
  * 本点**由哪座塑形物说了算**（贡献最大的那座），返回那一座的峰高。
  *
- * 高度场是逐座取 max，所以「贡献最大」与「决定本点高度」是同一件事 —— 两者用同一个判据，
- * 石阶的顶层判断因此和它脚下的地面永远出自同一座。
- *
  * 用途只有一个：石阶的「掐掉最顶上那一级」（`ACSGroundActor::bStairDropTopStep`）——
  * 顶层的位置由**整座的峰高**决定，本格高度看不出自己离峰顶还有多远。
- *
- * ⚠️ 返回的是峰高，**不是本点高度**，别拿去当地面用。同样没有 CPU 孪生。
+ * ⚠️ 返回的是峰高，**不是本点高度**，别拿去当地面用。没有 CPU 孪生。
  */
 float GroundShaperPeakAtXY(float2 P)
 {
@@ -203,50 +337,15 @@ float GroundShaperPeakAtXY(float2 P)
 	float Peak = 0.0f;
 	for (uint i = 0; i < GroundShaperCount; ++i)
 	{
-		const float4 B = GroundShaperParams[i * CS_GROUND_SHAPER_FLOAT4S + 1u];
-		const float h = GroundShaperEvalOne(
-			P,
-			GroundShaperParams[i * CS_GROUND_SHAPER_FLOAT4S + 0u],
-			B,
-			GroundShaperParams[i * CS_GROUND_SHAPER_FLOAT4S + 2u]);
+		const float4 B = CSGSF_Header(i, 1u);
+		// 只看隆起：坑里拿到 0 ⇒ 掐掉的是贴着地面坑沿的那一级，与土台掐掉贴着台顶那一级对称。
+		if (GroundShaperPeakHeight(B) <= 0.0f) continue;
+		const float h = GroundShaperEvalOne(P, CSGSF_Header(i, 0u), B, CSGSF_Header(i, 2u), CSGSF_Header(i, 3u), CSGSF_Header(i, 4u));
 		if (h > BestH)
 		{
 			BestH = h;
-			Peak = max(B.x, 0.0f) * (1.0f + max(B.w, 0.0f));
+			Peak = GroundShaperPeakHeight(B);
 		}
 	}
 	return Peak;
-}
-
-float GroundShaperHeightAtXYTallOnly(float2 P, float MinPeak)
-{
-	float H = 0.0f;
-	for (uint i = 0; i < GroundShaperCount; ++i)
-	{
-		const float4 B = GroundShaperParams[i * CS_GROUND_SHAPER_FLOAT4S + 1u];
-		if (max(B.x, 0.0f) * (1.0f + max(B.w, 0.0f)) < MinPeak) continue;
-		H = max(H, GroundShaperEvalOne(
-			P,
-			GroundShaperParams[i * CS_GROUND_SHAPER_FLOAT4S + 0u],
-			B,
-			GroundShaperParams[i * CS_GROUND_SHAPER_FLOAT4S + 2u]));
-	}
-	return H;
-}
-
-float GroundShaperHeightAtXYExpanded(float2 P, float RadiusBonus)
-{
-	if (RadiusBonus <= 0.0f) return GroundShaperHeightAtXY(P);
-
-	float H = 0.0f;
-	for (uint i = 0; i < GroundShaperCount; ++i)
-	{
-		float4 A = GroundShaperParams[i * CS_GROUND_SHAPER_FLOAT4S + 0u];
-		A.z += RadiusBonus;
-		H = max(H, GroundShaperEvalOne(
-			P, A,
-			GroundShaperParams[i * CS_GROUND_SHAPER_FLOAT4S + 1u],
-			GroundShaperParams[i * CS_GROUND_SHAPER_FLOAT4S + 2u]));
-	}
-	return H;
 }

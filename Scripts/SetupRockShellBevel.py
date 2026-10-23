@@ -8,7 +8,7 @@
    `MI_rocky_terrain` 打开开关 —— 演示关卡的地面 `RockShellMaterial` 就是它，运行时岩壳由此得到倒角。
 
 材质构建在 `BuildRockShellBevelMaterial.py`（本脚本只是把三步串起来）。
-机制、通道字典 v2、参数含义见 `Docs/TinyGlade/CSRockShellEdgeBevel.md`。
+机制、通道字典 v2、参数含义见 `Docs/TinyGlade/RockShell_EdgeBevel.md`。
 
 用法::
 

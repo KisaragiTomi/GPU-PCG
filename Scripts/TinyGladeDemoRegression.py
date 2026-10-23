@@ -31,6 +31,26 @@ def near(label, got, want, tol, unit=""):
     check(label, abs(got - want) <= tol, "got=%.3f%s want=%.3f%s tol=%.3f" % (got, unit, want, unit, tol))
 
 
+# ---- 塑形物（2026-09-29 起：形状 = mask，台顶 = actor 相对地面的高度）----
+# 旧的 Radius / LiftHeight 两项没了：圆盘半径 = MaskSize / 2（BP 默认 mask 是内切整张图的圆），
+# 台高 = actor Z − 地面 Z。下面三个小函数让本文件其余部分仍按"半径 / 台高"的口径读写。
+def shaper_radius(shaper):
+    return 0.5 * shaper.get_editor_property("MaskSize")
+
+
+def shaper_top(shaper):
+    g = shaper.get_editor_property("Ground")
+    gz = g.get_actor_location().z if g else 0.0
+    return shaper.get_actor_location().z - gz
+
+
+def set_shaper_top(shaper, top):
+    g = shaper.get_editor_property("Ground")
+    gz = g.get_actor_location().z if g else 0.0
+    loc = shaper.get_actor_location()
+    shaper.set_actor_location(unreal.Vector(loc.x, loc.y, gz + top), False, False)
+
+
 def actors():
     return unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors()
 
@@ -589,20 +609,19 @@ def demo_terrain_ops():
     shaper.rebuild_terrain()
 
     c = shaper.get_actor_location()
-    lift = shaper.get_editor_property("LiftHeight")
+    lift = shaper_top(shaper)
     lift_scale = shaper.get_editor_property("SecondaryLiftScale")
     # ⬇ 剖面上的采样位置全部由 Radius / Falloff 算出来，不写死。
     # 岩壳（链 B）把塑形物拉到了 600 / 800（5.53 m 的胞腔要求裙边装得下），
     # 原来写死的 900 / 500 那两个数字于是全错位：900 从"羽化之外"变成了裙边中段。
-    radius = shaper.get_editor_property("Radius")
+    radius = shaper_radius(shaper)
     falloff = shaper.get_editor_property("FalloffDistance")
     reach = radius + falloff
 
     # ---- 剖面：盘内恒为台高，盘外 smoothstep 羽化到 0。半径 300 / 羽化 400 / 台高 300 ----
-    # ⚠️ 台顶不再等于 LiftHeight：二次抬升（原型 attribwrangle5）按原型口径**照抬台顶**
-    # 一档 SecondaryLiftScale。写成表达式而不是 306.3，改档位时这条不会变成假绿。
-    near("mound top = LiftHeight plus the secondary lift",
-         ground.sample_height(unreal.Vector2D(c.x, c.y)), lift * (1.0 + lift_scale), 1.0, "cm")
+    # 台顶 = actor 高度（2026-09-29 起；二次抬升已归一化，不再照抬 2%）。
+    near("mound top = the shaper actor's height above the ground",
+         ground.sample_height(unreal.Vector2D(c.x, c.y)), lift, 1.0, "cm")
     near("outside the falloff is flat",
          ground.sample_height(unreal.Vector2D(c.x + reach + 200.0, c.y)), 0.0, 0.5, "cm")
 
@@ -620,10 +639,10 @@ def demo_terrain_ops():
           "noisy=%.3f clean=%.3f cm" % (h_noisy, h_clean))
     check("the skirt noise really bites", h_clean - h_noisy > 1.0,
           "eroded=%.3f cm" % (h_clean - h_noisy))
-    # 噪声关掉之后剖面必须逐字回到那条纯 smoothstep（+ 二次抬升）：S=0.5 处 h = Top·(0.5 + k·0.5^1.5)。
+    # 噪声关掉之后剖面必须逐字回到那条纯 smoothstep（+ 二次抬升）：S=0.5 处 h = Top·(0.5 + k·0.5^1.5)/(1 + k)。
     # 容差沿用原来的 3 cm：镜像是 50 cm 格上的双线性重建，曲面在格中间本来就会下垂一点。
     near("skirt midpoint is half height once the noise is off", h_clean,
-         lift * (0.5 + lift_scale * 0.5 ** 1.5), 3.0, "cm")
+         lift * (0.5 + lift_scale * 0.5 ** 1.5) / (1.0 + lift_scale), 3.0, "cm")
     shaper.set_editor_property("SkirtNoiseAmount", 0.5)
     shaper.rebuild_terrain()
 
@@ -644,16 +663,16 @@ def demo_terrain_ops():
 
         # ⬇ 写成 lift + 100 而不是写死 400：演示塑形物的台高已经因为岩壳抬高了（见
         # TinyGladeResizeDemos.py 里那段推导），写死 400 会变成"降低"，下面那条 +100 的断言就假了。
-        shaper.set_editor_property("LiftHeight", lift + 100.0)
+        set_shaper_top(shaper, lift + 100.0)
         shaper.rebuild_terrain()
         house.reevaluate_site()
         top1 = ground.sample_height(unreal.Vector2D(c.x, c.y))
         near("raising the mound raises the house to the new top",
              house.get_actor_location().z, top1, 0.6, "cm")
-        near("LiftHeight +100 lifts the plateau by exactly 100 x (1 + secondary lift)",
-             top1 - top0, 100.0 * (1.0 + lift_scale), 0.6, "cm")
+        near("raising the shaper actor by 100 lifts the plateau by exactly 100",
+             top1 - top0, 100.0, 0.6, "cm")
 
-        shaper.set_editor_property("LiftHeight", lift)
+        set_shaper_top(shaper, lift)
         shaper.rebuild_terrain()
         house.reevaluate_site()
         near("lowering it drops the house right back (absolute, not a ratchet)",
@@ -739,9 +758,9 @@ def demo_gpu_stairs():
     shaper.rebuild_terrain()
 
     c = shaper.get_actor_location()
-    radius = shaper.get_editor_property("Radius")
+    radius = shaper_radius(shaper)
     falloff = shaper.get_editor_property("FalloffDistance")
-    lift = shaper.get_editor_property("LiftHeight")
+    lift = shaper_top(shaper)
     reach = radius + falloff
 
     # ---- 未画路 ⇒ 0 级 ----
@@ -801,9 +820,10 @@ def demo_gpu_stairs():
         # CDO 的默认值不传播到同会话 spawn 的实例 —— 实例上必须再写一份（实测陷阱，同房子那条）。
         # 参数一律从第一座拿 —— 写死 300/400/300 的话，拉大第一座之后两座尺寸不一致，
         # 接合处的形状就不再是对称的腰，而断言还继续绿着。
-        for name, value in (("Ground", ground), ("Radius", radius), ("FalloffDistance", falloff),
-                            ("LiftHeight", lift)):
+        for name, value in (("Ground", ground), ("MaskSize", 2.0 * radius), ("FalloffDistance", falloff),
+                            ("Mask", shaper.get_editor_property("Mask"))):
             second.set_editor_property(name, value)
+        set_shaper_top(second, lift)
         second.rebuild_terrain()
 
         # 真的"相接"：接合线上既不是 0（各自独立）也不是台高（完全重合）。
@@ -944,6 +964,20 @@ def read_shell(ground):
     return int(res) // 3, []
 
 
+def rock_shell_pool_stats(ground):
+    """(活跃胞腔, 池容量, 每槽三角)。UE Python 把「bool 返回值 + out 参数」收成：成功时只回
+    out 参数的元组、失败时回 None（同 `IsRockShellDrawable` 那个坑）；个别版本会把返回值也带上。"""
+    vals = ground.get_rock_shell_pool_stats()
+    if vals is None:
+        return 0, 0, 0
+    vals = list(vals) if isinstance(vals, (tuple, list)) else [vals]
+    if len(vals) == 4:
+        vals = vals[1:]
+    if len(vals) != 3:
+        return 0, 0, 0
+    return int(vals[0]), int(vals[1]), int(vals[2])
+
+
 def shell_alive(pos, tri):
     """⚠️ 判据是第 0 个顶点不是 NaN。kernel 关掉一个三角时**只写第 0 个顶点**
     一个 NaN（一个就够让整个三角在裁剪阶段出局，同 TG），另外两个原样留着上一次的值。
@@ -973,7 +1007,7 @@ def demo_rock_shell():
     # 本节下面每一句 set_editor_property / rebuild_terrain / reset_paint 都会把它治好，
     # 所以判据只能放在这里。
     c0 = shaper.get_actor_location()
-    reach0 = shaper.get_editor_property("Radius") + shaper.get_editor_property("FalloffDistance")
+    reach0 = shaper_radius(shaper) + shaper.get_editor_property("FalloffDistance")
     _n0, pos0 = read_shell(ground)
     live0 = [pos0[i * 3] for i in range(len(pos0) // 3) if shell_alive(pos0, i)]
     if live0:
@@ -997,24 +1031,19 @@ def demo_rock_shell():
     shaper.rebuild_terrain()
 
     c = shaper.get_actor_location()
-    radius = shaper.get_editor_property("Radius")
+    radius = shaper_radius(shaper)
     falloff = shaper.get_editor_property("FalloffDistance")
     reach = radius + falloff
 
-    # ---- 图案：Docs/TinyGlade/CSRockShellPattern.md「首次导入后必须核对的四项」的机读版 ----
-    vals = list(ground.get_rock_shell_pattern_stats())
-    if len(vals) == 6:
-        _ok, tris, uvs, max_cell, flip, dir_agree = vals
-    else:
-        tris, uvs, max_cell, flip, dir_agree = vals
-    check("rock shell pattern: 49,598 triangles", tris == 49598, "tris=%d" % tris)
-    check("rock shell pattern: >= 3 UV channels", uvs >= 3, "uvs=%d" % uvs)
-    # UV1.x 一旦被导入路径归一化到 0..1，cell_id 就废了，而且完全静默：
-    # 全场退化成一个胞腔，壳看起来只是"没有块感"，没有任何报错。
-    check("rock shell pattern: UV1.x is not normalised (cell ids survive)", max_cell > 600.0,
-          "maxCellId=%.1f" % max_cell)
-    check("rock shell pattern: recomputed dir agrees with the baked channel", dir_agree > 0.9,
-          "dot=%.4f flipWinding=%s" % (dir_agree, flip))
+    # ---- 槽位池：稀疏程序化岩壳（Docs/TinyGlade/RockShell_Sparse.md）----
+    # 2026-09-30 起图案是程序化的，不再有「原件 49,598 三角」可核；池容量 × 5M 就是全部三角。
+    active_cells, capacity, per_cell = rock_shell_pool_stats(ground)
+    m = ground.get_editor_property("RockShellBoundaryPoints")
+    check("rock shell pool: built", capacity > 0, "capacity=%d" % capacity)
+    check("rock shell pool: 5M triangles per slot", per_cell == 5 * m, "perCell=%d M=%d" % (per_cell, m))
+    check("rock shell pool: the mound activates cells", 0 < active_cells <= capacity,
+          "active=%d capacity=%d" % (active_cells, capacity))
+    tris = capacity * per_cell
 
     # ---- ③ 它真的会被画出来 ----
     # ⚠️ 一律调 get_*_undrawable_reason()，**别调 is_*_drawable()**：UE Python 把
@@ -1030,7 +1059,7 @@ def demo_rock_shell():
     # ⚠️ 这个数**不会**跟着壳的死活变（壳是靠往顶点写 NaN 让三角自己塌掉的），它答的是
     # "这次 DrawIndexedIndirect 到底会不会读到东西"。壳还剩几个三角活着由下面的 NaN 判据管。
     gpu_indices = ground.debug_read_rock_shell_draw_index_count_gpu_sync()
-    check("the rock shell's indirect draw really consumes the pattern's indices",
+    check("the rock shell's indirect draw really consumes the pool's indices",
           gpu_indices == tris * 3, "gpuIndices=%d want=%d" % (gpu_indices, tris * 3))
 
     # ---- ① 陡坡上出现、平地上不出现 ----
@@ -1040,6 +1069,8 @@ def demo_rock_shell():
     if tri_count != tris:
         return
 
+    # 显隐是**逐三角**「任一顶点 Rock > 0.1」（TG 原样）⇒ 平台 / 平地按整个三角判
+    # （中心扇的第 0 个顶点是质心，跨坡脚的三角其余顶点可以落在平地上）。
     on_plateau = on_skirt = on_flat = live = 0
     for t in range(tri_count):
         if not shell_alive(pos, t):
@@ -1047,9 +1078,10 @@ def demo_rock_shell():
         live += 1
         p = pos[t * 3]
         r = math.hypot(p.x - c.x, p.y - c.y)
-        if r < radius * 0.6:
+        rs = [math.hypot(pos[t * 3 + k].x - c.x, pos[t * 3 + k].y - c.y) for k in range(3)]
+        if max(rs) < radius * 0.6:
             on_plateau += 1
-        elif r > reach + 400.0:
+        elif min(rs) > reach + 400.0:
             on_flat += 1
         elif radius < r < reach:
             on_skirt += 1
@@ -1077,7 +1109,7 @@ def demo_rock_shell():
     # ⚠️ `RockShellNoiseAmount` 自 2026-08-31 起是**坡度 = 1 时的满幅**，不是常幅
     # （照 TG `displace:721`，幅度 ∝ 坡度）。上界因此要乘本档土台的最大坡度
     # `Lift × 1.5 / Falloff`（剖面是 smoothstep，最大斜率 1.5）；写成常数会低估上界。
-    max_slope = shaper.get_editor_property("LiftHeight") * 1.5 / max(falloff, 1.0)
+    max_slope = shaper_top(shaper) * 1.5 / max(falloff, 1.0)
     chip = ground.get_editor_property("RockShellChipAmount")
     lift_budget = relief + surf_noise * max_slope + chip + 5.0   # 5 cm 给双线性采样与浮点留量
 
@@ -1205,14 +1237,16 @@ def demo_rock_shell():
 
     # ---- 删掉塑形物 ⇒ 壳自己消失（裁决二：没有一行注销代码）----
     ground.reset_paint()
-    saved = (c.x, c.y, c.z, radius, falloff, shaper.get_editor_property("LiftHeight"))
-    shaper.set_editor_property("LiftHeight", 0.0)
+    saved = (c.x, c.y, c.z, radius, falloff, shaper_top(shaper))
+    set_shaper_top(shaper, 0.0)
     shaper.rebuild_terrain()
-    _, flat_pos = read_shell(ground)
-    live_flat = sum(1 for t in range(tri_count) if shell_alive(flat_pos, t))
+    flat_count, flat_pos = read_shell(ground)
+    live_flat = sum(1 for t in range(flat_count) if shell_alive(flat_pos, t))
     check("flattening the terrain removes every shell triangle (no de-registration code)",
           live_flat == 0, "live=%d" % live_flat)
-    shaper.set_editor_property("LiftHeight", saved[5])
+    check("flattening the terrain leaves no active cell", rock_shell_pool_stats(ground)[0] == 0,
+          "active=%d" % rock_shell_pool_stats(ground)[0])
+    set_shaper_top(shaper, saved[5])
     shaper.rebuild_terrain()
 
     ground.set_editor_property("StairMesh", stair_mesh_saved)   # 本节开头暂关的那条路，原样接回去
@@ -1271,7 +1305,7 @@ def demo_skirt_decor():
     ground.rebuild_skirt_decor()
 
     c = shaper.get_actor_location()
-    radius = shaper.get_editor_property("Radius")
+    radius = shaper_radius(shaper)
     falloff = shaper.get_editor_property("FalloffDistance")
     band_r = radius + falloff * 0.62
 
@@ -1327,14 +1361,14 @@ def demo_skirt_decor():
                                              ground.get_skirt_decor_instance_count(), instances))
 
     # ---- 台子塌平 ⇒ 裙边没了 ⇒ 摆件跟着消失（没有一行注销代码，同岩壳裁决二的形状）----
-    lift = shaper.get_editor_property("LiftHeight")
-    shaper.set_editor_property("LiftHeight", 0.0)
+    lift = shaper_top(shaper)
+    set_shaper_top(shaper, 0.0)
     shaper.rebuild_terrain()
     check("flattening the mound removes every skirt prop (no de-registration code)",
           ground.get_skirt_decor_anchor_count() == 0 and ground.get_skirt_decor_instance_count() == 0,
           "anchors=%d instances=%d" % (ground.get_skirt_decor_anchor_count(),
                                        ground.get_skirt_decor_instance_count()))
-    shaper.set_editor_property("LiftHeight", lift)
+    set_shaper_top(shaper, lift)
     shaper.rebuild_terrain()
     check("raising it again brings them back", ground.get_skirt_decor_instance_count() == instances,
           "instances=%d/%d" % (ground.get_skirt_decor_instance_count(), instances))

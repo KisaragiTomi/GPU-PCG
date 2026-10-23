@@ -21,6 +21,17 @@
 // 行 stride / custom data 步长 / LOD 上限：与 C++ 共用同一份 #define（理由见那个文件头）。
 #include "/Plugin/PCGPlugins/Shaders/Private/CSGpuSharedLayout.ush"
 
+// InstanceCullCS 的输出形态（FCSInstancedInstanceCullCS 的 permutation）：0 = 抄完整的可见属性，1 = 只写源行号。
+#ifndef CS_INSTANCE_CULL_OUTPUT_INDEX
+#define CS_INSTANCE_CULL_OUTPUT_INDEX 0
+#endif
+
+// InstanceCullCS 的实例数从哪儿来（同上，permutation）：0 = SrcInstanceCount[0]（GPU 源的计数器），
+// 1 = uniform SrcInstanceCountValue（CPU 实例数组：行数 CPU 自己知道，犯不着每帧为它建一块 buffer 再清一遍）。
+#ifndef CS_INSTANCE_COUNT_UNIFORM
+#define CS_INSTANCE_COUNT_UNIFORM 0
+#endif
+
 // ── source ───────────────────────────────────────────────────────────────────
 // 5 float4 per instance: [0..2] rows of the instance-to-component 3x3 (.w = 0),
 // [3] origin.xyz + per-instance random in .w, [4] cull sphere centre.xyz + radius in .w.
@@ -29,7 +40,8 @@
 Buffer<float4> SrcInstances;
 Buffer<float>  SrcCustomData;     // CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS 个 / 实例（源序）
 uint           bHasCustomData;    // 0 = 生产者没给，可见槽写零
-Buffer<uint>   SrcInstanceCount;  // [0] = live instance count (CPU path writes the array size)
+Buffer<uint>   SrcInstanceCount;  // [0] = live instance count (GPU sources: the producer's counter)
+uint           SrcInstanceCountValue; // CS_INSTANCE_COUNT_UNIFORM：CPU 实例数组的行数
 Buffer<float4> SrcClusterBounds;  // centre.xyz + radius per cluster
 
 // ── outputs ──────────────────────────────────────────────────────────────────
@@ -38,6 +50,9 @@ RWBuffer<float4> RWVisTransforms;  // 3 per visible slot
 RWBuffer<float4> RWVisOrigins;     // 1 per visible slot
 RWBuffer<float4> RWVisLightmap;    // 1 per visible slot (always 0 — no baked lighting here)
 RWBuffer<float>  RWVisCustomData;  // CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS 个 / 可见槽
+// 「可见源行号」输出（CS_INSTANCE_CULL_OUTPUT_INDEX，InstanceCullingOptimization.md §5）：每个可见槽只写 4 字节的源行号，
+// 上面四条可见属性缓冲整个不存在 —— 顶点着色器经这个行号直接读源实例行（CSGpuInstancedIndexedVertexFactory.ush）。
+RWBuffer<uint>   RWVisSourceIndices; // 1 per visible slot
 RWBuffer<uint>   RWLodCounters;    // 1 per LOD, compaction cursor
 RWBuffer<uint>   RWIndirectArgs;   // 5 uints per draw (LOD × material section)
 
@@ -184,7 +199,11 @@ void ClusterCullCS(uint3 Id : SV_DispatchThreadID)
 void InstanceCullCS(uint3 Id : SV_DispatchThreadID)
 {
 	const uint Instance = Id.x;
+#if CS_INSTANCE_COUNT_UNIFORM
+	const uint Count = min(SrcInstanceCountValue, MaxSourceInstances);
+#else
 	const uint Count = min(SrcInstanceCount[0], MaxSourceInstances);
+#endif
 	if (Instance >= Count) return;
 
 	// Coarse rejection. Clusters are contiguous fixed-size runs of the Morton-sorted order, so
@@ -231,6 +250,11 @@ void InstanceCullCS(uint3 Id : SV_DispatchThreadID)
 	if (Slot >= MaxInstancesPerLod) return; // capacity is NumInstances per LOD, so this cannot fire
 
 	const uint Dst = Lod * MaxInstancesPerLod + Slot;
+#if CS_INSTANCE_CULL_OUTPUT_INDEX
+	// 可见槽 → 源行号。槽位由原子计数分配，同一帧里线程到达顺序都不固定：这张表只在**这一次剔除到它的绘制之间**有意义，
+	// 存的是当前源行号（不是稳定身份）—— 要跨帧认实例，拿行号去查生产者 / 组件的"行 → 槽"表。
+	RWVisSourceIndices[Dst] = Instance;
+#else
 	RWVisTransforms[Dst * 3u + 0u] = SrcInstances[Base + 0u];
 	RWVisTransforms[Dst * 3u + 1u] = SrcInstances[Base + 1u];
 	RWVisTransforms[Dst * 3u + 2u] = SrcInstances[Base + 2u];
@@ -248,6 +272,7 @@ void InstanceCullCS(uint3 Id : SV_DispatchThreadID)
 			RWVisCustomData[DstBase + C] = (bHasCustomData != 0u) ? SrcCustomData[SrcBase + C] : 0.0f;
 		}
 	}
+#endif // CS_INSTANCE_CULL_OUTPUT_INDEX
 }
 
 // -----------------------------------------------------------------------------

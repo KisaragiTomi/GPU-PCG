@@ -153,3 +153,102 @@ private:
 	LAYOUT_FIELD(FShaderResourceParameter, VertexFetch_InstanceLightmapBufferParameter);
 	LAYOUT_FIELD(FShaderParameter, InstanceOffsetParameter);
 };
+
+/**
+ * 「可见源行号」版的实例顶点工厂（InstanceCullingOptimization.md §5，2026-10-02）。
+ *
+ * 上面那个工厂画的是剔除 pass **抄出来**的可见属性：每个可见槽 3 + 1 + 1 个 float4 加 custom data，88 字节，
+ * 每级 LOD 各预留一整份容量。这个工厂画的是**源行本身**：剔除只往可见槽里写一个 4 字节的源行号，
+ * 顶点着色器经它去读源实例行（CPU 源 / 点云源是常驻流里的 `SourceInstances`，packed GPU 源是生产者自己那块 buffer）。
+ * 可见缓冲从 `88 × 容量 × LOD 数` 降到 `4 × 容量 × LOD 数`，剔除每个可见实例少写 84 字节。
+ *
+ * 着色器不是引擎的 LocalVertexFactory.ush，而是它的一份打补丁副本
+ * `Shaders/Private/CSGpuInstancedIndexedVertexFactory.ush`（由 Scripts/GenerateGpuInstancedVertexFactoryShader.py 生成，
+ * 为什么不能直接复用引擎那份写在脚本头）。引擎升级后那份副本要重新生成 —— VerifyShaderSourceUpToDate 守着这一条。
+ *
+ * 继承上面那个工厂只为复用它的 InitRHI（两条断言 + InstanceVF uniform buffer）：材质读逐实例 custom data
+ * 走的仍是引擎 MaterialTemplate 里 `InstanceVF.InstanceCustomDataBuffer[下标 × 步长 + i]` 那条路，这个工厂给它绑的是
+ * **源** custom data（下标是源行号），生产者没给时绑一行零并把下标钉成 0（CSCustomDataIndexMask）。
+ * InstanceVF 里那三条 VertexFetch_Instance*Buffer 在打过补丁的着色器里没人读，绑源行只是因为 uniform buffer 不收空 SRV。
+ *
+ * 两个工厂同时存在是为了交错 A/B（`r.CSGpuInstanced.VisibleSourceIndex`，见 UCSGpuInstancedMeshComponent）。
+ */
+struct FCSGpuInstancedIndexedVertexFactory : public FCSGpuInstancedMeshVertexFactory
+{
+	DECLARE_VERTEX_FACTORY_TYPE(FCSGpuInstancedIndexedVertexFactory);
+
+public:
+	FCSGpuInstancedIndexedVertexFactory(ERHIFeatureLevel::Type InFeatureLevel, const char* InDebugName)
+		: FCSGpuInstancedMeshVertexFactory(InFeatureLevel, InDebugName)
+	{
+	}
+
+	/**
+	 * InRowsSRV            Buffer<float4>，源实例行（CS_GPU_INSTANCED_ROW_FLOAT4S 个 / 行）
+	 * InVisibleIndicesSRV  Buffer<uint>，每个可见槽一个源行号
+	 * InCustomDataSRV      Buffer<float>，bSourceCustomData 时是生产者的逐源行 custom data，否则是一行零
+	 * Must be called before InitResource().
+	 */
+	void SetIndexedInstanceStreams(FRHIShaderResourceView* InRowsSRV, FRHIShaderResourceView* InVisibleIndicesSRV,
+		FRHIShaderResourceView* InCustomDataSRV, bool bSourceCustomData)
+	{
+		// 基类拿这四条建 InstanceVF；前三条在这份着色器里没人读（见类注释）。
+		SetInstanceStreams(InRowsSRV, InRowsSRV, InRowsSRV, InCustomDataSRV);
+		InstanceRowsSRV = InRowsSRV;
+		VisibleIndicesSRV = InVisibleIndicesSRV;
+		CustomDataIndexMask = bSourceCustomData ? MAX_uint32 : 0u;
+	}
+
+	FRHIShaderResourceView* GetInstanceRowsSRV() const { return InstanceRowsSRV; }
+	FRHIShaderResourceView* GetVisibleIndicesSRV() const { return VisibleIndicesSRV; }
+	uint32 GetCustomDataIndexMask() const { return CustomDataIndexMask; }
+
+	/**
+	 * 生成的着色器是不是照着这台机器上引擎的 LocalVertexFactory.ush 生成的（比文件头里记的 SHA-1）。
+	 * 对不上只报一次 Error，不拦渲染：多半仍然编得过，但引擎那份里改过的地方这边没跟上 —— 那种错是画面错，不是编译错。
+	 * 游戏线程，读两个小文件；只在编辑器里查（打包后没有引擎着色器源码可比）。
+	 */
+	static void VerifyShaderSourceUpToDate();
+
+private:
+	// Not owned: the rows live on the resident set or on the producer's buffer, both of which the proxy keeps alive.
+	FRHIShaderResourceView* InstanceRowsSRV = nullptr;
+	FRHIShaderResourceView* VisibleIndicesSRV = nullptr;
+	uint32 CustomDataIndexMask = 0;
+};
+
+/** 可见源行号版的绑定：区段起点（InstanceOffset）、源行、可见源行号、custom data 下标掩码，外加 InstanceVF 与 loose UB。 */
+class FCSGpuInstancedIndexedVFShaderParameters : public FLocalVertexFactoryShaderParametersBase
+{
+	DECLARE_TYPE_LAYOUT(FCSGpuInstancedIndexedVFShaderParameters, NonVirtual);
+
+public:
+	void Bind(const FShaderParameterMap& ParameterMap)
+	{
+		FLocalVertexFactoryShaderParametersBase::Bind(ParameterMap);
+
+		InstancingOffsetParameter.Bind(ParameterMap, TEXT("InstancingOffset"));
+		InstanceOffsetParameter.Bind(ParameterMap, TEXT("InstanceOffset"));
+		InstanceRowsParameter.Bind(ParameterMap, TEXT("CSInstanceRows"));
+		VisibleSourceIndicesParameter.Bind(ParameterMap, TEXT("CSVisibleSourceIndices"));
+		CustomDataIndexMaskParameter.Bind(ParameterMap, TEXT("CSCustomDataIndexMask"));
+	}
+
+	void GetElementShaderBindings(
+		const class FSceneInterface* Scene,
+		const FSceneView* View,
+		const FMeshMaterialShader* Shader,
+		const EVertexInputStreamType InputStreamType,
+		ERHIFeatureLevel::Type FeatureLevel,
+		const FVertexFactory* VertexFactory,
+		const FMeshBatchElement& BatchElement,
+		FMeshDrawSingleShaderBindings& ShaderBindings,
+		FVertexInputStreamArray& VertexStreams) const;
+
+private:
+	LAYOUT_FIELD(FShaderParameter, InstancingOffsetParameter);
+	LAYOUT_FIELD(FShaderParameter, InstanceOffsetParameter);
+	LAYOUT_FIELD(FShaderResourceParameter, InstanceRowsParameter);
+	LAYOUT_FIELD(FShaderResourceParameter, VisibleSourceIndicesParameter);
+	LAYOUT_FIELD(FShaderParameter, CustomDataIndexMaskParameter);
+};

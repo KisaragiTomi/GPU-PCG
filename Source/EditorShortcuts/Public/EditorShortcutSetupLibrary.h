@@ -51,4 +51,20 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Editor Shortcuts|Setup")
 	static FString CreateTagLibrary(const FString& PackageName, const TArray<FName>& Tags, EEditorShortcutTagOp Op = EEditorShortcutTagOp::Toggle, bool bSave = true);
+
+	/**
+	 * Creates or rebuilds one no-argument function whose body is a single Execute Python Command.
+	 *
+	 * For shortcuts that are already a Python script: the function is marked Call In Editor,
+	 * so it is both a binding target and a button on the library. Only the named function is
+	 * rebuilt; everything else in the asset is left alone.
+	 *
+	 * @param PackageName    library to put it in, created when missing
+	 * @param FunctionName   function to create or rebuild
+	 * @param PythonCommand  the command, as typed into Execute Python Command's pin
+	 * @param bSave          write the package to disk
+	 * @return               the generated class path, empty on failure
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Editor Shortcuts|Setup")
+	static FString SetPythonCommandFunction(const FString& PackageName, FName FunctionName, const FString& PythonCommand, bool bSave = true);
 };

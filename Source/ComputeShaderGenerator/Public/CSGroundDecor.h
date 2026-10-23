@@ -37,9 +37,10 @@
  * -----------------------------------------------------------------------------
  * 锚点怎么取：**解析剖面的等值带上按弧长布点**
  * -----------------------------------------------------------------------------
- * 每座塑形物出一圈锚点，半径 `Radius + FalloffDistance × SkirtBandT`，沿圆周按
- * `SkirtSpacing` 的**弧长**等分：`N = round(2πR / SkirtSpacing)`，第 i 个落在角
- * `2π(i + 0.5)/N`。因此：
+ * 每座塑形物出一圈锚点，名义半径 `R = 零等值线最远半径 + FalloffDistance × SkirtBandT`，
+ * 按 `N = round(2πR / SkirtSpacing)` 取 N 个方向，第 i 个在角 `2π(i + 0.5)/N`。
+ * 圆盘就落在半径 R 的圆上；mask 形状（2026-09-29 起）沿该方向找距离场 = `Falloff × SkirtBandT`
+ * 的最外一个交点（同一条等值带，只是不再是圆），朝向取距离场的梯度。因此：
  *
  *   · **密度完全由锚点个数决定**（D12 的口径）：台子拉大 ⇒ 周长变长 ⇒ 锚点变多，
  *     一个锚点最多一件摆件。没有场、没有阈值、没有随机撒点。
@@ -77,7 +78,7 @@
 namespace CSGroundDecor
 {
 /**
- * 一座塑形物在裙边生产者眼里的样子 = **它那三个 float4 的高度场参数** + 一个稳定键。
+ * 一座塑形物在裙边生产者眼里的样子 = **它的高度场打包头 + mask 距离场** + 一个稳定键。
  *
  * 直接存打包参数而不是存 (中心, 半径, 台高)，是为了让本模块与 GPU 位移 pass、石阶扫描、
  * CPU 镜像重导出**读同一份数**（`ACSGroundActor::BuildShaperGpuParams` 那一份）。
@@ -86,9 +87,10 @@ namespace CSGroundDecor
  */
 struct FShaperRing
 {
-	FVector4f Profile = FVector4f(0.0f, 0.0f, 1.0f, 1.0f);   // (中心 X, 中心 Y, Radius, Falloff)
-	FVector4f Top = FVector4f(0.0f, 0.0f, 0.0f, 0.0f);       // (台高, 噪声幅度, 噪声频率, 二次抬升)
-	FVector4f Noise = FVector4f::Zero();                     // (噪声种子, 0, 0, 0)
+	/** 打包头（布局见 `CSGroundShaperField.h`）。`Header.Noise.Z == 0` ⇒ 解析圆盘，半径 = `Header.Profile.Z`。 */
+	CSGroundShaperField::FShaperHeader Header;
+	/** mask 距离场（圆盘时为空）。拷一份而不是存视图：Site 的生命周期不归塑形物管。 */
+	TArray<float> Sdf;
 
 	/** 稳定身份，见文件头。0 是合法值，但同一份 Site 里两座撞键会让它们共用随机数。 */
 	uint32 Key = 0;

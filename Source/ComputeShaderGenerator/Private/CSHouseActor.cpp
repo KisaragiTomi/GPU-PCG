@@ -9,6 +9,7 @@
 #include "CSHouseResize.h"
 #include "CSHouseHeightHandleActor.h"   // D5 高度框（unity 构建下别指望别人替你带进来）
 #include "CSHouseResizeHandleActor.h"   // D5 水平锥子（同上）
+#include "CSHouseRidgeHandleActor.h"    // 脊长箭头（同上）
 #include "CSHouseFeatureMarker.h"       // D8 附属物：重建后要回推裁决 + 按锚点吸附
 #include "CSHouseBrickWall.h"           // D4 两层之 A：砖层 = 一摞包边带
 #include "CSHouseContact.h"   // D7 接触记录（unity 构建下别指望别人替你带进来）
@@ -78,6 +79,17 @@ int32 CSHouse_Q(double Value, double Quantum) { return int32(FMath::RoundToInt(V
 void CSHouse_AppendFootprintHash(TArray<int32>& H, const FCSHouseFootprint& Footprint)
 {
 	Footprint.AppendQuantizedHash(H);
+}
+
+/**
+ * 屋脊三件套进哈希（2026-10-02）：脊长参数、脊向、山墙样式。吃屋面形状的每一家（房体的山墙、瓦、尖顶）都拼它 ——
+ * 漏掉的症状是"拖了脊长抓手，瓦重排了而山墙没升上去"这种半截更新。
+ * 脊长量到 0.1%：10 m 的房子上是 1 cm，与 footprint 的量子同档。自动（< 0）恒量成同一个负数。
+ * ⚠️ 「恰好到 1」单占一位：0.9996 与 1 量化后同值，而前者是四坡、后者是山墙 —— 不分开的话最后那一小步不重建。
+ */
+void CSHouse_AppendRoofRidgeHash(TArray<int32>& H, float RidgeLength01, ECSRoofRidgeAxis Axis, ECSGableRoofStyle Style)
+{
+	H.Append({ RidgeLength01 < 0.0f ? -1 : CSHouse_Q(RidgeLength01, 0.001), int32(RidgeLength01 >= 1.0f), int32(Axis), int32(Style) });
 }
 
 // 藤蔓管子的环半径系数 2026-09-22 起是 `CSHouseVine::TubeCircleScale`（房子与样条墙共用，理由见那里）。
@@ -732,6 +744,12 @@ uint32 ACSHouseActor::ComputeDoors()
 	CSHouse_AppendFootprintHash(H, GetFootprint());
 	H.Append({ CSHouse_Q(WallHeight, 1), CSHouse_Q(WallThickness, 0.5),
 		CSHouse_Q(RoofPitch, 0.1), CSHouse_Q(RoofOverhang, 1), int32(IsFlatRoof()) });
+	// 山墙是房体的几何：脊长参数到 1（或换脊向）时两端的墙升成三角形，上沿跟着坡度走（坡度已在上面）；
+	// 阶梯式的上沿还吃屋面整体偏移（墙顶比屋面线高 46 cm，屋面线含 `RoofHeightOffset`）。
+	CSHouse_AppendRoofRidgeHash(H, RoofRidgeLength01, RoofRidgeAxis, GableRoofStyle);
+	H.Add(CSHouse_Q(RoofHeightOffset, 0.1));
+	// 阶梯山墙上沿那一圈由砖砌时，墙板只做到屋面线（`FCSHouseGableWall::PlasterDrop`）。
+	H.Add(int32(HasSteppedGableBricks()));
 	for (const FCSWallOpening& O : CurrentOpenings)
 	{
 		H.Append({ O.EdgeIndex, int32(O.Shape), CSHouse_Q(O.CenterS, 1), CSHouse_Q(O.Width, DoorWidthQuantum),
@@ -875,19 +893,34 @@ float ACSHouseActor::ComputeDoorWidthScale(float GapMax, float GapFull, float Ga
 	return 1.0f - FMath::Clamp((GapMax - GapFull) / Span, 0.0f, 1.0f);
 }
 
-FCSRoofDesc ACSHouseActor::GetRoofDesc() const
+FCSRoofDesc ACSHouseActor::MakePitchedRoofDesc() const
 {
 	FCSRoofDesc Desc;
 	Desc.Footprint = GetFootprint();
 	Desc.EaveZ = WallHeight + RoofHeightOffset;
 	Desc.Pitch = RoofPitch;
 	Desc.Overhang = RoofOverhang;
-	Desc.bFlat = IsFlatRoof();
+	// 脊长是显式参数时把它落成逐边坡度倍率 / 山墙边；自动（< 0）与异形 footprint 留空 = 等坡度直骨架。
+	if (RoofRidgeLength01 >= 0.0f)
+	{
+		CSHouseRoof_ApplyRidge(Desc, RoofRidgeLength01, int32(RoofRidgeAxis),
+			CSHouseRoof_GableOverhang(GableRoofStyle, RoofOverhang));
+	}
+	return Desc;
+}
+
+FCSRoofDesc ACSHouseActor::GetRoofDesc() const
+{
+	FCSRoofDesc Desc = MakePitchedRoofDesc();
+	Desc.bFlat = float(Desc.MaxInset()) * Desc.TanPitch() <= FMath::Max(FlatRoofThreshold, 0.0f);
 	if (Desc.bFlat)
 	{
+		// 露台没有脊也没有山墙：倍率一并清掉，下游拿到的就是一块平的等坡度 desc。
 		Desc.EaveZ = WallHeight;
 		Desc.Pitch = 0.0f;
 		Desc.Overhang = 0.0f;
+		Desc.EdgeSteep.Reset();
+		Desc.GableOverhang = 0.0f;
 	}
 	return Desc;
 }
@@ -1249,9 +1282,8 @@ float ACSHouseActor::PushHeight(float Offset, bool bFinished)
 
 float ACSHouseActor::GetRoofRise() const
 {
-	FCSRoofDesc Roof;
-	Roof.Footprint = GetFootprint();
-	Roof.Pitch = RoofPitch;
+	// 脊高由主坡面定：等坡度时是半短边 × tan，脊向钉在短轴上（`RoofRidgeAxis`）时是半长边 × tan。
+	const FCSRoofDesc Roof = MakePitchedRoofDesc();
 	return float(Roof.MaxInset()) * Roof.TanPitch();
 }
 
@@ -1275,9 +1307,7 @@ FCSStairsTerraceSite ACSHouseActor::GetStairsTerraceSite() const
 float ACSHouseActor::PushRoofHeight(float Offset, bool bFinished)
 {
 	NoteGizmoDrag(bFinished);
-	FCSRoofDesc Roof;
-	Roof.Footprint = GetFootprint();
-	const double Inset = Roof.MaxInset();
+	const double Inset = MakePitchedRoofDesc().MaxInset();
 	const float Before = GetRoofRise();
 	const float Pitch = CSHouseRoof_PitchFromRise(Before + Offset, Inset);
 	if (Pitch == RoofPitch && !bFinished) return 0.0f;
@@ -1286,6 +1316,115 @@ float ACSHouseActor::PushRoofHeight(float Offset, bool bFinished)
 	if (bFinished) bForceFullRebuild = true;
 	ReevaluateSite();
 	return GetRoofRise() - Before;
+}
+
+bool ACSHouseActor::GetRoofRidgeFrame(FCSHouseRidgeFrame& Out) const
+{
+	const FCSHouseFootprint Footprint = GetFootprint();
+	if (!CSHouseRoof_IsRectangle(Footprint)) return false;
+
+	// 顺脊的那对边：显式时读 `RoofRidgeAxis`；自动时脊沿长边（等长归 0 号边 —— 矩形时代「平局归 X」）。
+	const FCSHouseEdgeFrame Edge0 = CSHouse_GetEdge(0, Footprint, 0.0f);
+	const FCSHouseEdgeFrame Edge1 = CSHouse_GetEdge(1, Footprint, 0.0f);
+	Out.Axis = RoofRidgeLength01 >= 0.0f ? (int32(RoofRidgeAxis) & 1) : (Edge0.Len >= Edge1.Len ? 0 : 1);
+	Out.Direction = Out.Axis == 0 ? Edge0.U : Edge1.U;
+	Out.Along = double(Out.Axis == 0 ? Edge0.Len : Edge1.Len);
+	Out.Across = double(Out.Axis == 0 ? Edge1.Len : Edge0.Len);
+	// 矩形的中心 = 对角两个顶点的中点（`FromShape` 居中过，矩形上就是原点；这里不假定）。
+	Out.Centre = (Footprint.Verts[0] + Footprint.Verts[2]) * 0.5;
+
+	// 脊长 cm：自动 = 等坡度四坡的推论（长边 − 短边）；显式 = TG 的 `RoofRidgeDims::calc`，不超过 0.1 m 的脊是一个尖。
+	if (RoofRidgeLength01 < 0.0f)
+	{
+		Out.Length = FMath::Max(Out.Along - Out.Across, 0.0);
+	}
+	else
+	{
+		Out.Length = CSHouseRoof_RidgeLengthFrom01(double(RoofRidgeLength01), Out.Along);
+		if (Out.Length <= CSHouseRoof_RidgeMin) Out.Length = 0.0;
+	}
+	return true;
+}
+
+float ACSHouseActor::GetRoofRidgeLength() const
+{
+	FCSHouseRidgeFrame Ridge;
+	if (GetRoofRidgeFrame(Ridge)) return float(Ridge.Length);
+
+	// 异形房子：脊长不是参数，报骨架最高那段脊有多长。
+	FCSRoofSkeleton Skeleton;
+	CSHouseRoof_BuildSkeleton(MakePitchedRoofDesc(), Skeleton);
+	return float(FVector2D::Distance(Skeleton.TopA, Skeleton.TopB));
+}
+
+bool ACSHouseActor::IsGableRoof() const
+{
+	return !IsFlatRoof() && MakePitchedRoofDesc().HasGable();
+}
+
+float ACSHouseActor::PushRidgeLength(float Offset, bool bFinished)
+{
+	NoteGizmoDrag(bFinished);
+
+	FCSHouseRidgeFrame Ridge;
+	// 脊长只对矩形房子是参数（TG 同）；露台没有脊。
+	if (!GetRoofRidgeFrame(Ridge) || IsFlatRoof()) return 0.0f;
+
+	// 厘米 → TG 的参数：`inverse_ridge_01_param` 钳在 [0, 1]，拖过房子两头时钳出来的那个**恰好的 1** 就是山墙。
+	// 自动的房子从它现在的样子（脊长 = 长边 − 短边）起步，第一次真动了才把脊长与脊向一起钉成显式。
+	const bool bExplicit = RoofRidgeLength01 >= 0.0f;
+	const double BeforeLength = bExplicit
+		? CSHouseRoof_RidgeLengthFrom01(double(RoofRidgeLength01), Ridge.Along)
+		: FMath::Max(Ridge.Along - Ridge.Across, CSHouseRoof_RidgeMin);
+	const float Before01 = bExplicit ? RoofRidgeLength01 : float(CSHouseRoof_Ridge01FromLength(BeforeLength, Ridge.Along));
+	const float Wanted01 = float(CSHouseRoof_Ridge01FromLength(BeforeLength + double(Offset), Ridge.Along));
+
+	// 没动就一步都不走：顶在 0 或 1 上每帧都会走到这里（同 `PushHeight`）。
+	if (Wanted01 == Before01 && !bFinished) return 0.0f;
+
+	if (Wanted01 != Before01)
+	{
+		Modify(); // 编辑器 gizmo 的事务必须记录宿主属性，抓手自身是 transient。
+		if (!bExplicit) RoofRidgeAxis = Ridge.Axis == 0 ? ECSRoofRidgeAxis::X : ECSRoofRidgeAxis::Y;
+		RoofRidgeLength01 = Wanted01;
+	}
+	if (bFinished) bForceFullRebuild = true;
+	ReevaluateSite();
+	return float(CSHouseRoof_RidgeLengthFrom01(double(Wanted01), Ridge.Along) - BeforeLength);
+}
+
+void ACSHouseActor::SwitchRoofRidgeDirection()
+{
+	FCSHouseRidgeFrame Ridge;
+	if (!GetRoofRidgeFrame(Ridge)) return;
+
+	Modify();
+	// 自动的房子先把现状钉成显式（等坡度的那个脊长），再换向 —— 否则换完向脊长仍按"自动"读，等于没换。
+	if (RoofRidgeLength01 < 0.0f)
+	{
+		RoofRidgeLength01 = float(CSHouseRoof_Ridge01FromLength(FMath::Max(Ridge.Along - Ridge.Across, CSHouseRoof_RidgeMin), Ridge.Along));
+	}
+	// 参数是比例，换向后原样沿用：山墙换完还是山墙，只是脊转了 90°（顺脊边长换成了另一条）。
+	RoofRidgeAxis = Ridge.Axis == 0 ? ECSRoofRidgeAxis::Y : ECSRoofRidgeAxis::X;
+	bForceFullRebuild = true;
+	ReevaluateSite();
+	SnapResizeHandles();
+}
+
+void ACSHouseActor::ResetRoofRidgeToTinyGladeDefault()
+{
+	const FCSHouseFootprint Footprint = GetFootprint();
+	if (!CSHouseRoof_IsRectangle(Footprint)) return;
+
+	Modify();
+	// TG 新建矩形房子的口径：脊沿长边，脊长参数取 `ridge_length_01_from_rectangle_ratio`。
+	const double Len0 = double(CSHouse_GetEdge(0, Footprint, 0.0f).Len);
+	const double Len1 = double(CSHouse_GetEdge(1, Footprint, 0.0f).Len);
+	RoofRidgeAxis = Len0 >= Len1 ? ECSRoofRidgeAxis::X : ECSRoofRidgeAxis::Y;
+	RoofRidgeLength01 = CSHouseRoof_DefaultRidgeLength01(Len0, Len1);
+	bForceFullRebuild = true;
+	ReevaluateSite();
+	SnapResizeHandles();
 }
 
 ACSHouseHeightHandleActor* ACSHouseActor::GetRoofHandle() const
@@ -1393,6 +1532,35 @@ ACSHouseHeightHandleActor* ACSHouseActor::SpawnHeightHandle(ECSHouseHeightHandle
 	return Handle;
 }
 
+ACSHouseRidgeHandleActor* ACSHouseActor::SpawnRidgeHandle(int32 End)
+{
+	UWorld* World = GetWorld();
+	if (!World) return nullptr;
+
+	ACSHouseRidgeHandleActor* Handle = World->SpawnActor<ACSHouseRidgeHandleActor>(
+		GetActorLocation(), GetActorRotation(), CSHouse_HandleSpawnParams(this));
+	if (!Handle) return nullptr;
+
+	// 先 attach 再 Initialize（同另外两种抓手）。
+	Handle->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+	Handle->InitializeHandle(this, End);
+#if WITH_EDITOR
+	Handle->SetActorLabel(FString::Printf(TEXT("%s_RidgeHandle_%d"), *GetActorLabel(), End));
+#endif
+	ResizeHandles.Add(Handle);
+	return Handle;
+}
+
+ACSHouseRidgeHandleActor* ACSHouseActor::GetRidgeHandle(int32 End) const
+{
+	for (const TObjectPtr<ACSHouseHandleActor>& Handle : ResizeHandles)
+	{
+		ACSHouseRidgeHandleActor* Ridge = Cast<ACSHouseRidgeHandleActor>(Handle);
+		if (IsValid(Ridge) && Ridge->GetEnd() == (End & 1)) return Ridge;
+	}
+	return nullptr;
+}
+
 void ACSHouseActor::EnterResizeMode()
 {
 	if (!GetWorld()) return;
@@ -1409,7 +1577,7 @@ void ACSHouseActor::EnterResizeMode()
 
 	// 边数 = **取完凸包之后**的 footprint 边数（用户裁决 2026-09-14："折线有多少折手柄就有多少个"）。
 	const int32 NumEdges = GetFootprint().NumEdges();
-	ResizeHandles.Reserve(NumEdges + 3);
+	ResizeHandles.Reserve(NumEdges + 5);
 
 	// ① 每面墙一个锥子：水平推拉，每条边一个独立自由度 ⇒ 每条边一个 actor（矩形四个）。
 	for (int32 Edge = 0; Edge < NumEdges; ++Edge) SpawnEdgeHandle(Edge);
@@ -1420,6 +1588,11 @@ void ACSHouseActor::EnterResizeMode()
 	SpawnHeightHandle(ECSHouseHeightHandleSide::Eave);
 	SpawnHeightHandle(ECSHouseHeightHandleSide::Base);
 	SpawnHeightHandle(ECSHouseHeightHandleSide::Roof);
+
+	// ③ 脊两端各一只箭头：顺脊拖改脊长，拖到与房子一样长就是双坡 + 山墙（TG `ui_edit_roof_ridge_length`）。
+	//    两只改的是同一个量（脊居中、两头一起伸缩）；异形房子 / 露台上它们自己藏起来，不必在这里分支。
+	SpawnRidgeHandle(0);
+	SpawnRidgeHandle(1);
 
 	if (ResizeHandles.Num() > 0)
 	{
@@ -1446,6 +1619,9 @@ void ACSHouseActor::SyncEdgeHandlesToFootprint()
 	TArray<int32> GeometryInput;
 	Footprint.AppendQuantizedHash(GeometryInput);
 	GeometryInput.Append({ int32(FMath::RoundToInt(WallThickness * 2.0f)), int32(FMath::RoundToInt(WallHeight * 2.0f)) });
+	// 脊端箭头挂在脊的两头、屋脊之上：在细节面板里改脊长参数 / 脊向 / 坡度时它们也要跟着走。
+	GeometryInput.Append({ int32(FMath::RoundToInt(GetRoofRidgeLength() * 2.0f)), int32(FMath::RoundToInt(GetRoofRise() * 2.0f)),
+		int32(RoofRidgeAxis), int32(RoofRidgeLength01 >= 0.0f) });
 	const uint32 GeometryHash = FCrc::MemCrc32(GeometryInput.GetData(), GeometryInput.Num() * sizeof(int32));
 
 	// 稳态：锥子数 = 边数，且边号恰好铺满 0..N-1。每次重求值都会走到这里，稳态下不许有任何动作。
@@ -1613,7 +1789,59 @@ void CSHouse_BuildBodySoup(const FCSHouseBodyDesc& Desc, FCSGpuMeshCPUData& S)
 	FCSWallMeshWriter Writer{ S, Desc.World };
 	const float H = Desc.WallHeight;
 
-	// ---- 屋顶：四坡 + 全瓦片。房体三角汤里**一片屋面都不产**（2026-08-31）。 ----
+	// ---- 山墙（2026-10-02）：脊与房子一样长时，两端的墙沿屋面升成三角形 ----
+	//
+	// TG：`Roof::is_gable`（脊长参数 = 1）时发 `RecalculateGableRoofWallHeights`，那两面墙的砖一直砌到屋面底下。
+	// 这里是墙顶之上的一块实心棱柱：外皮、内皮各一片（与下面的墙板共面、同一套 (S, Z) 贴图坐标，贴图连着铺上去），
+	// 上沿逐段是斜面，照着 `Profile` 走 —— 那条线由屋面求值器沿墙线取，所以墙顶逐点贴着屋面。
+	// 不斜接：山墙压在整条边上（含两头的转角方块），两头高度为 0，没有端面可露。洞不上山墙（窗的谓词卡在檐口以下）。
+	for (const FCSHouseGableWall& Gable : Desc.Gables)
+	{
+		const FCSHouseEdgeFrame F = CSHouse_GetEdge(Gable.EdgeIndex, Desc.Footprint, Desc.WallThickness);
+		if (F.Len <= 0.0f || Gable.Profile.Num() < 2) continue;
+		const FVector U(F.U.X, F.U.Y, 0.0), In(F.In.X, F.In.Y, 0.0);
+		const FVector Start(F.Start.X, F.Start.Y, 0.0);
+		const FVector Deep = In * double(Desc.WallThickness);
+		Writer.SetPanel(Start, U, FCSOpeningClipField(), ECSHousePart::Wall, 0);
+
+		auto Point = [&](double Along, double Rise) { return Start + U * Along + FVector(0.0, 0.0, double(H) + Rise); };
+		auto UV = [&](double Along, double Rise) { return FVector2f(float(Along) / CSHouse_UVScale, float(double(H) + Rise) / CSHouse_UVScale); };
+		// 墙板做到哪：墙顶线往下 `PlasterDrop`（阶梯山墙上沿那一圈交给砖时），不低于墙顶。
+		auto Plaster = [&](const FVector2D& P) { return FVector2D(P.X, FMath::Max(P.Y - double(Gable.PlasterDrop), 0.0)); };
+		constexpr int32 SlotWall = 0;
+		for (int32 Index = 0; Index + 1 < Gable.Profile.Num(); ++Index)
+		{
+			const FVector2D A = Plaster(Gable.Profile[Index]), B = Plaster(Gable.Profile[Index + 1]);
+			if (B.X - A.X <= UE_KINDA_SMALL_NUMBER) continue;
+			const FVector A0 = Point(A.X, 0.0), B0 = Point(B.X, 0.0), A1 = Point(A.X, A.Y), B1 = Point(B.X, B.Y);
+
+			// 外皮（法线 = U × Up = −In，朝房外）与内皮（反绕）。高度为 0 的那一头三角形自然退化，不单独判。
+			if (B.Y > UE_KINDA_SMALL_NUMBER)
+			{
+				Writer.AddTri(A0, B0, B1, SlotWall, UV(A.X, 0.0), UV(B.X, 0.0), UV(B.X, B.Y));
+				Writer.AddTri(A0 + Deep, B1 + Deep, B0 + Deep, SlotWall, UV(A.X, 0.0), UV(B.X, B.Y), UV(B.X, 0.0));
+			}
+			if (A.Y > UE_KINDA_SMALL_NUMBER)
+			{
+				Writer.AddTri(A0, B1, A1, SlotWall, UV(A.X, 0.0), UV(B.X, B.Y), UV(A.X, A.Y));
+				Writer.AddTri(A0 + Deep, A1 + Deep, B1 + Deep, SlotWall, UV(A.X, 0.0), UV(A.X, A.Y), UV(B.X, B.Y));
+			}
+			// 上沿的斜面（朝上，贴在瓦底下）。
+			Writer.AddQuad4(A1, B1, B1 + Deep, A1 + Deep, SlotWall);
+		}
+		// 两头：`Profile` 在矩形上首尾都是 0 高；不是 0 的（给了别的上沿）才有端面要封。
+		const FVector2D First = Plaster(Gable.Profile[0]), Last = Plaster(Gable.Profile.Last());
+		if (First.Y > UE_KINDA_SMALL_NUMBER)
+		{
+			Writer.AddQuad4(Point(First.X, 0.0), Point(First.X, First.Y), Point(First.X, First.Y) + Deep, Point(First.X, 0.0) + Deep, SlotWall);
+		}
+		if (Last.Y > UE_KINDA_SMALL_NUMBER)
+		{
+			Writer.AddQuad4(Point(Last.X, 0.0), Point(Last.X, 0.0) + Deep, Point(Last.X, Last.Y) + Deep, Point(Last.X, Last.Y), SlotWall);
+		}
+	}
+
+	// ---- 屋顶：坡面全是瓦片。房体三角汤里**一片屋面都不产**（2026-08-31）。 ----
 	//
 	// 这里原本是「两块实体坡板 + 两端山墙棱柱 + 两条檐口封口楔形」那一整套双坡结构，整段删除：
 	// TG 的屋顶是**四个坡面**、整面**由瓦铺成**（实拍俯视 + `roof_shape::ridge_length_01_from_
@@ -1646,6 +1874,40 @@ void CSHouse_BuildBodySoup(const FCSHouseBodyDesc& Desc, FCSGpuMeshCPUData& S)
 	S.NumTexCoordChannels = 2;   // UV0 贴图 / UV1 解析裁剪场
 }
 
+void ACSHouseActor::BuildGableWalls(TArray<FCSHouseGableWall>& Out) const
+{
+	Out.Reset();
+	const FCSRoofDesc Roof = GetRoofDesc();
+	if (Roof.bFlat || !Roof.HasGable()) return;
+
+	// 上沿 = 屋面沿墙线的那条剖面线（等效内距 × tan(pitch) = 屋面比檐口高出多少），从墙顶起算。
+	//  · 悬挑式（TG 的 c = 0）：墙顶贴着屋面线。屋面整体的 `RoofHeightOffset` 不加进来 —— 山墙顶与瓦底之间留的那条缝，
+	//    和檐墙顶与瓦底之间的是同一条；两头高度为 0，与檐墙顶齐平。
+	//  · 阶梯式（TG 的 c = 0.46 m）：墙顶比**屋面线**（含 `RoofHeightOffset`）高出 46 cm，两头也抬着 ——
+	//    山墙像一道女儿墙立在屋面两头，屋面缩在它里面（`CSHouseRoof_GableOverhang` 的负值）。
+	//    那 46 cm 在 TG 里是露着的砖（灰泥只抹到屋面线）：有砖可出时墙板就只做到屋面线（`PlasterDrop`），
+	//    上面由砖逐层收成台阶；没有砖可出时墙板自己升到墙顶线。
+	const double TanP = double(Roof.TanPitch());
+	const bool bStepped = GableRoofStyle == ECSGableRoofStyle::Stepped;
+	const double Lift = bStepped ? double(RoofHeightOffset) + double(CSHouseRoof_SteppedGableRise) : 0.0;
+	const float PlasterDrop = bStepped && HasSteppedGableBricks() ? CSHouseRoof_SteppedGableRise : 0.0f;
+	for (int32 Edge = 0; Edge < Roof.Footprint.NumEdges(); ++Edge)
+	{
+		FCSHouseGableWall Gable;
+		if (!CSHouseRoof_BuildGableProfile(Roof, Edge, Gable.Profile)) continue;
+		for (FVector2D& Point : Gable.Profile) Point.Y = FMath::Max(Point.Y * TanP + Lift, 0.0);
+		Gable.EdgeIndex = Edge;
+		Gable.PlasterDrop = PlasterDrop;
+		Out.Add(MoveTemp(Gable));
+	}
+}
+
+bool ACSHouseActor::HasSteppedGableBricks() const
+{
+	if (GableRoofStyle != ECSGableRoofStyle::Stepped || !bFrameEnabled || !FrameBrickMesh) return false;
+	return bBrickWallEnabled || (bTrimEnabled && bTrimGable);
+}
+
 void ACSHouseActor::RebuildBodyMesh()
 {
 	FCSHouseBodyDesc Desc;
@@ -1658,6 +1920,7 @@ void ACSHouseActor::RebuildBodyMesh()
 	Desc.bBottomFace = bBottomFace;
 	Desc.bFlatRoof = IsFlatRoof();
 	Desc.World = GetBuildTransform();
+	BuildGableWalls(Desc.Gables);
 
 	FCSGpuMeshCPUData S;
 	CSHouse_BuildBodySoup(Desc, S);
@@ -2538,6 +2801,26 @@ uint32 ACSHouseActor::BuildQuoinBricks(TArray<CSHouseFrame::FElement>& InOutElem
 		float(GetActorLocation().Z), WallHeight, QuoinInset, Quoins);
 	if (Quoins.IsEmpty()) return 0;
 
+	// 山墙两头的角：角石跟着墙顶砌上去。TG `add_wall_corners` 141215A91..141215B58 的柱高取「角处的墙顶」，
+	// 而山墙的角点是被抬高的（阶梯式抬 46 cm + 屋面偏移；悬挑式两头高度为 0，这里就是恒等）。
+	{
+		TArray<FCSHouseGableWall> GableWalls;
+		BuildGableWalls(GableWalls);
+		const int32 NumCorners = GetFootprint().NumEdges();
+		for (CSHouseQuoin::FQuoin& Q : Quoins)
+		{
+			double Rise = 0.0;
+			for (const FCSHouseGableWall& Gable : GableWalls)
+			{
+				if (Gable.Profile.Num() < 2) continue;
+				// 角 k 夹在「k 号边的远端」与「k+1 号边的近端」之间。
+				if (Gable.EdgeIndex == Q.CornerIndex) Rise = FMath::Max(Rise, Gable.Profile.Last().Y);
+				if (Gable.EdgeIndex == (Q.CornerIndex + 1) % NumCorners) Rise = FMath::Max(Rise, Gable.Profile[0].Y);
+			}
+			Q.TopZ += float(Rise);
+		}
+	}
+
 	// 转角配成墩的角上，角石在墩顶以下让路：那一截由 `BuildCornerPierBricks` 的柱础/柱身/柱头
 	// 顶替（2026-09-06 用户裁决：转角就是一个墩）。判据与高度都只有 `ResolvePierSpans` 写的那一份
 	// `CornerPierTopZ`，这里不再自己找洞 —— 两处各判一次就会出现"墩砌到 A 高度、角石剔到 B 高度"。
@@ -2603,8 +2886,19 @@ int32 ACSHouseActor::GetBrickWallBrickBudget() const
 {
 	const CSHouseBrickWall::FCourses Courses =
 		CSHouseBrickWall::PlanCourses(WallHeight, BrickWallCourseHeight);
-	return CSHouseBrickWall::EstimateBricks(GetFootprint(), WallThickness, Courses,
-		FMath::Max(FrameBrickLength, 1.0f));
+	const FCSHouseFootprint Footprint = GetFootprint();
+	int32 Budget = CSHouseBrickWall::EstimateBricks(Footprint, WallThickness, Courses, FMath::Max(FrameBrickLength, 1.0f));
+
+	// 山墙上续摞的那几层也要进预算：容量只截断不扩容，漏掉它 = 把脊拖到头的那一下山墙尖砌不完。
+	TArray<FCSHouseGableWall> GableWalls;
+	BuildGableWalls(GableWalls);
+	if (GableWalls.Num() > 0)
+	{
+		TArray<CSHouseBrickWall::FGable, TInlineAllocator<4>> Gables;
+		for (const FCSHouseGableWall& Gable : GableWalls) Gables.Add({ Gable.EdgeIndex, Gable.Profile });
+		Budget += CSHouseBrickWall::EstimateGableBricks(Footprint, WallThickness, Gables, Courses, FMath::Max(FrameBrickLength, 1.0f));
+	}
+	return Budget;
 }
 
 uint32 ACSHouseActor::BuildBrickWallBricks(TArray<CSHouseFrame::FElement>& InOutElements, int32& InOutBrickCount)
@@ -2635,17 +2929,28 @@ uint32 ACSHouseActor::BuildBrickWallBricks(TArray<CSHouseFrame::FElement>& InOut
 	// 哈希只记标量：层高 + 每层的砖数与各段的 (边号, S 区间)。逐砖位置是它们的纯函数。
 	// ⚠️ 必须逐层记，不能只记总砖数：把一扇窗左右挪半米，总数可以一块不差而位置全变了。
 	H.Append({ Courses.Count, CSHouse_Q(Courses.Height, 0.5) });
-	const int32 Added = CSHouseBrickWall::BuildWall(World, GetFootprint(), WallThickness, Courses,
-		Clearance, MakeArrayView(CurrentOpenings), Seed, Params, Runs, InOutElements,
-		[&H](int32 CourseIndex, const CSHouseTrim::FBand& Band, int32 CourseBricks,
-			const TArray<CSHouseTrim::FRun>& CourseRuns)
+	auto HashCourse = [&H](int32 CourseIndex, const CSHouseTrim::FBand& Band, int32 CourseBricks,
+		const TArray<CSHouseTrim::FRun>& CourseRuns)
+	{
+		H.Append({ CourseIndex, CourseBricks, CSHouse_Q(Band.CenterZ, 1) });
+		for (const CSHouseTrim::FRun& R : CourseRuns)
 		{
-			H.Append({ CourseIndex, CourseBricks, CSHouse_Q(Band.CenterZ, 1) });
-			for (const CSHouseTrim::FRun& R : CourseRuns)
-			{
-				H.Append({ R.EdgeIndex, CSHouse_Q(R.S0, 1), CSHouse_Q(R.S1, 1) });
-			}
-		});
+			H.Append({ R.EdgeIndex, CSHouse_Q(R.S0, 1), CSHouse_Q(R.S1, 1) });
+		}
+	};
+	int32 Added = CSHouseBrickWall::BuildWall(World, GetFootprint(), WallThickness, Courses,
+		Clearance, MakeArrayView(CurrentOpenings), Seed, Params, Runs, InOutElements, HashCourse);
+
+	// 山墙（双坡时两面）：墙顶之上接着摞，逐层沿屋面线收成台阶（TG `trim_rows`，见 `CSHouseBrickWall::GableCourseSpan`）。
+	TArray<FCSHouseGableWall> GableWalls;
+	BuildGableWalls(GableWalls);
+	if (GableWalls.Num() > 0)
+	{
+		TArray<CSHouseBrickWall::FGable, TInlineAllocator<4>> Gables;
+		for (const FCSHouseGableWall& Gable : GableWalls) Gables.Add({ Gable.EdgeIndex, Gable.Profile });
+		Added += CSHouseBrickWall::BuildGableCourses(World, GetFootprint(), WallThickness, Courses, Gables,
+			Seed, Params, Runs, InOutElements, HashCourse);
+	}
 
 	CurrentBrickWallBrickCount = Added;
 	InOutBrickCount += Added;
@@ -2662,6 +2967,7 @@ uint32 ACSHouseActor::BuildTrimBricks(TArray<CSHouseFrame::FElement>& InOutEleme
 	CurrentTrimTopRunCount = 0;
 	CurrentTrimBaseRunCount = 0;
 	CurrentTrimBrickCount = 0;
+	CurrentTrimGableBrickCount = 0;
 	if (!bTrimEnabled || !bFrameEnabled || !FrameBrickMesh) return 0;
 	if (WallHeight <= 0.0f) return 0;
 
@@ -2703,6 +3009,32 @@ uint32 ACSHouseActor::BuildTrimBricks(TArray<CSHouseFrame::FElement>& InOutEleme
 	// 顺序固定：先顶后底。换序会推走对方的槽位（两者的随机数都已从身份派生，所以只是纪律）。
 	RunBand(bTrimTop, WallHeight + TrimTopOffset, CSHouseFrame::EPathFamily::TrimTop, CurrentTrimTopRunCount);
 	RunBand(bTrimBase, TrimBaseOffset, CSHouseFrame::EPathFamily::TrimBase, CurrentTrimBaseRunCount);
+
+	// 阶梯山墙上沿的露砖（2026-10-02）：墙板只做到屋面线（`BuildGableWalls` 的 `PlasterDrop`），上面那一圈在这里砌。
+	// 层的划分与砖层是同一份 `PlanCourses` —— 开不开砖层，山墙上的砖缝都落在同样的高度上；开了砖层就由它整面砌，这里不出。
+	// 排在两条带之后：它只随屋顶形状变，不会推走别人的槽位。
+	if (bTrimGable && !bBrickWallEnabled && GableRoofStyle == ECSGableRoofStyle::Stepped)
+	{
+		TArray<FCSHouseGableWall> GableWalls;
+		BuildGableWalls(GableWalls);
+		const CSHouseBrickWall::FCourses Courses = CSHouseBrickWall::PlanCourses(WallHeight, BrickWallCourseHeight);
+		if (GableWalls.Num() > 0 && Courses.Count > 0)
+		{
+			TArray<CSHouseBrickWall::FGable, TInlineAllocator<4>> Gables;
+			for (const FCSHouseGableWall& Gable : GableWalls) Gables.Add({ Gable.EdgeIndex, Gable.Profile });
+			const int32 Added = CSHouseBrickWall::BuildGableCourses(World, GetFootprint(), WallThickness, Courses, Gables,
+				Seed, Params, Runs, InOutElements,
+				[&H](int32 CourseIndex, const CSHouseTrim::FBand& Band, int32 CourseBricks, const TArray<CSHouseTrim::FRun>& CourseRuns)
+				{
+					H.Append({ CourseIndex, CourseBricks, CSHouse_Q(Band.CenterZ, 1) });
+					for (const CSHouseTrim::FRun& R : CourseRuns) H.Append({ R.EdgeIndex, CSHouse_Q(R.S0, 1), CSHouse_Q(R.S1, 1) });
+				},
+				CSHouseRoof_SteppedGableRise, CSHouseFrame::EPathFamily::GableCoping);
+			CurrentTrimGableBrickCount = Added;
+			CurrentTrimBrickCount += Added;
+			InOutBrickCount += Added;
+		}
+	}
 
 	return CSHouse_Hash(H);
 }
@@ -3413,6 +3745,7 @@ void ACSHouseActor::RebuildRoofTiles()
 		CSHouse_Q(RoofTileAxes.NativeCentre.X, 0.1), CSHouse_Q(RoofTileAxes.NativeCentre.Y, 0.1),
 		CSHouse_Q(RoofTileAxes.NativeCentre.Z, 0.1) };
 	CSHouse_AppendFootprintHash(HashInput, GetFootprint());
+	CSHouse_AppendRoofRidgeHash(HashInput, RoofRidgeLength01, RoofRidgeAxis, GableRoofStyle);
 	const uint32 NewHash = CSHouse_Hash(HashInput);
 	// 交接结果也进早退门（审查 B1）：容量比对挡的是"扩容后没重排"，交接结果还多挡一种 ——
 	// 包围盒变了、同一批 buffer 重新交出去的那一趟，重排一次是便宜的保险。
@@ -3474,7 +3807,11 @@ void ACSHouseActor::RebuildRoofFinials()
 		}
 	};
 
-	if (IsFlatRoof() || !RoofFinialMesh)
+	const FCSRoofDesc Roof = GetRoofDesc();
+	// 双坡不立尖顶（2026-10-02）：脊的两端压着山墙（阶梯式的山墙还高出屋面 46 cm），尖顶立上去只会和山墙穿在一起。
+	// TG 更严 —— `place_roof_spires` 的闭包 1419EEA30 只给**没有脊**的屋顶（脊矩形长宽比 < 1.01）放一个塔尖，
+	// 有脊就一个都不放；四坡脊端的两根尖顶是本项目 2026-08-31 自己的裁决，这里不动它。
+	if (Roof.bFlat || !RoofFinialMesh || Roof.HasGable())
 	{
 		if (CurrentRoofFinialCount != 0 || RoofFinialComponents.Num() != 0)
 		{
@@ -3485,11 +3822,10 @@ void ACSHouseActor::RebuildRoofFinials()
 		return;
 	}
 
-	const FCSRoofDesc Roof = GetRoofDesc();
 	// 尖顶立在最高那段脊的两端（骨架的 TopA / TopB）。脊长收到 0（正方形、正多边形）时两端重合
 	// ⇒ 只立一根，金字塔尖不需要特例。阈值取 1 cm：比这更短的"脊"两根尖顶会互相穿模，而肉眼分不出一根两根。
 	FCSRoofSkeleton Skeleton;
-	CSHouseRoof_BuildSkeleton(Roof.Footprint, double(Roof.Overhang), Skeleton);
+	CSHouseRoof_BuildSkeleton(Roof, Skeleton);
 	const int32 WantCount = FVector2D::Distance(Skeleton.TopA, Skeleton.TopB) > 1.0 ? 2 : 1;
 
 	// 竖直轴从包围盒判：尖顶是**一根细长的东西** ⇒ 最长的一轴就是它朝上那根。
@@ -3514,6 +3850,9 @@ void ACSHouseActor::RebuildRoofFinials()
 		int32(GetTypeHash(RoofFinialMaterial) & 0x7FFFFFFF),
 		UpAxis, WantCount };
 	CSHouse_AppendFootprintHash(HashInput, GetFootprint());
+	// 脊端点跟着脊长 / 脊向 / 山墙悬挑走（悬挑量又吃 `RoofOverhang`）。
+	CSHouse_AppendRoofRidgeHash(HashInput, RoofRidgeLength01, RoofRidgeAxis, GableRoofStyle);
+	HashInput.Add(CSHouse_Q(RoofOverhang, 1));
 	const uint32 NewHash = CSHouse_Hash(HashInput);
 	// ⚠️ 组件数也要进短路条件：蓝图重跑构造脚本会把 transient 组件销毁，而形态哈希一个字没变 ——
 	// 只比哈希的话尖顶会**在重跑构造脚本后永久消失**（同 `EnsureRoofTileComponent` 开头那条）。

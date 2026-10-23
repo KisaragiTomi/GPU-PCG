@@ -20,12 +20,30 @@
 #include "Rendering/PositionVertexBuffer.h"
 #include "Rendering/ColorVertexBuffer.h"
 #include "StaticMeshResources.h"
+#include "Templates/Greater.h"       // TGreater：RemoveInstances 按下标从大到小删
+#include "Templates/Sorting.h"       // RadixSort32：实例按 Morton 码排
+#include "UObject/UObjectIterator.h" // TObjectIterator：CVar 变了之后逐个组件换布局
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
 #include "RenderUtils.h"      // UseGPUScene：Nanite 路的平台前提
 #include "RHI.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogCSGpuInstancedMesh, Log, All);
+
+// 经典剔除路的可见缓冲形态（InstanceCullingOptimization.md §5）。建常驻缓冲时读一次、写进 FCSGpuInstancedGpuLayout，
+// 代理照布局走；改它的那一刻所有已注册的组件就地换布局（HandleVisibleSourceIndexCVarChanged），所以也能在运行中做 A/B。
+//
+// 默认 1（2026-10-02 起）：交错 A/B 16 个场景 × 5 个机位 × 3 对，常驻显存 −35% ～ −95%，帧时间持平或略好，
+// 画面逐像素相同（Docs/InstanceCulling/VisibleSourceIndex_20261002.md）。0 留着当对照，不是给产品用的回退。
+static TAutoConsoleVariable<int32> CVarCSGpuInstancedVisibleSourceIndex(
+	TEXT("r.CSGpuInstanced.VisibleSourceIndex"),
+	1,
+	TEXT("UCSGpuInstancedMeshComponent 经典剔除路的可见缓冲形态。\n")
+	TEXT(" 0: 剔除把每个可见实例的完整属性抄进可见缓冲（88 B / 槽 / LOD），绘制读那份副本（旧布局，留作对照）。\n")
+	TEXT(" 1: 剔除只写 4 B 的源行号，绘制经它直接读源实例行（默认）。\n")
+	TEXT("改动会让所有已注册的实例组件重建常驻缓冲与代理（每个组件一次阻塞刷新）。"),
+	FConsoleVariableDelegate::CreateStatic(&UCSGpuInstancedMeshComponent::HandleVisibleSourceIndexCVarChanged),
+	ECVF_Default);
 
 namespace
 {
@@ -131,6 +149,38 @@ bool UCSGpuInstancedMeshComponent::IsNaniteRenderPath() const
 
 	// 替身整条路都建在 GPU-Scene 实例上，平台没有 GPU-Scene 就一个实例都画不出来 —— 那才退回 GPU 剔除路。
 	return UseGPUScene(GMaxRHIShaderPlatform, GMaxRHIFeatureLevel);
+}
+
+bool UCSGpuInstancedMeshComponent::IsClassicShadowCopyActive() const
+{
+	return bClassicShadowOnNanitePath && IsNaniteRenderPath();
+}
+
+void UCSGpuInstancedMeshComponent::SetClassicShadowOnNanitePath(bool bEnable)
+{
+	if (bClassicShadowOnNanitePath == bEnable) return;
+	bClassicShadowOnNanitePath = bEnable;
+	// 不走 Nanite 路时这一条什么都不改（RebuildGpuMesh 在经典路上照常建），省掉一次阻塞的重建。
+	if (!IsNaniteRenderPath()) return;
+	RebuildGpuMesh();   // 未注册时只记脏，OnRegister 补
+	MarkRenderStateDirty();
+}
+
+void UCSGpuInstancedMeshComponent::SetDistanceCullViewOverride(FVector WorldLocation)
+{
+	DistanceCullViewOverride = WorldLocation;
+}
+
+void UCSGpuInstancedMeshComponent::ClearDistanceCullViewOverride()
+{
+	DistanceCullViewOverride.Reset();
+}
+
+bool UCSGpuInstancedMeshComponent::GetDistanceCullViewOverride(FVector& OutWorldLocation) const
+{
+	if (!DistanceCullViewOverride.IsSet()) return false;
+	OutWorldLocation = DistanceCullViewOverride.GetValue();
+	return true;
 }
 
 FBox UCSGpuInstancedMeshComponent::GetBaseLocalBounds() const
@@ -466,11 +516,11 @@ void UCSGpuInstancedMeshComponent::RebuildBaseMeshSnapshot()
 int32 UCSGpuInstancedMeshComponent::AddInstance(const FTransform& InstanceTransform, bool bWorldSpace)
 {
 	const FTransform Local = bWorldSpace ? InstanceTransform.GetRelativeTransform(GetComponentTransform()) : InstanceTransform;
+	EnsureInstanceIdentity();
 	const int32 Index = PerInstanceTransforms.Add(Local);
+	AllocateInstanceSlot(Index);
 
-	RebuildInstanceData();
-	MarkRenderStateDirty();
-	UpdateBounds();
+	NotifyInstancesChanged();
 	return Index;
 }
 
@@ -480,11 +530,15 @@ TArray<int32> UCSGpuInstancedMeshComponent::AddInstances(const TArray<FTransform
 	Indices.Reserve(InstanceTransforms.Num());
 
 	const FTransform ComponentTransform = GetComponentTransform();
-	for (const FTransform& T : InstanceTransforms) Indices.Add(PerInstanceTransforms.Add(bWorldSpace ? T.GetRelativeTransform(ComponentTransform) : T));
+	EnsureInstanceIdentity();
+	for (const FTransform& T : InstanceTransforms)
+	{
+		const int32 Index = PerInstanceTransforms.Add(bWorldSpace ? T.GetRelativeTransform(ComponentTransform) : T);
+		AllocateInstanceSlot(Index);
+		Indices.Add(Index);
+	}
 
-	RebuildInstanceData();
-	MarkRenderStateDirty();
-	UpdateBounds();
+	NotifyInstancesChanged();
 	return Indices;
 }
 
@@ -494,20 +548,30 @@ void UCSGpuInstancedMeshComponent::SetInstances(const TArray<FTransform>& Instan
 
 	const FTransform ComponentTransform = GetComponentTransform();
 	for (const FTransform& T : InstanceTransforms) PerInstanceTransforms.Add(bWorldSpace ? T.GetRelativeTransform(ComponentTransform) : T);
+	// 整套换掉：旧句柄全部失效，新实例按给入顺序占槽 0..N-1 —— 同一份输入每次拿到同一批逐实例随机数
+	// （拖尺寸时生产者每帧 SetInstances 一遍，随机数跟着跳就是一片闪烁）。
+	ResetInstanceIdentity(PerInstanceTransforms.Num());
 
-	RebuildInstanceData();
-	MarkRenderStateDirty();
-	UpdateBounds();
+	NotifyInstancesChanged();
 }
 
 bool UCSGpuInstancedMeshComponent::RemoveInstance(int32 InstanceIndex)
 {
 	if (!PerInstanceTransforms.IsValidIndex(InstanceIndex)) return false;
 
+	EnsureInstanceIdentity();
+	// 槽当场回收、代数 +1：这个实例的句柄从这一行起失效，之后占了这个槽的是另一个实例。
+	const int32 RemovedSlot = PerInstanceSlots[InstanceIndex];
+	++SlotGenerations[RemovedSlot];
+	SlotToIndex[RemovedSlot] = INDEX_NONE;
+	FreeSlots.HeapPush(RemovedSlot);
+
 	PerInstanceTransforms.RemoveAtSwap(InstanceIndex);
-	RebuildInstanceData();
-	MarkRenderStateDirty();
-	UpdateBounds();
+	PerInstanceSlots.RemoveAtSwap(InstanceIndex);
+	// 末尾那个实例被换进了空位：它的**下标**变了，槽（身份、随机数）没变。
+	if (PerInstanceSlots.IsValidIndex(InstanceIndex)) SlotToIndex[PerInstanceSlots[InstanceIndex]] = InstanceIndex;
+
+	NotifyInstancesChanged();
 	return true;
 }
 
@@ -517,14 +581,9 @@ bool UCSGpuInstancedMeshComponent::UpdateInstanceTransform(int32 InstanceIndex, 
 
 	PerInstanceTransforms[InstanceIndex] = bWorldSpace ? NewInstanceTransform.GetRelativeTransform(GetComponentTransform()) : NewInstanceTransform;
 
-	// The GPU upload is what bMarkRenderStateDirty now really gates: it blocks on a render flush, so
-	// a caller updating a run of instances must be able to pay for it once rather than per instance.
-	RebuildInstanceData(bMarkRenderStateDirty);
-	if (bMarkRenderStateDirty)
-	{
-		MarkRenderStateDirty();
-		UpdateBounds();
-	}
+	// bMarkRenderStateDirty=false 只记脏：排序、打包、上传都攒到下一次真要更新的调用（或 EndInstanceUpdate）。
+	// 以前这里仍然当场整份重排打包（O(N log N)），只省了上传 —— 一串 8 个改动付 8 次排序。
+	NotifyInstancesChanged(/*bApplyNow*/ bMarkRenderStateDirty);
 	return true;
 }
 
@@ -540,9 +599,214 @@ bool UCSGpuInstancedMeshComponent::GetInstanceTransform(int32 InstanceIndex, FTr
 void UCSGpuInstancedMeshComponent::ClearInstances()
 {
 	PerInstanceTransforms.Reset();
-	RebuildInstanceData();
+	ResetInstanceIdentity(0);
+	NotifyInstancesChanged();
+}
+
+// -----------------------------------------------------------------------------
+// Instances — 成批改（InstanceCullingOptimization.md §6.1）
+// -----------------------------------------------------------------------------
+
+void UCSGpuInstancedMeshComponent::BeginInstanceUpdate()
+{
+	++InstanceUpdateDepth;
+}
+
+void UCSGpuInstancedMeshComponent::EndInstanceUpdate()
+{
+	if (!ensureMsgf(InstanceUpdateDepth > 0, TEXT("%s: EndInstanceUpdate 没有对应的 BeginInstanceUpdate。"), *GetPathName())) return;
+	if (--InstanceUpdateDepth > 0) return;
+	if (bInstanceUploadPending) ApplyInstanceChanges();
+}
+
+int32 UCSGpuInstancedMeshComponent::RemoveInstances(const TArray<int32>& InstanceIndices)
+{
+	// 从大到小删：RemoveAtSwap 只搬末尾那一个实例，而它的下标一定 ≥ 当前被删的下标 —— 还没删的小下标指的实例一个都不动。
+	TArray<int32> Sorted = InstanceIndices;
+	Sorted.Sort(TGreater<int32>());
+
+	FCSGpuInstancedUpdateScope Scope(this);
+	int32 Removed = 0;
+	int32 Previous = INDEX_NONE;
+	for (const int32 Index : Sorted)
+	{
+		if (Index == Previous) continue;   // 重复的下标：第二次指的已经是被换进来的另一个实例
+		Previous = Index;
+		if (RemoveInstance(Index)) ++Removed;
+	}
+	return Removed;
+}
+
+void UCSGpuInstancedMeshComponent::NotifyInstancesChanged(bool bApplyNow)
+{
+	bInstancePackingDirty = true;
+	bInstanceUploadPending = true;
+	if (bApplyNow && InstanceUpdateDepth == 0) ApplyInstanceChanges();
+}
+
+void UCSGpuInstancedMeshComponent::ApplyInstanceChanges()
+{
+	bInstanceUploadPending = false;
+	// RebuildGpuMesh 开头会补打包（EnsureInstancePacking），所以这里不必无条件重打一遍：
+	// 区间里有人读过 packed 行的话，那一次已经是最新的了。
+	RebuildGpuMesh();
 	MarkRenderStateDirty();
 	UpdateBounds();
+}
+
+void UCSGpuInstancedMeshComponent::EnsureInstancePacking() const
+{
+	if (bInstancePackingDirty) const_cast<UCSGpuInstancedMeshComponent*>(this)->RebuildInstancePacking();
+}
+
+// -----------------------------------------------------------------------------
+// Instances — 稳定句柄（FCSGpuInstanceHandle；InstanceCullingOptimization.md §3.1 / §4.2）
+// -----------------------------------------------------------------------------
+
+FCSGpuInstanceHandle UCSGpuInstancedMeshComponent::GetInstanceHandle(int32 InstanceIndex) const
+{
+	if (!PerInstanceTransforms.IsValidIndex(InstanceIndex)) return FCSGpuInstanceHandle();
+
+	const_cast<UCSGpuInstancedMeshComponent*>(this)->EnsureInstanceIdentity();
+	const int32 Slot = PerInstanceSlots[InstanceIndex];
+	return FCSGpuInstanceHandle(Slot, SlotGenerations[Slot]);
+}
+
+int32 UCSGpuInstancedMeshComponent::GetInstanceIndexFromHandle(FCSGpuInstanceHandle Handle) const
+{
+	if (!Handle.IsSet()) return INDEX_NONE;
+
+	UCSGpuInstancedMeshComponent* MutableThis = const_cast<UCSGpuInstancedMeshComponent*>(this);
+	MutableThis->EnsureInstanceIdentity();
+	// 代数对不上 = 那个实例已经删了（槽可能已经给了别的实例，那是另一个身份）。
+	if (!SlotGenerations.IsValidIndex(Handle.Slot) || SlotGenerations[Handle.Slot] != Handle.Generation) return INDEX_NONE;
+
+	int32 Index = SlotToIndex[Handle.Slot];
+	if (Index != INDEX_NONE && (!PerInstanceSlots.IsValidIndex(Index) || PerInstanceSlots[Index] != Handle.Slot))
+	{
+		// 缓存与真值表对不上：有一条绕过 mutator 改了实例数组的路没把缓存标脏。不猜，按真值表重建一次再答 ——
+		// 把缓存里的下标直接还回去，就是把状态挂到另一个实例身上。
+		MutableThis->bInstanceIdentityCacheDirty = true;
+		MutableThis->EnsureInstanceIdentity();
+		if (!SlotGenerations.IsValidIndex(Handle.Slot) || SlotGenerations[Handle.Slot] != Handle.Generation) return INDEX_NONE;
+		Index = SlotToIndex[Handle.Slot];
+	}
+	return Index;
+}
+
+bool UCSGpuInstancedMeshComponent::RemoveInstanceByHandle(FCSGpuInstanceHandle Handle)
+{
+	const int32 Index = GetInstanceIndexFromHandle(Handle);
+	return Index != INDEX_NONE && RemoveInstance(Index);
+}
+
+bool UCSGpuInstancedMeshComponent::UpdateInstanceTransformByHandle(FCSGpuInstanceHandle Handle, const FTransform& NewInstanceTransform, bool bWorldSpace, bool bMarkRenderStateDirty)
+{
+	const int32 Index = GetInstanceIndexFromHandle(Handle);
+	return Index != INDEX_NONE && UpdateInstanceTransform(Index, NewInstanceTransform, bWorldSpace, bMarkRenderStateDirty);
+}
+
+bool UCSGpuInstancedMeshComponent::GetInstanceTransformByHandle(FCSGpuInstanceHandle Handle, FTransform& OutInstanceTransform, bool bWorldSpace) const
+{
+	const int32 Index = GetInstanceIndexFromHandle(Handle);
+	return Index != INDEX_NONE && GetInstanceTransform(Index, OutInstanceTransform, bWorldSpace);
+}
+
+void UCSGpuInstancedMeshComponent::EnsureInstanceIdentity()
+{
+	const int32 NumInstances = PerInstanceTransforms.Num();
+
+	// O(1) 的不变量：槽表与实例一一对应、缓存与代数表等长、在用的槽数 = 实例数。读盘 / 撤销 / 复制绕过了 mutator，
+	// 那几条路要么把 bInstanceIdentityCacheDirty 置真，要么让下面某一条不成立。
+	if (!bInstanceIdentityCacheDirty
+		&& PerInstanceSlots.Num() == NumInstances
+		&& SlotToIndex.Num() == SlotGenerations.Num()
+		&& SlotToIndex.Num() - FreeSlots.Num() == NumInstances)
+	{
+		return;
+	}
+
+	// --- 真值表自洽吗：每个实例一个槽、槽在范围内、互不重复 ---
+	bool bTruthValid = PerInstanceSlots.Num() == NumInstances;
+	SlotToIndex.Init(INDEX_NONE, SlotGenerations.Num());
+	for (int32 Index = 0; bTruthValid && Index < NumInstances; ++Index)
+	{
+		const int32 Slot = PerInstanceSlots[Index];
+		if (!SlotToIndex.IsValidIndex(Slot) || SlotToIndex[Slot] != INDEX_NONE) bTruthValid = false;
+		else SlotToIndex[Slot] = Index;
+	}
+
+	if (!bTruthValid)
+	{
+		// 2026-10-02 以前存的资产没有槽表（两张表都是空的）：按下标发槽，随机数与改动前逐位相同，不出声。
+		// 别的情形是表被改坏了：同样重发，但此前发出去的句柄指的是哪个实例已经说不清，全部作废并说出来。
+		if (PerInstanceSlots.Num() > 0 || SlotGenerations.Num() > 0)
+		{
+			UE_LOG(LogCSGpuInstancedMesh, Warning,
+				TEXT("%s: 实例身份表与实例数组对不上（%d 个实例、%d 项槽表、%d 个槽），已按下标重发槽号；此前的实例句柄全部失效。"),
+				*GetPathName(), NumInstances, PerInstanceSlots.Num(), SlotGenerations.Num());
+		}
+		for (int32& Generation : SlotGenerations) ++Generation;
+		if (SlotGenerations.Num() < NumInstances) SlotGenerations.SetNumZeroed(NumInstances);
+
+		PerInstanceSlots.SetNumUninitialized(NumInstances);
+		SlotToIndex.Init(INDEX_NONE, SlotGenerations.Num());
+		for (int32 Index = 0; Index < NumInstances; ++Index)
+		{
+			PerInstanceSlots[Index] = Index;
+			SlotToIndex[Index] = Index;
+		}
+	}
+
+	// 空闲槽是个最小堆：新实例永远拿**最小**的空闲槽。这样发槽的结果只取决于两张真值表，
+	// 缓存在读盘 / 撤销后重建过也好、一路增删过来也好，下一个加进来的实例拿到的槽（与随机数）是同一个。
+	FreeSlots.Reset();
+	for (int32 Slot = 0; Slot < SlotToIndex.Num(); ++Slot)
+	{
+		if (SlotToIndex[Slot] == INDEX_NONE) FreeSlots.Add(Slot);   // 升序本身就是合法的最小堆
+	}
+	bInstanceIdentityCacheDirty = false;
+}
+
+void UCSGpuInstancedMeshComponent::ResetInstanceIdentity(int32 NumInstances)
+{
+	// 只看真值表（此刻 PerInstanceTransforms 多半已经换成新的那一批，缓存的不变量不成立）：
+	// 在用的槽里的实例没了，代数 +1。
+	for (const int32 Slot : PerInstanceSlots)
+	{
+		if (SlotGenerations.IsValidIndex(Slot)) ++SlotGenerations[Slot];
+	}
+	if (SlotGenerations.Num() < NumInstances) SlotGenerations.SetNumZeroed(NumInstances);
+
+	PerInstanceSlots.SetNumUninitialized(NumInstances);
+	SlotToIndex.Init(INDEX_NONE, SlotGenerations.Num());
+	for (int32 Index = 0; Index < NumInstances; ++Index)
+	{
+		PerInstanceSlots[Index] = Index;
+		SlotToIndex[Index] = Index;
+	}
+	FreeSlots.Reset();
+	for (int32 Slot = NumInstances; Slot < SlotGenerations.Num(); ++Slot) FreeSlots.Add(Slot);
+	bInstanceIdentityCacheDirty = false;
+}
+
+void UCSGpuInstancedMeshComponent::AllocateInstanceSlot(int32 InstanceIndex)
+{
+	// 调用方先 EnsureInstanceIdentity() 再往 PerInstanceTransforms 里加，所以这里槽表正好缺新加的这一项。
+	check(PerInstanceSlots.Num() == InstanceIndex);
+
+	int32 Slot = INDEX_NONE;
+	if (FreeSlots.Num() > 0)
+	{
+		FreeSlots.HeapPop(Slot, EAllowShrinking::No);
+	}
+	else
+	{
+		Slot = SlotGenerations.Add(0);
+		SlotToIndex.Add(INDEX_NONE);
+	}
+	PerInstanceSlots.Add(Slot);
+	SlotToIndex[Slot] = InstanceIndex;
 }
 
 // -----------------------------------------------------------------------------
@@ -579,6 +843,12 @@ void UCSGpuInstancedMeshComponent::ClearInstanceSourceGPU()
 	RebuildInstanceData();
 	RecreateRenderState_Concurrent();
 	UpdateBounds();
+}
+
+void UCSGpuInstancedMeshComponent::NotifyInstanceSourceChanged()
+{
+	// 只有 Nanite 路的替身关心：它手上是源的一份拷贝，承诺了通知的源只在这里被叫到时才重写 GPU-Scene。
+	if (NaniteComponent) NaniteComponent->NotifyFeedChanged();
 }
 
 // -----------------------------------------------------------------------------
@@ -844,6 +1114,17 @@ FString UCSGpuInstancedMeshComponent::GetMaterialUndrawableReason() const
 			return FString::Printf(TEXT("材质槽 %d（%s）：材质 '%s' 的母材质没有勾 %s（引擎会静默换成默认材质）"),
 				Slot, Source, *Material->GetName(), Usage);
 		}
+		// 编译失败：引擎同样静默换成默认材质，上面两条一条都拦不住（2026-09-29：M_TG_Grass 的花分支在像素着色器里读了
+		// PreSkinnedPosition，两个花 MI 整片灰白）。只看已经出结果的那份 —— 还在编译的不算失败。
+		// 静态开关不同的 MI 各有各的一份资源（一张母材质下草能编、花编不过），所以按实际画的这张 MI 问，不按母材质问。
+		if (const FMaterialResource* Resource = Material->GetMaterialResource(GMaxRHIShaderPlatform))
+		{
+			if (Resource->IsCompilationFinished() && Resource->GetCompileErrors().Num() > 0)
+			{
+				return FString::Printf(TEXT("材质槽 %d（%s）：材质 '%s' 编译失败（引擎会静默换成默认材质）：%s"),
+					Slot, Source, *Material->GetName(), *Resource->GetCompileErrors()[0]);
+			}
+		}
 	}
 	return FString();
 }
@@ -883,7 +1164,7 @@ bool UCSGpuInstancedMeshComponent::ReadLiveInstanceRowsSync(TArray<FVector4f>& O
 	// --- CPU 实例数组：行早就打包好躺在内存里，一次回读都不用付 ---
 	if (!GpuInstanceSource.IsValid() && !GpuPointSource.IsValid())
 	{
-		OutRows = PackedInstances;
+		OutRows = GetPackedInstances();
 		return true;
 	}
 
@@ -932,6 +1213,76 @@ bool UCSGpuInstancedMeshComponent::DebugReadInstanceRandomsSync(TArray<float>& O
 	// 第 4 行的 .w 就是 PerInstanceRandom（LocalVertexFactory.ush 的 OriginBuffer 契约）。
 	for (int32 Base = 0; Base + 4 < Row.Num(); Base += CS_GPU_INSTANCED_ROW_FLOAT4S) OutRandoms.Add(Row[Base + 3].W);
 	return true;
+}
+
+bool UCSGpuInstancedMeshComponent::DebugReadVisibleCountsSync(TArray<int32>& OutPerLod) const
+{
+	OutPerLod.Reset();
+
+	const FCSMeshResidentRef Resident = InstancedGpuMesh ? InstancedGpuMesh->GetResident() : FCSMeshResidentRef();
+	if (!Resident.IsValid() || !Resident->IsAllocated() || !GpuLayout.IsValid()) return false;
+
+	const FCSMeshResident::FStream* Counters = Resident->FindStream(ECSGpuStreamRole::AuxVertex, uint8(ECSGpuInstancedAuxSlot::LodCounters));
+	if (!Counters || !Counters->Pooled.IsValid()) return false;
+
+	// 计数器流固定 CS_GPU_INSTANCED_MAX_LODS 格（见 CSGpuInstancedBuildAuxStreamDescs），只取布局用到的那几级。
+	TArray<uint32> Values;
+	if (!CSMeshReadback::ReadUintBufferSync(Counters->Pooled, CS_GPU_INSTANCED_MAX_LODS, ECSGpuStreamRole::AuxVertex, Values)) return false;
+	if (Values.Num() < int32(GpuLayout.NumLODs)) return false;
+
+	// 游标是 InterlockedAdd 先加后判的，越界的那几次也数进去了 —— 按容量钳，与 BuildArgsCS 写进 args 的是同一个数。
+	OutPerLod.Reserve(int32(GpuLayout.NumLODs));
+	for (uint32 Lod = 0; Lod < GpuLayout.NumLODs; ++Lod) OutPerLod.Add(int32(FMath::Min(Values[int32(Lod)], GpuLayout.InstanceCapacity)));
+	return true;
+}
+
+bool UCSGpuInstancedMeshComponent::DebugReadVisibleSourceIndicesSync(TArray<TArray<int32>>& OutPerLod) const
+{
+	OutPerLod.Reset();
+	if (!GpuLayout.IsValid() || !GpuLayout.bVisibleSourceIndex) return false;
+
+	TArray<int32> Counts;
+	if (!DebugReadVisibleCountsSync(Counts)) return false;
+
+	const FCSMeshResidentRef Resident = InstancedGpuMesh ? InstancedGpuMesh->GetResident() : FCSMeshResidentRef();
+	const FCSMeshResident::FStream* Indices = Resident.IsValid()
+		? Resident->FindStream(ECSGpuStreamRole::AuxVertex, uint8(ECSGpuInstancedAuxSlot::VisibleSourceIndices))
+		: nullptr;
+	if (!Indices || !Indices->Pooled.IsValid()) return false;
+
+	// 整条流读回来再按"第 Lod 级的区段从 Lod × 容量 起"切（与 BatchElement.UserIndex 同一个算法）。
+	const uint32 TotalSlots = GpuLayout.InstanceCapacity * GpuLayout.NumLODs;
+	TArray<uint32> Values;
+	if (!CSMeshReadback::ReadUintBufferSync(Indices->Pooled, TotalSlots, ECSGpuStreamRole::AuxVertex, Values) || Values.Num() < int32(TotalSlots)) return false;
+
+	OutPerLod.SetNum(Counts.Num());
+	for (int32 Lod = 0; Lod < Counts.Num(); ++Lod)
+	{
+		const int32 RegionStart = Lod * int32(GpuLayout.InstanceCapacity);
+		OutPerLod[Lod].Reserve(Counts[Lod]);
+		for (int32 Slot = 0; Slot < Counts[Lod]; ++Slot) OutPerLod[Lod].Add(int32(Values[RegionStart + Slot]));
+	}
+	return true;
+}
+
+void UCSGpuInstancedMeshComponent::HandleVisibleSourceIndexCVarChanged(IConsoleVariable* Variable)
+{
+	// 引擎起来之前（读 ini 设 CVar 的那几次）还没有任何组件，也没有游戏线程可言。
+	if (!Variable || !GIsRunning || !IsInGameThread()) return;
+
+	const bool bWantIndex = Variable->GetInt() != 0;
+	int32 Rebuilt = 0;
+	for (TObjectIterator<UCSGpuInstancedMeshComponent> It; It; ++It)
+	{
+		UCSGpuInstancedMeshComponent* Component = *It;
+		if (!IsValid(Component) || !Component->IsRegistered()) continue;
+		if (!Component->GpuLayout.IsValid() || Component->GpuLayout.bVisibleSourceIndex == bWantIndex) continue;
+		// 常驻流的声明要换（两种布局的可见缓冲不是同一批流），代理要换顶点工厂：重建 + 重建渲染状态。
+		Component->RebuildGpuMesh();
+		Component->MarkRenderStateDirty();
+		++Rebuilt;
+	}
+	UE_LOG(LogCSGpuInstancedMesh, Log, TEXT("r.CSGpuInstanced.VisibleSourceIndex = %d：%d 个实例组件换了可见缓冲布局。"), bWantIndex ? 1 : 0, Rebuilt);
 }
 
 #if WITH_EDITOR
@@ -1131,8 +1482,11 @@ void UCSGpuInstancedMeshComponent::RebuildInstanceData(bool bRebuildGpuMesh)
 
 void UCSGpuInstancedMeshComponent::RebuildInstancePacking()
 {
+	bInstancePackingDirty = false;
+	++InstancePackSerial;
 	PackedInstances.Reset();
 	ClusterBounds.Reset();
+	PackedRowSlots.Reset();
 
 	if (GpuInstanceSource.IsValid())
 	{
@@ -1194,22 +1548,32 @@ void UCSGpuInstancedMeshComponent::RebuildInstancePacking()
 	const FVector3f Origin = FVector3f(TotalBounds.Min);
 	const FVector3f Size = FVector3f(TotalBounds.GetSize()).ComponentMax(FVector3f(UE_KINDA_SMALL_NUMBER));
 
-	TArray<int32> Order;
+	// 基数排序（稳定：同码的按数组下标）。以前是对下标数组做比较排序、每次比较间接读一次码表，是单次增删里
+	// 最大的一块：10 万个实例一次增删 13.5 ms → 7.3 ms（2026-10-02 实测，Docs/InstanceCulling/Step3_20261002.md）。
+	struct FMortonEntry
+	{
+		uint32 Code;
+		int32 Index;
+	};
+	TArray<FMortonEntry> Unsorted;
+	TArray<FMortonEntry> Order;
+	Unsorted.SetNumUninitialized(NumInstances);
 	Order.SetNumUninitialized(NumInstances);
-	TArray<uint32> Codes;
-	Codes.SetNumUninitialized(NumInstances);
 	for (int32 i = 0; i < NumInstances; ++i)
 	{
-		Order[i] = i;
-		Codes[i] = MortonCode((Centres[i] - Origin) / Size);
+		Unsorted[i].Code = MortonCode((Centres[i] - Origin) / Size);
+		Unsorted[i].Index = i;
 	}
-	Order.Sort([&Codes](int32 A, int32 B) { return Codes[A] < Codes[B]; });
+	RadixSort32(Order.GetData(), Unsorted.GetData(), uint32(NumInstances), [](const FMortonEntry& Entry) { return Entry.Code; });
 
 	const int32 ClusterSize = FMath::Clamp(InstancesPerCluster, 1, 4096);
 	const int32 NumClusters = FMath::DivideAndRoundUp(NumInstances, ClusterSize);
 
 	PackedInstances.SetNumUninitialized(NumInstances * CS_GPU_INSTANCED_ROW_FLOAT4S);
 	ClusterBounds.SetNumUninitialized(NumClusters);
+	// 行 → 稳定槽。逐实例随机数按槽取、不按数组下标取：RemoveAtSwap 把末尾实例换进空位，按下标取的话它的随机数就变了。
+	EnsureInstanceIdentity();
+	PackedRowSlots.SetNumUninitialized(NumInstances);
 
 	for (int32 Cluster = 0; Cluster < NumClusters; ++Cluster)
 	{
@@ -1219,17 +1583,19 @@ void UCSGpuInstancedMeshComponent::RebuildInstancePacking()
 		FVector3f Min(UE_BIG_NUMBER), Max(-UE_BIG_NUMBER);
 		for (int32 Slot = 0; Slot < Count; ++Slot)
 		{
-			const int32 Src = Order[First + Slot];
+			const int32 Src = Order[First + Slot].Index;
 			const FTransform& T = PerInstanceTransforms[Src];
 			const FMatrix44f M = FMatrix44f(T.ToMatrixWithScale());
 
 			// Rows of the instance-to-component 3x3 + the origin, exactly the layout
 			// LocalVertexFactory.ush's GetInstanceTransform() reconstructs.
 			const int32 Dst = (First + Slot) * CS_GPU_INSTANCED_ROW_FLOAT4S;
+			const int32 StableSlot = PerInstanceSlots[Src];
+			PackedRowSlots[First + Slot] = StableSlot;
 			PackedInstances[Dst + 0] = FVector4f(M.M[0][0], M.M[0][1], M.M[0][2], 0.0f);
 			PackedInstances[Dst + 1] = FVector4f(M.M[1][0], M.M[1][1], M.M[1][2], 0.0f);
 			PackedInstances[Dst + 2] = FVector4f(M.M[2][0], M.M[2][1], M.M[2][2], 0.0f);
-			PackedInstances[Dst + 3] = FVector4f(M.M[3][0], M.M[3][1], M.M[3][2], InstanceRandom(Src));
+			PackedInstances[Dst + 3] = FVector4f(M.M[3][0], M.M[3][1], M.M[3][2], InstanceRandom(StableSlot));
 			PackedInstances[Dst + 4] = FVector4f(Centres[Src], Radii[Src]);
 
 			Min = Min.ComponentMin(Centres[Src] - FVector3f(Radii[Src]));
@@ -1277,6 +1643,10 @@ void UCSGpuInstancedMeshComponent::ReleaseGpuMesh()
 
 void UCSGpuInstancedMeshComponent::RebuildGpuMesh()
 {
+	// 成批区间里 / bMarkRenderStateDirty=false 攒下的改动还没打包的话，先补上：传上去的行必须是实例数组此刻的样子，
+	// 不是上一次打包时的样子（CVar 换布局、重注册这些不经 mutator 的入口也会走到这里）。
+	EnsureInstancePacking();
+
 	// Deferred to OnRegister while unregistered. Nothing can draw an unregistered component, and
 	// this blocks on a render flush — PostLoad rebuilds every one of these in the level, and a
 	// render round trip each would show up as load time for no visible result.
@@ -1295,15 +1665,24 @@ void UCSGpuInstancedMeshComponent::RebuildGpuMesh()
 
 	if (IsNaniteRenderPath())
 	{
-		// Nanite 路不画自己的常驻网格：基础网格是资产自己的 Nanite 数据，实例进 GPU-Scene。上一种模式
-		// 留下的常驻缓冲按"没东西画"的口径还回去（没分配时 ReleaseGpuMesh 是空操作，不会每次都刷新）。
-		ReleaseGpuMesh();
 		UpdateNaniteComponent();
-		bGpuMeshDirty = false;
-		return;
+		if (!IsClassicShadowCopyActive())
+		{
+			// Nanite 路不画自己的常驻网格：基础网格是资产自己的 Nanite 数据，实例进 GPU-Scene。上一种模式
+			// 留下的常驻缓冲按"没东西画"的口径还回去（没分配时 ReleaseGpuMesh 是空操作，不会每次都刷新）。
+			ReleaseGpuMesh();
+			bGpuMeshDirty = false;
+			return;
+		}
+		// 影子副本（bClassicShadowOnNanitePath）：替身画主通道，下面照经典路建常驻网格与剔除，代理只投影。
+		// 快照读的是资产的回退 LOD —— 编辑器里总读得到，编辑器外要资产开 Allow CPU Access（读不到时下面
+		// 按"没东西画"退掉，只是没有影子，主通道不受影响）。
 	}
-	// 从 Nanite 切回来，或 BaseMesh 换成了外部快照：替身不该再画。
-	ReleaseNaniteComponent();
+	else
+	{
+		// 从 Nanite 切回来，或 BaseMesh 换成了外部快照：替身不该再画。
+		ReleaseNaniteComponent();
+	}
 
 	const bool bPackedGpuSource = GpuInstanceSource.IsValid();
 	const bool bPointGpuSource = GpuPointSource.IsValid();
@@ -1339,6 +1718,8 @@ void UCSGpuInstancedMeshComponent::RebuildGpuMesh()
 		ReleaseGpuMesh();
 		return;
 	}
+	// 可见缓冲的形态是布局的一部分：这里定下来，声明常驻流、建代理、剔除都只看布局，不再各自去读 CVar。
+	NewLayout.bVisibleSourceIndex = CVarCSGpuInstancedVisibleSourceIndex.GetValueOnGameThread() != 0;
 
 	if (!InstancedGpuMesh) InstancedGpuMesh = NewObject<UCSMesh>(this);
 	// One entry, and not the material anything draws with — the proxy draws each section with the
@@ -1467,6 +1848,13 @@ void UCSGpuInstancedMeshComponent::RebuildGpuMesh()
 		FRDGBufferRef MaterialIds = Context.MaterialIds();
 		if (MaterialIds) AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(FRDGBufferUAVDesc(MaterialIds, PF_R32_UINT)), 0u);
 
+		// 「可见源行号」布局的那一行零（生产者没给 custom data 时材质读它）：池里拿出来的 buffer 不保证是零，
+		// 而它存在的全部意义就是"读到 0"。旧布局没有这条流，Find 返回空。
+		if (FRDGBufferRef CustomDataFallback = Context.Find(ECSGpuStreamRole::AuxVertex, uint8(ECSGpuInstancedAuxSlot::CustomDataFallback)))
+		{
+			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(FRDGBufferUAVDesc(CustomDataFallback, PF_R32_UINT)), 0u);
+		}
+
 		FRDGBufferRef SourceInstances = Context.Find(ECSGpuStreamRole::AuxVertex, uint8(ECSGpuInstancedAuxSlot::SourceInstances));
 		FRDGBufferRef ClusterBoundsBuffer = Context.Find(ECSGpuStreamRole::AuxVertex, uint8(ECSGpuInstancedAuxSlot::ClusterBounds));
 		if (!SourceInstances || !ClusterBoundsBuffer) return;
@@ -1568,6 +1956,8 @@ void UCSGpuInstancedMeshComponent::PostLoad()
 	Super::PostLoad();
 
 	if (BaseMesh) BaseMesh->ConditionalPostLoad();
+	// 两张身份表是刚读进来的，缓存还是构造时的空壳：下面这次重建的第一步就会按真值表对齐（老资产没有槽表，在那里补发）。
+	bInstanceIdentityCacheDirty = true;
 	RebuildBaseMeshSnapshot();
 }
 
@@ -1586,8 +1976,23 @@ void UCSGpuInstancedMeshComponent::PostEditChangeProperty(FPropertyChangedEvent&
 		RebuildInstanceData();
 		MarkRenderStateDirty();
 	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(UCSGpuInstancedMeshComponent, bClassicShadowOnNanitePath))
+	{
+		// 影子副本要不要常驻网格变了：建 / 还一套经典缓冲（Nanite 路之外这一条什么都不改）。
+		RebuildGpuMesh();
+		MarkRenderStateDirty();
+	}
 
 	Super::PostEditChangeProperty(PropertyChangedEvent);
+}
+
+void UCSGpuInstancedMeshComponent::PostEditUndo()
+{
+	Super::PostEditUndo();
+	// 事务把 PerInstanceTransforms / PerInstanceSlots / SlotGenerations 整套换回去了，没经过任何 mutator。
+	// 这里只把缓存标脏（下一次查询或增删时按真值表重建），不重打 packed 行：那要一次阻塞刷新，
+	// 而撤销任何一个 actor 属性都会走到它的每一个组件的这个钩子上。
+	bInstanceIdentityCacheDirty = true;
 }
 
 void UCSGpuInstancedMeshComponent::BindBaseMeshRebuildEvent()
@@ -1638,8 +2043,9 @@ void UCSGpuInstancedMeshComponent::HandleDeferredBaseMeshRefresh(UWorld* InWorld
 FPrimitiveSceneProxy* UCSGpuInstancedMeshComponent::CreateSceneProxy()
 {
 	if (GMaxRHIFeatureLevel < ERHIFeatureLevel::SM5) return nullptr;
-	// Nanite 路画的是替身（UCSGpuInstancedNaniteComponent），本组件自己不进场景。
-	if (IsNaniteRenderPath()) return nullptr;
+	// Nanite 路画的是替身（UCSGpuInstancedNaniteComponent），本组件自己不进场景 —— 除非要一份只投影的经典副本，
+	// 而那份在不投影时也不必存在（改 CastShadow 会重建渲染状态，到时再建）。
+	if (IsNaniteRenderPath() && !(IsClassicShadowCopyActive() && CastShadow && bCastDynamicShadow)) return nullptr;
 
 	// The one gate now, and it stands for all the old ones: RebuildGpuMesh releases the buffers
 	// unless there is a valid base mesh, a non-empty instance set and a layout the mesh accepted, so
@@ -1675,6 +2081,8 @@ FPrimitiveSceneProxy* UCSGpuInstancedMeshComponent::CreateSceneProxy()
 	// The per-frame cull passes are driven by a shared view extension; create it here rather than
 	// from the proxy so registration stays on the game thread.
 	FCSGpuInstancedMeshSceneProxy::EnsureCullServiceStarted();
+	// 「可见源行号」布局画的是引擎着色器的打补丁副本：第一次用到时核一遍它是不是照着这台机器的引擎生成的。
+	if (GpuLayout.bVisibleSourceIndex && IsInGameThread()) FCSGpuInstancedIndexedVertexFactory::VerifyShaderSourceUpToDate();
 
 	return new FCSGpuInstancedMeshSceneProxy(this, Resident, DrawMaterials);
 }

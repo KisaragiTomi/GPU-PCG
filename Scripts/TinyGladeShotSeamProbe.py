@@ -135,7 +135,7 @@ def log_shell_state(ground):
     log("drawable=%s reason='%s' displaces=%s" %
         (ok, reason, ground.get_rock_shell_displace_count()))
     for name in ("RockShellSlopeLo", "RockShellSlopeHi", "RockShellCellRelief",
-                 "RockShellCellJitter", "RockShellNoiseAmount", "RockShellPatternScale",
+                 "RockShellCellJitter", "RockShellNoiseAmount", "RockShellCellSize", "RockShellBoundaryPoints",
                  "RockShellRoadSink", "RockShellRoadFade", "RockShellRoadBlurRadius"):
         log("param %-24s = %s" % (name, ground.get_editor_property(name)))
     mat = ground.get_editor_property("RockShellMaterial")

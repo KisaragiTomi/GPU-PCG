@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-EditHouse（`ACSHouseActor::EnterResizeMode`）的推墙抓手与楼梯拉宽用的 **TG 原版标识箭头**：把 TG 的
-`flat_arrow`、它的描边 `flat_arrow_outline`（以及备用的竖箭头 `brush_arrow_flat_single_up`）烘成静态网格。
+EditHouse（`ACSHouseActor::EnterResizeMode`）的推墙抓手、脊长抓手与楼梯拉宽用的 **TG 原版标识箭头**：把 TG 的
+`flat_arrow`、它的描边 `flat_arrow_outline`、脊长那只 `brush_arrow_flat_single_foward`（以及备用的竖箭头
+`brush_arrow_flat_single_up`）烘成静态网格。
 
 --- 为什么是这几张 ----------------------------------------------------------------
 - `flat_arrow` + `flat_arrow_outline`：TG 矩形房子拉尺寸（`rectangle/ui_modes/edit_dims.rs`，signifier id
   `rectangle__edit_dims_arrow_`）画的那一对，本体 + 外扩一圈、更薄的描边；TG 楼梯拉宽（`ui_focus_stairs`）也用它。
+- `brush_arrow_flat_single_foward`（TG 原文如此拼写）：TG 拖脊长（`ui_edit_roof_ridge_length.rs`，signifier id
+  `edit_roof_ridge_signifier`）在脊两端各画一只，尾在脊端外 0.2 m、放大 2 倍。TG 没给它做描边网格。
+  本项目的脊长抓手 `ACSHouseRidgeHandleActor` 用它（2026-10-02，证据 `Docs/TinyGlade/RE_RoofRidgeGable.md`）。
 - `brush_arrow_flat_single_up`：TG 聚焦模式的墙高 / 抬升控件（`ui_focus_mode_shape_height`，上下各一只，下面那只翻转）
   与屋顶高度控件（`ui_edit_roof_ridge_and_height_focused`，一只、放大 1.5）。TG 没给它做描边网格。
   ⚠️ 本项目的高度抓手 2026-09-22 试过这一版，用户判不如原先的四条框、已还原 —— 这张网格当前无人引用，留着备用。
@@ -15,9 +19,10 @@ EditHouse（`ACSHouseActor::EnterResizeMode`）的推墙抓手与楼梯拉宽用
 源 json 原样拷在 `Docs/TinyGlade/evidence/<名字>-source.json`（TG 米、Y 朝上、只有位置），
 脚本只读这几份，不碰 `D:/MyProject/Tiny Glade`。
 
-轴向沿用 TinyGladeAsset 的导入口径 **UE (X, Y, Z) = TG (X, Z, Y) × 100**（卷二「轴向换算」）。换完之后三张网格
+轴向沿用 TinyGladeAsset 的导入口径 **UE (X, Y, Z) = TG (X, Z, Y) × 100**（卷二「轴向换算」）。换完之后几张网格
 共用一套轴语义，C++ 侧一律 `MakeFromYZ(Facing, Up)` 摆：
 - `flat_arrow(_outline)`：躺平、尾在原点、**头指局部 +Y**、+Z 是厚度方向（Facing = 外法线）；
+- `brush_arrow_flat_single_foward`：同样躺平、尾在原点、**头指局部 +Y**（Facing = 脊端朝外的那个方向），长 57.4 cm、宽 46.4 cm；
 - `brush_arrow_flat_single_up`：竖板、**板面法线是局部 +Y**、箭根在原点、**头指 +Z**（Facing = 朝相机）。
 
 换 Y/Z 是一次镜像（行列式 −1）。源绕序是「从外看顺时针」（有符号体积 < 0，与 `roof_tile-source.json`
@@ -54,6 +59,7 @@ ARROWS = [
     ("flat_arrow", "flat_arrow-source.json", True),
     ("flat_arrow_outline", "flat_arrow_outline-source.json", False),
     ("brush_arrow_flat_single_up", "brush_arrow_flat_single_up-source.json", True),
+    ("brush_arrow_flat_single_foward", "brush_arrow_flat_single_foward-source.json", True),
 ]
 
 _failed = []
@@ -145,20 +151,29 @@ def write_asset(name, dynamic):
     return mesh
 
 
-def verify(name, mesh, positions, want_tris):
-    """回读资产：包围盒必须逐位等于换轴后的源数据，三角数必须等于源三角数。"""
+def mismatch(mesh, positions, want_tris):
+    """资产与换轴后的源数据差在哪：包围盒（0.05 cm 内）与三角数。一致返回空串。"""
     box = mesh.get_bounding_box()
     want_lo = [min(p[k] for p in positions) for k in range(3)]
     want_hi = [max(p[k] for p in positions) for k in range(3)]
     got_lo = (box.min.x, box.min.y, box.min.z)
     got_hi = (box.max.x, box.max.y, box.max.z)
     if any(abs(g - w) > 0.05 for g, w in zip(got_lo + got_hi, want_lo + want_hi)):
-        fail("%s 包围盒 %s..%s，期望 %s..%s" % (name, got_lo, got_hi, want_lo, want_hi))
+        return "包围盒 %s..%s，期望 %s..%s" % (got_lo, got_hi, want_lo, want_hi)
     tris = mesh.get_num_triangles(0)
     if tris != want_tris:
-        fail("%s 三角数 %d，期望 %d" % (name, tris, want_tris))
+        return "三角数 %d，期望 %d" % (tris, want_tris)
+    return ""
+
+
+def verify(name, mesh, positions, want_tris):
+    """回读资产：包围盒必须逐位等于换轴后的源数据，三角数必须等于源三角数。"""
+    problem = mismatch(mesh, positions, want_tris)
+    if problem:
+        fail("%s %s" % (name, problem))
+    box = mesh.get_bounding_box()
     log("%s: %d 三角，包围盒 (%.1f, %.1f, %.1f)..(%.1f, %.1f, %.1f) cm"
-        % (name, tris, got_lo[0], got_lo[1], got_lo[2], got_hi[0], got_hi[1], got_hi[2]))
+        % (name, mesh.get_num_triangles(0), box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z))
 
 
 for name, source, closed in ARROWS:
@@ -169,6 +184,14 @@ for name, source, closed in ARROWS:
         if volume >= 0.0:
             fail("%s 换轴后的有符号体积 %.1f cm³ 应为负：绕序没翻对" % (name, volume))
     dynamic, tri_count = build_dynamic_mesh(positions, triangles)
+    # 已经烘过、且与源一致的不重写：重存一遍几何一个字节不变，资产文件却会变（内容仓里就多一条无谓的改动）。
+    # 往 ARROWS 里加一张新网格时，只有它会被写出来。
+    path = "%s/%s" % (PKG, name)
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        existing = unreal.load_asset(path)
+        if existing and not mismatch(existing, positions, tri_count):
+            log("%s: 已是最新，跳过" % name)
+            continue
     mesh = write_asset(name, dynamic)
     if mesh:
         verify(name, mesh, positions, tri_count)

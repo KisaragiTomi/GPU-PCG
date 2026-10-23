@@ -32,6 +32,17 @@ uint           WritePrimitiveId;     // FGPUSceneWriteDelegateParams::Persistent
 uint           WritePayloadFlags;    // FGPUSceneWriteDelegateParams::PackedInstanceSceneDataFlags
 uint           WriteCustomDataCount; // FGPUSceneWriteDelegateParams::NumCustomDataFloats
 
+// ── 距离带（2026-09-29）：与经典路 InstanceCullCS 同一条判据 ─────────────────────────
+// 引擎的 Nanite 距离剔除只有硬边（一个图元一对 min / max），没有逐实例的过渡带，近 / 远两档交界会出一道圈；
+// 所以带内的抖动在这里做：每个实例按自己的逐实例随机数（Origin.w）把边界往里收 [0, CullFade]，
+// 收进来之后越界的写成 HIDDEN。视点只有一个（游戏线程给的上一帧相机），不是逐视图 —— 阴影与主视图因此一致。
+uint           bCullBand;            // 0 = 不抖（没有过渡带，或游戏线程拿不到视点）
+float3         CullViewLocal;        // 视点，组件空间
+float          CullComponentScale;   // 组件最大轴缩放：组件空间距离 → 世界 cm
+float          CullStart;            // 近于它的不画（0 = 不限）
+float          CullEnd;              // 远于它的不画（0 = 不限）
+float          CullFade;             // 过渡带宽（cm）
+
 [numthreads(NUM_THREADS_PER_GROUP, 1, 1)]
 void WriteInstancesCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 {
@@ -66,6 +77,20 @@ void WriteInstancesCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupInde
 	{
 		WriteInstancePrimitiveIdAndFlags(InstanceId, WritePrimitiveId, INSTANCE_SCENE_DATA_FLAG_HIDDEN);
 		return;
+	}
+
+	if (bCullBand != 0u)
+	{
+		// 距离量到剔除球心（经典路同一个点）；点云源打包时没有球（半径 0），退到原点。
+		const float4 Sphere = SrcInstances[Base + 4u];
+		const float3 Centre = Sphere.w > 0.0f ? Sphere.xyz : Origin.xyz;
+		const float DistWorld = length(Centre - CullViewLocal) * CullComponentScale;
+		const float Pull = CullFade * saturate(Origin.w);
+		if ((CullEnd > 0.0f && DistWorld > CullEnd - Pull) || (CullStart > 0.0f && DistWorld < CullStart - Pull))
+		{
+			WriteInstancePrimitiveIdAndFlags(InstanceId, WritePrimitiveId, INSTANCE_SCENE_DATA_FLAG_HIDDEN);
+			return;
+		}
 	}
 
 	// 行向量约定，与 LocalVertexFactory.ush 的 GetInstanceTransform() 是同一个矩阵：三行基 + 第四行原点。

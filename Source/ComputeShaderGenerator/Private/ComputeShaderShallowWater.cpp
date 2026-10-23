@@ -313,7 +313,7 @@ bool ACSShallowWaterCapture::CleanRenderTargets()
 	const FLinearColor ResultVelHeightClearColor(0, 0, -9999, 0);
 	const FLinearColor ResultDepthWetClearColor(-9999, -9999, -9999, -9999);
 	const FLinearColor SmoothHeightClearColor(0, 0, 0, 0);
-	const FLinearColor SceneDepthClearColor(GetActorLocation().Z + MaxHeight + 9000.0f, 0, 0, 1);
+	const FLinearColor SceneDepthClearColor(GetActorLocation().Z + MaxHeight + 9000.0f, 0, 0, 0);
 
 	if (!RT_DebugView || !RT_VelocityHeight || !RT_ResultVelHeight || !RT_ResultDepthWet || !RT_SmoothHeight)
 	{
@@ -594,10 +594,6 @@ void ACSShallowWaterCapture::ShallowWaterSolverSoucePoint(int32 InIteration)
 			SourceData.Add(FVector4(Location.X, Location.Y, Location.Z, Actor->GetActorScale3D().X / CaptureSize * 500));
 		}
 	}
-	if (SourceData.Num() == 0)
-	{
-		return;
-	}
 
 	TArray<FVector4f> SourceUVRads;
 	FBoxSphereBounds Bounds = GeneratorBounds->Bounds;
@@ -647,13 +643,16 @@ void ACSShallowWaterCapture::ShallowWaterSolverSoucePoint(int32 InIteration)
 	const float CapturedSpikeClampHeight = SpikeClampHeight;
 	const int32 CapturedCloseBound = CloseBound;
 	const int32 CapturedInIteration = InIteration;
+	const int32 CapturedSourceCount = SourceUVRads.Num();
+	// Restored water must keep evolving without an emitter; bind a dummy SRV for an empty source list.
+	if (SourceUVRads.IsEmpty()) SourceUVRads.Add(FVector4f(0, 0, 0, 0));
 
 	SCOPE_CYCLE_COUNTER(STAT_CSSW_EnqueueRender);
 	ENQUEUE_RENDER_COMMAND(SceneDrawCompletion)(
 	[R_SceneDepth, R_DebugView, R_VelocityHeight, R_ResultVelHeight, R_ResultDepthWet, R_ResultSmoothHeight, R_TileMask,
 	 SourceUVRads = MoveTemp(SourceUVRads), CapturedWaterfallExpansionIterations,
 	 CapturedDT, CapturedFriction, CapturedSeaLevel, ActorLocation, CapturedAdvectFoam, CapturedFoamFadeSpeed,
-	 CapturedMaxWaterRisePerFrame, CapturedSpikeClampHeight, CapturedCloseBound, CapturedInIteration, TileMaskWidth, TileMaskHeight
+	 CapturedMaxWaterRisePerFrame, CapturedSpikeClampHeight, CapturedCloseBound, CapturedInIteration, TileMaskWidth, TileMaskHeight, CapturedSourceCount
 	 ](FRHICommandListImmediate& RHICmdList)
 	{
 		FRDGBuilder GraphBuilder(RHICmdList);
@@ -711,7 +710,7 @@ void ACSShallowWaterCapture::ShallowWaterSolverSoucePoint(int32 InIteration)
 			PassParameters->MaxWaterRisePerFrame = CapturedMaxWaterRisePerFrame;
 			PassParameters->SpikeClampHeight = CapturedSpikeClampHeight;
 			PassParameters->CloseBound = CapturedCloseBound;
-			PassParameters->BCount_SourceUVRads = SourceUVRads.Num();
+			PassParameters->BCount_SourceUVRads = CapturedSourceCount;
 			PassParameters->RWB_SourceUVRads = SourceUVRadsSRV;
 			PassParameters->DispatchExpandPixels = ComputeDispatchExpandPixels(CapturedInIteration, TextureSize.X);
 			BindCompactTileBuffers(PassParameters, CompactBuffers);
@@ -1045,7 +1044,8 @@ void ACSShallowWaterCapture::CaptureAll()
 	if (!CheckAndCreateTexture_SWSourcePoint()) return;
 
 	const int32 SafeTextureSize = FMath::Max(16, TextureSize);
-	const FLinearColor SceneDepthClearColor(GetActorLocation().Z + MaxHeight + 9000.0f, 0, 0, 1);
+	// Alpha stays zero when nothing is captured; the heightmap rasterizer writes one.
+	const FLinearColor SceneDepthClearColor(GetActorLocation().Z + MaxHeight + 9000.0f, 0, 0, 0);
 
 	if (!RT_SceneDepth)
 	{

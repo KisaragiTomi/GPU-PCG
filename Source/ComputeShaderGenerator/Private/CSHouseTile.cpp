@@ -117,7 +117,7 @@ float CSHouseTile_ColumnPitch(const CSHouseTile::FParams& Params)
 }
 
 /**
- * 坡长（檐口外沿 → 屋面最高处，沿坡面量），所有坡面共用同一个值（同坡度、同外挑）。
+ * 坡长（檐口外沿 → 屋面最高处，沿坡面量），**倍率为 1 的坡面**共用同一个值（同坡度、同外挑）。
  * 到不了最高处的坡面（矩形的短边面、多边形上先收尖的面）在后面几排自然区间为空。
  */
 float CSHouseTile_SlopeLength(const FCSRoofDesc& Roof, double MaxInset)
@@ -125,37 +125,65 @@ float CSHouseTile_SlopeLength(const FCSRoofDesc& Roof, double MaxInset)
 	const float CosP = FMath::Max(Roof.CosPitch(), UE_KINDA_SMALL_NUMBER);
 	return (float(MaxInset) + FMath::Max(Roof.Overhang, 0.0f)) / CosP;
 }
+
+/**
+ * 倍率不是 1 的坡面自己的坡长：脊长调过之后（`FCSRoofDesc::EdgeSteep`）两端的坡面有自己的坡度与进深。
+ * 倍率为 1 的面别走这里 —— 见 `BuildPlan` 里「等坡度那一组值」的注释。
+ */
+float CSHouseTile_FaceSlopeLength(const FCSRoofDesc& Roof, int32 Side, double MaxInset)
+{
+	const float CosP = FMath::Max(Roof.FaceCos(Side), UE_KINDA_SMALL_NUMBER);
+	return (float(Roof.FaceInset(Side, MaxInset)) + FMath::Max(Roof.Overhang, 0.0f)) / CosP;
+}
+
+/** 负外挑按 0 铺（矩形时代的口径）：求值器逐处读 `Overhang`，在入口夹一次比在每个式子里各夹一次稳。 */
+const FCSRoofDesc& CSHouseTile_ClampOverhang(const FCSRoofDesc& Roof, FCSRoofDesc& Storage)
+{
+	if (Roof.Overhang >= 0.0f) return Roof;
+	Storage = Roof;
+	Storage.Overhang = 0.0f;
+	return Storage;
+}
 }
 
 namespace CSHouseTile
 {
-void BuildPlan(const FCSRoofDesc& Roof, const FTransform& World, const FParams& InParams, TArray<FRecord>& OutTiles)
+void BuildPlan(const FCSRoofDesc& InRoof, const FTransform& World, const FParams& InParams, TArray<FRecord>& OutTiles)
 {
 	OutTiles.Reset();
 
+	FCSRoofDesc ClampedRoof;
+	const FCSRoofDesc& Roof = CSHouseTile_ClampOverhang(InRoof, ClampedRoof);
 	const FCSHouseFootprint& Footprint = Roof.Footprint;
 	const int32 NumFaces = Footprint.NumEdges();
 	if (Roof.bFlat || !Footprint.IsValidFootprint()) return;
 
 	FCSRoofSkeleton Skeleton;
-	CSHouseRoof_BuildSkeleton(Footprint, double(FMath::Max(Roof.Overhang, 0.0f)), Skeleton);
+	CSHouseRoof_BuildSkeleton(Roof, Skeleton);
 	// 最大内切圆半径不到 1 cm 的"屋顶"不铺（矩形时代的「任一半边 ≤ 1 cm」）。
 	if (Skeleton.MaxInset <= 1.0) return;
 
 	FParams Params = InParams;
 	Params.Axes = CSHouseTile_SanitizeAxes(Params.Axes);
 
-	const float CosP = FMath::Max(Roof.CosPitch(), UE_KINDA_SMALL_NUMBER);
-	const float SinP = Roof.SinPitch();
+	// 等坡度那一组值：倍率为 1 的坡面（脊长没调过的屋面上是全部坡面）共用。
+	// ⚠️ 这一段的**写法**是 2026-10-02 之前的原样，别整理：三个三角函数紧挨着取、排数与排距在面循环之外算一次。
+	// 引擎开着 /fp:fast，同一条式子换个写法编译器可以给出差 1 ulp 的结果（sin / cos 同参数紧挨着时并成一次 sincos，
+	// 35° 的 cos 因此是 0.819151998 而不是单独取时的 0.819152057）；而演示房短边面的排宽恰好落在 `RoundToInt` 的
+	// .5 边界上（337.5 / 45 = 7.5）—— 差这 1 ulp，600 × 400 的房子就从 210 片瓦变成 206 片。
+	// `House.TileEqualPitchMatchesLegacy` 拿冻结的旧实现逐位守着。
+	const float PitchCos = FMath::Max(Roof.CosPitch(), UE_KINDA_SMALL_NUMBER);
+	const float PitchSin = Roof.SinPitch();
 	const float TanP = Roof.TanPitch();
-	const float Overhang = FMath::Max(Roof.Overhang, 0.0f);
-	const float SlopeLen = CSHouseTile_SlopeLength(Roof, Skeleton.MaxInset);
-	if (SlopeLen <= 1.0f) return;
+	const float Overhang = Roof.Overhang;
+	const float PitchSlopeLen = CSHouseTile_SlopeLength(Roof, Skeleton.MaxInset);
+	if (PitchSlopeLen <= 1.0f) return;
 
-	// 排：沿坡面**等分**（目标间距只决定份数）。所有坡面共用同一份排数与排距 ⇒ 每一排的高度
-	// 在每个面上逐位相同，角斜脊上两侧的瓦因此是对齐的，不会错半排。
-	const int32 Rows = FMath::Clamp(FMath::RoundToInt(SlopeLen / CSHouseTile_RowPitch(Params)), 1, CSHouseTile_MaxRows);
-	const double RowStep = double(SlopeLen) / double(Rows);
+	// 排：沿坡面**等分**（目标间距只决定份数）。倍率为 1 的坡面共用同一份排数与排距 ⇒ 每一排的高度
+	// 在这些面上逐位相同，角斜脊上两侧的瓦因此是对齐的，不会错半排。
+	const float RowPitch = CSHouseTile_RowPitch(Params);
+	const int32 PitchRows = FMath::Clamp(FMath::RoundToInt(PitchSlopeLen / RowPitch), 1, CSHouseTile_MaxRows);
+	const double PitchRowStep = double(PitchSlopeLen) / double(PitchRows);
 	const float ColumnPitch = CSHouseTile_ColumnPitch(Params);
 
 	const int32 AxisUp = Params.Axes.UpSlope;
@@ -181,12 +209,27 @@ void BuildPlan(const FCSRoofDesc& Roof, const FTransform& World, const FParams& 
 
 	for (int32 Side = 0; Side < NumFaces; ++Side)
 	{
+		// 山墙边没有坡面：那一头由墙自己升上去（`CSHouseRoof_BuildGableProfile`），屋面只有两侧的坡。
+		if (Roof.IsGable(Side)) continue;
+
 		// 外法线与沿边方向。⚠️ 沿边取 `(n.y, -n.x)` 而不是 `(-n.y, n.x)`：只有这一支能让
 		// (上坡, 沿排, 法线) 成右手基，另一支差一个镜像。逆时针折线上它恰好是 −U。
 		const FCSHouseEdgeFrame Edge = CSHouse_GetEdge(Side, Footprint, 0.0f);
 		if (Edge.Len <= 0.0f) continue;
 		const FVector2D Outward(-Edge.In.X, -Edge.In.Y);
 		const FVector2D Along(Outward.Y, -Outward.X);
+
+		// 这个坡面的坡度、坡长与分排。倍率为 1 的面取上面那一组；脊长调过之后两端的坡面有自己的坡度与进深，
+		// 各按自己的坡长分排（TG 同：`assemble_rectangular_roof` 逐面按该面的坡长 / 0.4375 m 取排数），
+		// 它与两侧的坡在角斜脊上不再逐排对齐，交线由逐瓦裁剪面与斜脊盖板收口。
+		const bool bOwnPitch = Roof.Steep(Side) != 1.0;
+		const float CosP = bOwnPitch ? FMath::Max(Roof.FaceCos(Side), UE_KINDA_SMALL_NUMBER) : PitchCos;
+		const float SinP = bOwnPitch ? Roof.FaceSin(Side) : PitchSin;
+		const float SlopeLen = bOwnPitch ? CSHouseTile_FaceSlopeLength(Roof, Side, Skeleton.MaxInset) : PitchSlopeLen;
+		if (SlopeLen <= 1.0f) continue;
+		const int32 Rows = bOwnPitch
+			? FMath::Clamp(FMath::RoundToInt(SlopeLen / RowPitch), 1, CSHouseTile_MaxRows) : PitchRows;
+		const double RowStep = bOwnPitch ? double(SlopeLen) / double(Rows) : PitchRowStep;
 
 		// 局部（actor 空间）的三条轴。法线朝上外、上坡向指向屋脊、沿排水平。
 		const FVector NormalLocal(Outward.X * SinP, Outward.Y * SinP, CosP);
@@ -195,14 +238,15 @@ void BuildPlan(const FCSRoofDesc& Roof, const FTransform& World, const FParams& 
 
 		for (int32 Row = 0; Row < Rows; ++Row)
 		{
-			// 沿坡面的弧长（自檐口外沿起）→ 内距。d = −Overhang 是檐口外沿，d = MaxInset 是屋面最高处。
+			// 沿坡面的弧长（自檐口外沿起）→ 离本边的内距。d = −Overhang 是檐口外沿，最后一排贴着屋面最高处。
 			const double SlopeS = (double(Row) + 0.5) * RowStep;
 			const double Inset = -double(Overhang) + SlopeS * double(CosP);
 
-			// 这一排在本坡面上的沿边区间（见 `CSHouseRoof_FaceSpanAtInset`）。矩形上是 [d, Len − d]，
-			// 即"半宽随内距 1:1 收窄"；收到不足 1 cm 就是角上的尖，那一排没有瓦。
+			// 这一排在本坡面上的沿边区间（见 `CSHouseRoof_FaceSpanAtInset`）。等坡度矩形上是 [d, Len − d]，
+			// 即"半宽随内距 1:1 收窄"；收到不足 1 cm 就是角上的尖，那一排没有瓦。山墙那一头不收窄，
+			// 一直通到山墙外 `GableOverhang` 处。
 			double T0 = 0.0, T1 = 0.0;
-			if (!CSHouseRoof_FaceSpanAtInset(Footprint, Side, Inset, T0, T1)) continue;
+			if (!CSHouseRoof_FaceSpanAtInset(Roof, Side, Inset, T0, T1)) continue;
 			const double Width = T1 - T0;
 			if (Width <= 1.0) continue;
 			const FVector2D RowBase = Edge.Start + Edge.In * Inset;
@@ -232,7 +276,7 @@ void BuildPlan(const FCSRoofDesc& Roof, const FTransform& World, const FParams& 
 				// 缩成半瓦会在斜脊两侧留下三角缺口，迫使盖瓦浮在上面遮洞。
 				double LowerT0 = T0, LowerT1 = T1;
 				const double HalfLength = RowStep * Params.RowOverlap * ScaleJ * LengthJ * SizeScale * 0.5;
-				if (CSHouseRoof_FaceSpanAtInset(Footprint, Side, Inset - HalfLength * CosP, LowerT0, LowerT1))
+				if (CSHouseRoof_FaceSpanAtInset(Roof, Side, Inset - HalfLength * CosP, LowerT0, LowerT1))
 				{
 					// 留一小段余量，让瓦心仍在自己的坡内（尤其金字塔顶端的半瓦），不能落在共享边界上。
 					const double CellWidth = (Cell1 - Cell0) * 0.95;
@@ -242,7 +286,7 @@ void BuildPlan(const FCSRoofDesc& Roof, const FTransform& World, const FParams& 
 
 				// 列从 T1 端起排（沿 Along = −U 走），与矩形时代「U 从 −半宽起」同序 ⇒ 身份 (面, 排, 列) 不变。
 				const FVector2D XY = RowBase + Edge.U * (T1 - (Cell0 + Cell1) * 0.5);
-				const double Z = double(Roof.EaveZ) + double(TanP) * Inset;
+				const double Z = double(Roof.EaveZ) + double(TanP) * Roof.EquivalentInset(Side, Inset);
 				FVector Local = FVector(XY.X, XY.Y, Z) + NormalLocal * (double(Params.StandOff) + double(LiftJ));
 
 				// 绕法线抖一点朝向：(上坡, 沿排, 法线) 是右手基，绕第三根轴转 a 就是这两句。
@@ -289,18 +333,32 @@ void BuildPlan(const FCSRoofDesc& Roof, const FTransform& World, const FParams& 
 				Rec.SizeY = Sizes[1];
 				Rec.SizeZ = Sizes[2];
 
-				// 两坡等距线就是角脊，不能用宽大的骑脊双片去遮越界的瓦。
+				// 两坡等高线就是角脊，不能用宽大的骑脊双片去遮越界的瓦。
 				// 和 TG 的逐瓦 clipping_plane_ 一样，选离瓦心最近的坡面边界；世界空间方程随房屋 yaw/位移一起变换。
+				// 两个坡面的边界 = 等效内距相等的那条线：w_a·(内距_a + Overhang) = w_b·(内距_b + Overhang)，
+				// 等坡度时就是「内距相等」（`bPlain`：两个倍率都是 1，走改动之前的那两句）。山墙面是竖直的：
+				// 边界就是山墙外 `GableOverhang` 处那条线，瓦齐齐切在那里。
+				const double SteepSide = Roof.Steep(Side);
 				double Closest = TNumericLimits<double>::Max();
 				for (int32 Other = 0; Other < NumFaces; ++Other)
 				{
 					if (Other == Side) continue;
 					const FCSHouseEdgeFrame Neighbour = CSHouse_GetEdge(Other, Footprint, 0.0f);
-					const FVector2D Difference = Edge.In - Neighbour.In;
+					if (Neighbour.Len <= 0.0f) continue;
+					const bool bGable = Roof.IsGable(Other);
+					const double SteepOther = bGable ? 1.0 : Roof.Steep(Other);
+					const bool bPlain = !bGable && SteepSide == 1.0 && SteepOther == 1.0;
+					const FVector2D Difference = bGable ? -Neighbour.In
+						: bPlain ? Edge.In - Neighbour.In : Edge.In * SteepSide - Neighbour.In * SteepOther;
 					const double Denom = Difference.Size();
 					if (Denom < UE_SMALL_NUMBER) continue;
 					const FVector2D N = Difference / Denom;
-					const double D = (FVector2D::DotProduct(Neighbour.Start, Neighbour.In) - FVector2D::DotProduct(Edge.Start, Edge.In)) / Denom;
+					const double D = bGable
+						? (FVector2D::DotProduct(Neighbour.Start, Neighbour.In) - double(Roof.GableOverhang)) / Denom
+						: bPlain
+						? (FVector2D::DotProduct(Neighbour.Start, Neighbour.In) - FVector2D::DotProduct(Edge.Start, Edge.In)) / Denom
+						: (SteepOther * FVector2D::DotProduct(Neighbour.Start, Neighbour.In) - SteepSide * FVector2D::DotProduct(Edge.Start, Edge.In)
+							+ (SteepSide - SteepOther) * double(Overhang)) / Denom;
 					const double Distance = -FVector2D::DotProduct(N, XY) - D;
 					if (Distance >= Closest) continue;
 					Closest = Distance;
@@ -325,13 +383,35 @@ void BuildPlan(const FCSRoofDesc& Roof, const FTransform& World, const FParams& 
 		struct FRidgeLine { FVector A; FVector B; FVector Normal; bool bLevel; };
 		TArray<FRidgeLine, TInlineAllocator<16>> Lines;
 
-		// 角平分线是闭式的：两侧坡面的外法线是 (外法线_a · sinP, cosP) 与 (外法线_b · sinP, cosP)，
+		// 角平分线是闭式的：两侧坡面的外法线是 (外法线_a · sin p_a, cos p_a) 与 (外法线_b · sin p_b, cos p_b)，
 		// 和归一化即得。脊上两面对冲 ⇒ 恒为竖直向上。
 		for (const FCSRoofSkeletonArc& Arc : Skeleton.Arcs)
 		{
+			// 山墙侧斜边：那里只有一个坡面。TG 的四条角线盖板循环里没有任何山墙判断（1421AF1AC..1421AFBF6）——
+			// 山墙时檐口矩形与脊矩形顺脊同长，角线退化成屋面两端从檐口爬到脊端的斜边，同一块窄板顺着它铺成**封边板**，
+			// 盖住被裁剪面切齐的瓦端。板躺在那个坡面上（法线 = 坡面法线，不是两面平均）。
+			if (Arc.bVerge)
+			{
+				const int32 Slope = Roof.IsGable(Arc.FaceA) ? Arc.FaceB : Arc.FaceA;
+				const FCSHouseEdgeFrame FS = CSHouse_GetEdge(Slope, Footprint, 0.0f);
+				const double SinS = double(Roof.FaceSin(Slope));
+				// 两侧都是山墙边的角上没有屋面：记一条零长的线占住线号（线号进逐块随机数的身份，跳号会让其余脊线的随机数跟着换）。
+				const bool bNoSlope = Roof.IsGable(Slope);
+				Lines.Add({
+					bNoSlope ? FVector::ZeroVector : FVector(Arc.A.X, Arc.A.Y, double(Roof.EaveZ) + Arc.InsetA * double(TanP)),
+					bNoSlope ? FVector::ZeroVector : FVector(Arc.B.X, Arc.B.Y, double(Roof.EaveZ) + Arc.InsetB * double(TanP)),
+					FVector(-FS.In.X * SinS, -FS.In.Y * SinS, double(Roof.FaceCos(Slope))).GetSafeNormal(UE_SMALL_NUMBER, FVector::UpVector),
+					false });
+				continue;
+			}
 			const FCSHouseEdgeFrame FA = CSHouse_GetEdge(Arc.FaceA, Footprint, 0.0f);
 			const FCSHouseEdgeFrame FB = CSHouse_GetEdge(Arc.FaceB, Footprint, 0.0f);
-			const FVector N(-(FA.In.X + FB.In.X) * double(SinP), -(FA.In.Y + FB.In.Y) * double(SinP), 2.0 * double(CosP));
+			const bool bEqualPitch = Roof.Steep(Arc.FaceA) == 1.0 && Roof.Steep(Arc.FaceB) == 1.0;
+			const FVector N = bEqualPitch
+				? FVector(-(FA.In.X + FB.In.X) * double(PitchSin), -(FA.In.Y + FB.In.Y) * double(PitchSin), 2.0 * double(PitchCos))
+				: FVector(-FA.In.X * double(Roof.FaceSin(Arc.FaceA)) - FB.In.X * double(Roof.FaceSin(Arc.FaceB)),
+					-FA.In.Y * double(Roof.FaceSin(Arc.FaceA)) - FB.In.Y * double(Roof.FaceSin(Arc.FaceB)),
+					double(Roof.FaceCos(Arc.FaceA)) + double(Roof.FaceCos(Arc.FaceB)));
 			Lines.Add({
 				FVector(Arc.A.X, Arc.A.Y, double(Roof.EaveZ) + Arc.InsetA * double(TanP)),
 				FVector(Arc.B.X, Arc.B.Y, double(Roof.EaveZ) + Arc.InsetB * double(TanP)),
@@ -393,36 +473,44 @@ void BuildPlan(const FCSRoofDesc& Roof, const FTransform& World, const FParams& 
 	}
 }
 
-int32 MaxTilesBound(const FCSRoofDesc& Roof, const FParams& InParams)
+int32 MaxTilesBound(const FCSRoofDesc& InRoof, const FParams& InParams)
 {
+	FCSRoofDesc ClampedRoof;
+	const FCSRoofDesc& Roof = CSHouseTile_ClampOverhang(InRoof, ClampedRoof);
 	const FCSHouseFootprint& Footprint = Roof.Footprint;
 	if (Roof.bFlat || !Footprint.IsValidFootprint()) return 0;
 
-	const float Overhang = FMath::Max(Roof.Overhang, 0.0f);
+	const float Overhang = Roof.Overhang;
 	FCSRoofSkeleton Skeleton;
-	CSHouseRoof_BuildSkeleton(Footprint, double(Overhang), Skeleton);
+	CSHouseRoof_BuildSkeleton(Roof, Skeleton);
 	if (Skeleton.MaxInset <= 1.0) return 0;
 
 	FParams Params = InParams;
 	Params.Axes = CSHouseTile_SanitizeAxes(Params.Axes);
 
-	const float SlopeLen = CSHouseTile_SlopeLength(Roof, Skeleton.MaxInset);
-	// +1 是等分那一步的取整余量（`RoundToInt` 最多多给半格）。
-	const int32 Rows = FMath::Clamp(FMath::CeilToInt(SlopeLen / CSHouseTile_RowPitch(Params)) + 1, 1, CSHouseTile_MaxRows);
+	const float RowPitch = CSHouseTile_RowPitch(Params);
+	// +1 是等分那一步的取整余量（`RoundToInt` 最多多给半格）。倍率为 1 的面共用这一份（同 `BuildPlan`）。
+	const float PitchSlopeLen = CSHouseTile_SlopeLength(Roof, Skeleton.MaxInset);
+	const int32 PitchRows = FMath::Clamp(FMath::CeilToInt(PitchSlopeLen / RowPitch) + 1, 1, CSHouseTile_MaxRows);
 	const float ColumnPitch = CSHouseTile_ColumnPitch(Params);
 
 	int32 Total = 0;
 	for (int32 Side = 0; Side < Footprint.NumEdges(); ++Side)
 	{
-		// 最宽的一排就是檐口外沿那一排：凸折线上每个坡面的排宽随内距单调收窄。
+		// 最宽的一排就是檐口外沿那一排：凸折线上每个坡面的排宽随内距单调收窄（山墙那一头不收窄）。
+		// 山墙边没有坡面，`FaceSpanAtInset` 对它恒返回 false。
 		double T0 = 0.0, T1 = 0.0;
-		if (!CSHouseRoof_FaceSpanAtInset(Footprint, Side, -double(Overhang), T0, T1)) continue;
+		if (!CSHouseRoof_FaceSpanAtInset(Roof, Side, -double(Overhang), T0, T1)) continue;
+		// 倍率不是 1 的面按自己的坡长算排数（见 `BuildPlan`）。
+		const int32 Rows = Roof.Steep(Side) == 1.0 ? PitchRows : FMath::Clamp(
+			FMath::CeilToInt(CSHouseTile_FaceSlopeLength(Roof, Side, Skeleton.MaxInset) / RowPitch) + 1, 1, CSHouseTile_MaxRows);
 		const int32 Columns = FMath::Clamp(
 			FMath::CeilToInt((T1 - T0) / double(ColumnPitch)) + 1, 1, CSHouseTile_MaxColumns);
 		Total += Rows * Columns;
 	}
 
-	// 脊瓦：骨架的每条弧（矩形上 4 条角斜脊 + 1 条屋脊）。容量是**一次预留、超了截断**（零阻塞纪律），
+	// 脊瓦：骨架的每条弧（矩形上 4 条角斜脊 + 1 条屋脊；双坡时那 4 条是山墙侧斜边的封边板）。
+	// 容量是**一次预留、超了截断**（零阻塞纪律），
 	// 漏算这一段的症状是"屋脊末端少几块盖瓦"，而瓦数、零阻塞、三角数全都正常 —— 只有出图看得见。
 	if (InParams.RidgeCapScale > 0.0f)
 	{

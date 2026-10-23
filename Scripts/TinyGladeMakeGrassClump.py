@@ -15,13 +15,15 @@ albedo / 粗糙度 / sheen / 顶点色那一整套只要差一点点，交界处
 `MI_TG_Grass` 的副本、只换了父材质，所有手调过的值原样跟过去。
 
 ⚠️ 跑之前先确认 `MI_TG_Grass` 的风参数是你要的：这份脚本**不改**近处材质。
-⚠️ 重跑会**覆盖**这三个资产（先删后建）。关卡里引用它们的地方靠路径重新解析，不会断。
+⚠️ 重跑会**覆盖**这三个资产：两份材质先删后建；网格原地重建（不删，地面在内存里直接引用它）。
+   只想重建网格（比如补 Nanite 数据）时先设环境变量 `GRASSCLUMP_MESH_ONLY=1`，材质一个都不动。
 
 跑法（无头）：
   UnrealEditor-Cmd.exe <uproject> -ExecutePythonScript="...\\TinyGladeMakeGrassClump.py"
     -unattended -nosplash -stdout -AbsLog=...
 """
 import math
+import os
 
 import unreal
 
@@ -81,8 +83,8 @@ def hash01(i, salt):
 
 def build_clump():
     path = "%s/%s" % (MESH_DIR, CLUMP)
-    if eal.does_asset_exist(path):
-        eal.delete_asset(path)
+    # 已存在就**原地重建**、不删：地面的 CDO 与关卡实例在内存里直接引用这个对象（`Grass.LOD.FarMesh`），
+    # 删掉会把那些引用置空，远处组合草当场消失（存盘的话就真丢了）。
 
     desc = unreal.StaticMesh.create_static_mesh_description()
     group = desc.create_polygon_group()
@@ -117,8 +119,18 @@ def build_clump():
             verts.append(vi)
         desc.create_triangle(group, verts)
 
-    sm = tools.create_asset(CLUMP, MESH_DIR, unreal.StaticMesh, None)
-    sm.build_from_static_mesh_descriptions([desc], False, True)
+    sm = eal.load_asset(path) if eal.does_asset_exist(path) else tools.create_asset(CLUMP, MESH_DIR, unreal.StaticMesh, None)
+    # 2026-09-29 起地被一律走 Nanite（组件按资产的 Nanite 开关自动换路）：开关要在构建**之前**打开。
+    nanite = sm.get_editor_property("nanite_settings")
+    nanite.set_editor_property("enabled", True)
+    # 18 个三角，回退网格就用全精度（与两种花同一设置）。
+    nanite.set_editor_property("fallback_target", unreal.NaniteFallbackTarget.RELATIVE_ERROR)
+    nanite.set_editor_property("fallback_relative_error", 0.0)
+    sm.set_editor_property("nanite_settings", nanite)
+    # ⚠️ 第三个参数（fast build）必须是 False：快速构建直接写渲染数据、**不把 MeshDescription 存进源模型**，
+    #    之后任何重建（包括开 Nanite）都没有源几何可建 —— 2026-09-29 实测开关开着、`NaniteTriangles = 0`，
+    #    日志里连 NaniteBuild 那一行都没有，组件退回引擎 ISM 代理，还报 "nearly zero normals"。
+    sm.build_from_static_mesh_descriptions([desc], False, False)
     sm.set_editor_property("light_map_resolution", 8)
     log("网格 %s：%d 顶点 / %d 三角" % (path, desc.get_vertex_count(), desc.get_triangle_count()))
     return sm
@@ -186,6 +198,16 @@ def build_far_material():
     if shade_n is None:
         fail("近处材质的 Normal 是空的 —— 远处没法在它上面叠风")
         return None
+    # 2026-09-29 起近处材质的 Normal 顶上是 `TG Near Normal Wind`（WPO 淡出多少、法线风接过多少，
+    # TinyGladeSetupCoverNanite.py 加的）。远处要的是它**底下**那份着色法线，否则风在远处叠两遍。
+    if (shade_n.get_class().get_name() == "MaterialExpressionCustom"
+            and str(shade_n.get_editor_property("description")) == "TG Near Normal Wind"):
+        below = mel.get_inputs_for_material_expression(mat, shade_n)
+        shade_n = below[0] if below else None
+        if shade_n is None:
+            fail("TG Near Normal Wind 的 N 输入是空的")
+            return None
+        log("近处 Normal 是 TG Near Normal Wind：远处接它底下的着色法线 %s" % shade_n.get_class().get_name())
 
     strength = mel.create_material_expression(mat, unreal.MaterialExpressionScalarParameter, -300, 380)
     strength.set_editor_property("parameter_name", "NormalWindStrength")
@@ -202,7 +224,12 @@ def build_far_material():
         ci.set_editor_property("input_name", name)
         ins.append(ci)
     custom.set_editor_property("inputs", ins)
-    for src, name in ((shade_n, "N"), (wind_dir, "D"), (bend, "B"), (strength, "S")):
+    # 风场经 VertexInterpolator 进像素着色器：风场在 `HeightAsBladeT = True` 那一支读 `PreSkinnedPosition`（只在顶点着色器里有），
+    # 直接接进 Normal 的话那种 MI 编译失败、静默换成默认材质（2026-09-29 近处材质踩过，见 TinyGladeSetupCoverNanite.py 的 vs_to_ps）。
+    bend_ps = mel.create_material_expression(mat, unreal.MaterialExpressionVertexInterpolator, -300, 300)
+    if not mel.connect_material_expressions(bend, "", bend_ps, ""):
+        fail("接不上 VertexInterpolator")
+    for src, name in ((shade_n, "N"), (wind_dir, "D"), (bend_ps, "B"), (strength, "S")):
         if not mel.connect_material_expressions(src, "", custom, name):
             fail("接不上 Custom 节点的输入 %s" % name)
     if not mel.connect_material_property(custom, "", unreal.MaterialProperty.MP_NORMAL):
@@ -240,8 +267,11 @@ def build_far_material():
 # ---------------------------------------------------------------------------
 
 def main():
+    # 只重建网格、不动远处材质（材质是近处那份的复制品，重跑会把 M_TG_GrassFar / MI_TG_GrassFar 整个重生成）：
+    # 在跑本脚本的进程里先设环境变量 GRASSCLUMP_MESH_ONLY=1。
+    mesh_only = os.environ.get("GRASSCLUMP_MESH_ONLY") == "1"
     mesh = build_clump()
-    mat = build_far_material()
+    mat = eal.load_asset(FAR_MAT) if mesh_only else build_far_material()
     if mesh and mat:
         far = eal.load_asset(FAR_MI) if eal.does_asset_exist(FAR_MI) else mat
         mesh.set_editor_property("static_materials",

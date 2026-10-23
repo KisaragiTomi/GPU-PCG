@@ -14,7 +14,7 @@
  * -----------------------------------------------------------------------------
  * 用户原话：「两栋房交汇时只产生接缝砖，其它任何内容都是独立的。」⇒ `ACSHouseSeamActor`
  * （中立 actor + 两端弱引用 + 自 tick + 交点表生命周期 + 角柱邻近合并 + 跨接缝仲裁）**整套否决**。
- * TG 侧的实证同向且更硬（`Docs/TinyGlade/TinyGlade_模块对照与进度.md（卷一）` §2.3）：那边这一级只有两个参数
+ * TG 侧的实证同向且更硬（`Docs/TinyGlade/Progress_ModuleComparison.md（卷一）` §2.3）：那边这一级只有两个参数
  * —— `Res<IntraShapeCorners> → ResMut<InterShapeBrickStitches>`，零地形、零历史、零撤销、零 UI。
  *
  * 所以这里一个可变量都没有：输入两房的 footprint / 朝向 / 高度，输出砖列。**两栋房各自算出

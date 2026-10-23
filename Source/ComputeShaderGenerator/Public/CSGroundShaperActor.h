@@ -1,24 +1,27 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "CSGroundShaperField.h"
 #include "CSTinyGlade.h"
 #include "CSGroundShaperActor.generated.h"
 
 class ACSGroundActor;
 class UBillboardComponent;
-class UStaticMesh;
-class UStaticMeshComponent;
+class UTexture2D;
 
 /**
  * 地形塑形物：放在地面上的**不可见高度影响体**（计划 D9；高度不是笔刷画的）。
  *
- * 形状口径对齐用户的 Houdini 原型 `TinyGlade.hip` `/obj/geo1/DeformSource`，但**不逐节点搬**：
- * 那条链（circle -> deformbyinfluence -> line/resample/copytopoints/ray/blast/copytopoints）
- * 在 UE 侧压成一件事 —— 一个解析高度场。
- *   · 高度场：`Radius` 盘内恒为台高（原型里 circle 是 poly 面，`xyzdist` 面内为 0），
- *     盘外按 `FalloffDistance` smoothstep 羽化到 0（原型是 bspline lerp 斜坡），再叠上
- *     裙边噪声（只减不加的侵蚀）与二次抬升。公式的**唯一权威**是
- *     `Public/CSGroundShaperField.h` <-> `Shaders/Private/CSGroundShaperField.ush` 那一对。
+ * **形状由一张 mask 决定**（用户 2026-09-29）：mask 白 = 台顶，按 `MaskSize` 铺在本 actor 的
+ * 局部 XY 上（跟着 actor 的 yaw 转）；**台顶高度 = 本 actor 相对地面的高度** —— actor 放在 600，
+ * 地形最高就是 600；放在 −300 就是一个坑，坑底 −300（2026-09-30）。没设 mask 时按直径 `MaskSize` 的解析圆盘走（与改 mask 之前的圆盘逐位相同）。
+ *   · 高度场：mask 先被烘成有符号距离场（`CSGroundShaperField::BakeMaskSdf`，编辑器里改 mask /
+ *     尺寸 / 平滑时烘一次，结果随关卡存盘，cook 后照用），mask 内恒为台高，mask 外沿距离按
+ *     `FalloffDistance` smoothstep 羽化到 0，再叠上裙边噪声（只减不加的侵蚀）与二次抬升。
+ *     公式的**唯一权威**是 `Public/CSGroundShaperField.h` <-> `Shaders/Private/CSGroundShaperField.ush` 那一对。
+ *   · 圆滑（`Smoothing`）管两件事，照 TG 的手法：单张 mask 的尖角（五角星的凸尖与凹口）在
+ *     距离场上做高斯（TG 是对高度图做 GaussBlur，我们做在距离域，场才能在任意点求值）；
+ *     多座叠在一起时交汇处的折痕用 smooth-max 倒角（TG 用 max + 各自的噪声打碎折痕）。
  *
  * **石阶不在这里**（2026-08-30 裁决一，旧路已删）：塑形物曾经自持一条
  * 「CPU 解等高线 -> B 样条 -> 沿曲线铺块」的石阶路（`RebuildSteps` / `BuildStepPlan` /
@@ -39,8 +42,8 @@ class UStaticMeshComponent;
  * 后广播。⚠️ 反向订阅 `OnGroundChanged` 也随旧路一起删了 —— 它当初只为"别人画路时本座重摆石阶"
  * 而存在，而石阶早已归地面自己管（地面在同一条 `FlushPaintToGpu` 尾巴上重扫）。
  *
- * 可视化：自身在游戏模式下不可见 —— 编辑器里用圆柱 + billboard 示意，两者都是
- * `bIsEditorOnly` + `HiddenInGame`；（将来的）岩石才是真实产物。
+ * 可视化：编辑器里仅用 billboard 图标示意，`bIsEditorOnly` + `HiddenInGame`；
+ * （将来的）岩石才是真实产物。
  */
 UCLASS(Blueprintable)
 class COMPUTESHADERGENERATOR_API ACSGroundShaperActor : public ACSTinyGlade
@@ -51,30 +54,55 @@ public:
 	ACSGroundShaperActor();
 
 	// -------------------------------------------------------------------------
-	// Shape（对应原型 DeformSource + deformbyinfluence 的三个参数）
+	// Shape
+	//
+	// 台顶高度**不是参数**：它就是本 actor 相对地面 actor 的 Z（没有地面时相对世界 0）。
+	// 旧的 `LiftHeight`（"相对 actor 再抬多少"）已并进 actor 的 Z，老关卡加载时自动迁移（见 PostLoad）。
 	// -------------------------------------------------------------------------
 
-	/** 台顶半径 cm。盘内高度恒为台高（不做二次衰减），对应 circle SOP 的 scale。 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Shaper", meta = (ClampMin = "1.0"))
-	float Radius = 150.0f;
+	/**
+	 * 形状 mask（白 = 台顶，按 0.5 二值化；取 R 通道）。u 沿本座局部 +X，贴图第 0 行在局部 −Y 端。
+	 * 留空 = 直径 `MaskSize` 的解析圆盘。改了贴图内容后点一次 `RebuildTerrain` 重烘。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Shaper")
+	TObjectPtr<UTexture2D> Mask;
 
 	/**
-	 * 台高 cm（相对本 actor 所在高度），对应 deformbyinfluence 的 scale。
-	 *
-	 * ⚠️ **契约是「抬升幅度」，不是「台顶高」**（用户裁决 2026-08-30，照原型留 2% 溢出）：
-	 * 二次抬升按原型口径照抬台顶，所以台顶实际 = `LiftHeight × (1 + SecondaryLiftScale)`
-	 * （默认 300 → **306.3**）。**这不是缺陷，别再当 bug 报，也别"顺手"归一化掉。**
-	 * 想让本值严格等于台顶高，把 `SecondaryLiftScale` 设 0 —— 那是配置，不是改语义。
-	 *
-	 * 连带纪律：**任何断言都不许拿绝对台高当期望值** —— 要么和 `SampleHeight` 比、
-	 * 要么写成表达式。演示回归里那 5 条已经这么改了，那才是守得住的不变量。
+	 * mask 铺在地面上的边长 cm（整张贴图的宽 = 本值）。圆盘模式下就是直径。
+	 * 本值与下面的羽化 / 圆滑 / 中心隆起放在 ViewEdit 分类：视口浮窗里直接调（2026-09-30 取代蓝图构造脚本里
+	 * 那个 `Set Radius` 变量 —— 它写的是已取消的 `Radius`，构造脚本已从 BP_GroundShaper 删掉）。
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Shaper", meta = (ClampMin = "0.0"))
-	float LiftHeight = 300.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ViewEdit", meta = (ClampMin = "1.0", UIMin = "100.0", UIMax = "4000.0"))
+	float MaskSize = 300.0f;
 
-	/** 羽化裙边宽 cm：盘外这段距离内从台高降到 0，对应 deformbyinfluence 的 maxdist。 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Shaper", meta = (ClampMin = "1.0"))
+	/** 羽化裙边宽 cm：mask 外这段距离内从台高降到 0，对应 deformbyinfluence 的 maxdist。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ViewEdit", meta = (ClampMin = "1.0", UIMin = "50.0", UIMax = "2000.0"))
 	float FalloffDistance = 200.0f;
+
+	/**
+	 * 圆滑半径 cm（0 = 关）。一个数管两处尖锐：
+	 *   · 本座 mask 的尖角 —— 五角星的凸尖被削圆、凹口被填圆，从凹口顺着裙边往下的那道折痕一起抹平
+	 *     （距离场上的高斯，σ = 本值 / 3）。量级参考：想把尖角圆成半径 r 的圆角，取 2r~3r；
+	 *   · 与别的塑形物交汇处的折痕 —— 合成时按本值做 smooth-max 倒角（两座高度差在本值以内的那一带
+	 *     被往上填圆；交汇双方取较大的那个平滑值）。倒角被封顶在参与合成的最高台顶，不会冒出 actor 高度。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ViewEdit", meta = (ClampMin = "0.0", UIMax = "1000.0"))
+	float Smoothing = 0.0f;
+
+	/**
+	 * 中心隆起（0 = 平顶，1 = 整座是一座顺着轮廓往中间鼓的山）。离轮廓越远越高，**最高点在 mask 内离边最远处，
+	 * 恰好 = actor 高度**；星形会长出五条汇向中心的脊。最深距离取自平滑之后的距离场，所以 `Smoothing`
+	 * 只会把脊、凹口这些较低的部分往下压，不会压低峰顶。坑（actor 在地面以下）同理：最深点 = actor 高度。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ViewEdit", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CenterBulge = 0.0f;
+
+	/**
+	 * 距离场的目标格距 cm（边长上限 512 格，超了自动放大格距）。地面网格是 50 cm，10 cm 足够把
+	 * 星形尖角那类细节交给平滑去处理；只有 mask 里真有比这更细的形状才需要调小。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = "CS Shaper", meta = (ClampMin = "1.0"))
+	float SdfCellSize = 10.0f;
 
 	// -------------------------------------------------------------------------
 	// 裙边噪声（原型 noisebysourcestress）与二次抬升（原型 attribwrangle5）
@@ -106,26 +134,20 @@ public:
 	int32 SkirtNoiseSeed = 0;
 
 	/**
-	 * 二次抬升系数（原型 `attribwrangle5` 的 scale = 0.021）：`+ pow(S, 1.5) · 台高 · 本值`，
-	 * 偏向台顶的纯观感微调。
-	 *
-	 * ⚠️ 它按原型口径**照抬台顶**，所以台顶实际高度是 `LiftHeight × (1 + 本值)`，不再等于
-	 * `LiftHeight`。要让 `LiftHeight` 严格等于台顶高度就把它设成 0。
+	 * 二次抬升系数（原型 `attribwrangle5` 的 scale = 0.021）：`+ pow(S, 1.5) · 本值`，偏向台顶的
+	 * 纯观感微调。整条剖面再除以 (1 + 本值) ⇒ **台顶恰好 = actor 高度**（2026-09-29 起；
+	 * 此前是照原型"照抬 2%"，老关卡迁移时把 actor 抬到了旧台顶，画面不变）。
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Shaper|Skirt Noise", meta = (ClampMin = "0.0", ClampMax = "0.5"))
 	float SecondaryLiftScale = 0.021f;
 
 	// -------------------------------------------------------------------------
-	// Wiring / 可视化
+	// Wiring
 	// -------------------------------------------------------------------------
 
 	/** 目标地面。留空则自动找场景里第一个 ACSGroundActor。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Shaper")
 	TObjectPtr<ACSGroundActor> Ground;
-
-	/** 编辑器示意体（默认引擎 Cylinder），只在编辑器里画，游戏模式不可见。 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Shaper|Editor")
-	TObjectPtr<UStaticMesh> EditorShapeMesh;
 
 	// -------------------------------------------------------------------------
 	// Public API
@@ -140,22 +162,35 @@ public:
 	virtual void ReevaluateSite() override;
 
 	/**
-	 * 本塑形物对某点的高度贡献（世界 XY → 相对地面基面的抬升，恒 ≥ 0）。
-	 * 地面重导出的纯函数输入：多塑形物重叠取 max（计划 D9）。
+	 * 本塑形物单独对某点的高度贡献（世界 XY → 相对地面基面的抬升，恒 ≥ 0）。
+	 * 多座的合成（平滑 max）在地面那边做：`CSGroundShaperField::EvalField`。
 	 */
 	float SampleShapeHeight(const FVector2D& WorldXY) const;
 
 	/**
-	 * 高度场的 GPU 参数（`CSGroundShaperField::Float4sPerShaper` 个 float4，布局见该头文件）。
-	 * compute pass 与 CPU 镜像**共用这一份打包结果**：`SampleShapeHeight` 也是先打包再求值，
+	 * 高度场的打包头（4 个 float4，布局见 `CSGroundShaperField.h`）+ 配套的 SDF。
+	 * compute pass 与 CPU 镜像**共用这一份打包结果**：`SampleShapeHeight` 也是拿它求值，
 	 * 所以两侧连"参数是怎么算出来的"都不会分叉，只剩公式本身要人盯。
+	 * `Noise.Z` 在这里已经是 SDF 边长（0 = 解析圆盘）；池起点 `Noise.W` 由 `PackField` 填。
 	 */
-	void GetHeightFieldParams(FVector4f& OutProfile, FVector4f& OutTop, FVector4f& OutNoise) const;
+	CSGroundShaperField::FShaperHeader GetFieldHeader() const;
+	TConstArrayView<float> GetMaskSdf() const { return MaskSdf; }
 
-	/** 影响范围的世界 XY 矩形（= 盘 + 裙边），也是区域重导出发布的脏区。 */
+	/** 距离场的内容指纹（mask / 尺寸 / 平滑 / 格距）：换了一张同尺寸的 mask 时头不变，靠它让派生链知道要重跑。 */
+	uint32 GetMaskSdfKey() const { return MaskSdfKey; }
+
+	/** 影响范围的世界 XY 矩形（= mask 零等值线的外接圆 + 裙边），也是区域重导出发布的脏区。 */
 	FBox2D GetFootprintRect2D() const;
 
-	//~ AActor interface（OnConstruction → ReevaluateSite 在基类）
+	/** 零等值线到中心的最远距离 cm（圆盘 = MaskSize / 2）。足迹、摆件圈、岩壳覆盖区检查共用。 */
+	float GetContourRadius() const;
+
+	/** 台顶相对地面基面的**有符号**高度（= 本 actor 的 Z − 地面 Z；负 = 坑，坑底就是它）。 */
+	double ComputeTopHeight() const;
+
+	//~ UObject / AActor interface（OnConstruction → ReevaluateSite 在基类）
+	virtual void Serialize(FArchive& Ar) override;
+	virtual void PostLoad() override;
 	virtual void PostRegisterAllComponents() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Destroyed() override;
@@ -171,14 +206,44 @@ private:
 	/** 向地面注销（销毁路径）。bRefreshGround 时让地面把自己的隆起抹掉。 */
 	void UnregisterFromGround(bool bRefreshGround);
 
-	/** 按 Radius/LiftHeight 摆正编辑器示意圆柱（底面贴 z=0，直径 = 2×Radius），并把图标顶到台顶上方 1m。 */
-	void UpdateEditorShape();
+	/**
+	 * 编辑器里：mask / 尺寸 / 平滑 / 格距变了就重烘距离场（指纹比对，没变是零成本）。
+	 * cook 后的包里读不到贴图源数据，直接用存盘的那份。
+	 */
+	void EnsureMaskSdf();
 
-	/** 台顶相对地面基面的高度（= 自身 Z 偏移 + LiftHeight，钳到 ≥ 0）。 */
-	double ComputeTopHeight() const;
+	/** 本座当前输入的指纹（编辑器才算得出：要读贴图源数据的 GUID）。 */
+	uint32 ComputeMaskSdfKey() const;
+
+	// ---- 烘焙好的距离场（随关卡存盘；布局见 CSGroundShaperField::FMaskSdf）----
+	UPROPERTY()
+	TArray<float> MaskSdf;
 
 	UPROPERTY()
-	TObjectPtr<UStaticMeshComponent> EditorShapeComponent;
+	int32 MaskSdfN = 0;
+
+	UPROPERTY()
+	float MaskSdfCellSize = 1.0f;
+
+	UPROPERTY()
+	float MaskSdfContourRadius = 0.0f;
+
+	UPROPERTY()
+	float MaskSdfDeepest = 0.0f;
+
+	UPROPERTY()
+	uint32 MaskSdfKey = 0;
+
+	// ---- 2026-09-29 之前的形状参数，只为迁移老关卡（PostLoad）----
+	// 默认值必须是当时的 C++ 默认：没覆写过的实例在存盘时不写这两项，读回来就是这里的值。
+	// ⚠️ 名字必须与老存盘里的**逐字相同**：改成 `X_DEPRECATED` + PropertyRedirects 实测读不回来
+	// （L_TerrainOpsDemo 存的 LiftHeight=700 读成了默认 300，塑形物塌成 2 cm），留原名最稳。
+	// 私有、不进细节面板、蓝图/Python 都看不见；迁移之后的存盘里它们等于原型值，不会再写出来。
+	UPROPERTY()
+	float Radius = 150.0f;
+
+	UPROPERTY()
+	float LiftHeight = 300.0f;
 
 #if WITH_EDITORONLY_DATA
 	UPROPERTY()

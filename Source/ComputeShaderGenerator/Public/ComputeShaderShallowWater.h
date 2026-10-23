@@ -255,6 +255,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ComputeShader")
 	void SetHeight();
 
+	/** Replace the entire simulation from ReusltMesh (or BakedResultMesh while previewing).
+	 *  Restores surface height and CSSW vertex-color velocity / wet coverage / foam against current ground.
+	 *  Uncovered cells become dry. Keeps the solver's running or paused state. */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "ComputeShader|Bake")
+	void ApplyResultMeshToSimulation();
+
 
 	UFUNCTION(BlueprintNativeEvent)
 	void SetMaterialParameter();

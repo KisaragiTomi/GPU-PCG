@@ -78,19 +78,19 @@ nx = prop(ground, "NumVertsX")
 ny = prop(ground, "NumVertsY")
 slope_lo = prop(ground, "RockShellSlopeLo")
 slope_hi = prop(ground, "RockShellSlopeHi")
-pat_scale = prop(ground, "RockShellPatternScale")
+cell_size = prop(ground, "RockShellCellSize")   # 程序化胞腔格距（2026-09-30 起取代 PatternScale）
 rock_on = prop(ground, "bRockShell")
 
-radius = prop(shaper, "Radius")
+radius = 0.5 * (prop(shaper, "MaskSize") or 0.0)   # Radius 已删（09-29）：圆盘直径 = MaskSize
 falloff = prop(shaper, "FalloffDistance")
-lift = prop(shaper, "LiftHeight")
+lift = s_loc.z - g_loc.z   # LiftHeight 已删（09-29）：台顶 = actor 相对地面的高度
 lift2 = prop(shaper, "SecondaryLiftScale")
 noise = prop(shaper, "SkirtNoiseAmount")
 
 unreal.log("---- 参数 ----")
 unreal.log("ground  CellSize=%s NumVerts=%sx%s bRockShell=%s" % (cell, nx, ny, rock_on))
-unreal.log("shell   SlopeLo=%s SlopeHi=%s PatternScale=%s" % (slope_lo, slope_hi, pat_scale))
-unreal.log("shaper  Radius=%s Falloff=%s LiftHeight=%s SecondaryLiftScale=%s SkirtNoise=%s"
+unreal.log("shell   SlopeLo=%s SlopeHi=%s CellSize=%s" % (slope_lo, slope_hi, cell_size))
+unreal.log("shaper  MaskSize/2=%s Falloff=%s Top=%s SecondaryLiftScale=%s SkirtNoise=%s"
            % (radius, falloff, lift, lift2, noise))
 
 # 解析上界：max|∇h| = Lift × 1.5 / Falloff（剖面的最陡处）。低于 SlopeLo 就一块石头都不长。

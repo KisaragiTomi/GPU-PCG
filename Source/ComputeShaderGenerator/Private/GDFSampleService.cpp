@@ -157,12 +157,29 @@ void FGDFViewExtension::PostRenderBasePassDeferred_RenderThread(
 	}
 
 	FGDFJobRequest JobReq;
+	TArray<FGDFJobRequest> DeferredJobs;
 	while (Owner.JobQueue.Dequeue(JobReq))
 	{
 		if (!JobReq.Build) continue;
+		if (JobReq.IsCancelled && JobReq.IsCancelled()) continue;
+		if (JobReq.Scene && (InView.bIsSceneCapture || !InView.Family || JobReq.Scene != InView.Family->Scene))
+		{
+			DeferredJobs.Add(MoveTemp(JobReq));
+			continue;
+		}
 		const FGlobalDistanceFieldParameterData* GDFData =
 			GetRendererModule().GetGlobalDistanceFieldParameterData(InView);
-		if (!GDFData) continue;
+		if (!GDFData)
+		{
+			if (JobReq.Scene) DeferredJobs.Add(MoveTemp(JobReq));
+			continue;
+		}
+		if (JobReq.Scene && (GDFData->NumGlobalSDFClipmaps <= 0 || GDFData->GlobalDFResolution <= 0.0f
+			|| !GDFData->PageAtlasTexture || !GDFData->PageTableTexture))
+		{
+			DeferredJobs.Add(MoveTemp(JobReq));
+			continue;
+		}
 
 		FGDFJobOutputs Outputs;
 		JobReq.Build(GraphBuilder, InView, *GDFData, Outputs);
@@ -199,6 +216,7 @@ void FGDFViewExtension::PostRenderBasePassDeferred_RenderThread(
 			return true;
 		});
 	}
+	for (FGDFJobRequest& Deferred : DeferredJobs) Owner.JobQueue.Enqueue(MoveTemp(Deferred));
 }
 
 void FGDFViewExtension::ProcessPointSample(FRDGBuilder& GraphBuilder, const FSceneView& View, FGDFPointSampleRequest&& Req)

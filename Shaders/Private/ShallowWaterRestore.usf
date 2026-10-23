@@ -1,0 +1,163 @@
+#include "/Engine/Public/Platform.ush"
+
+// CSSW bake stores local surface Z and FColor(R/G = signed velocity remapped to 0..1,
+// B = wet coverage, A = foam). The render buffer is BGRA UNORM; do not apply sRGB decoding.
+Buffer<float> RestorePositions;
+Buffer<uint> RestoreIndices;
+Buffer<float4> RestoreColors;
+uint RestoreTriangleCount;
+uint RestoreVertexCount;
+uint RestorePositionStride;
+uint RestoreHasColors;
+uint RestoreRasterPhase;
+uint2 RestoreSize;
+float RestoreInvCaptureSize;
+float RestoreActorZ;
+float RestoreEmptySceneDepth;
+float4x4 RestoreLocalToSim;
+float4x4 RestoreVelocityRotation;
+
+RWStructuredBuffer<uint> RestoreHeightKeys;
+RWStructuredBuffer<uint> RestoreTriangleIds;
+Texture2D<float4> RestoreSceneDepth;
+RWTexture2D<float4> RestoreState;
+RWTexture2D<float4> RestoreResult;
+RWTexture2D<float4> RestoreDepthWet;
+RWTexture2D<float4> RestoreSmoothHeight;
+RWTexture2D<float4> RestoreDebug;
+RWTexture2D<float4> RestoreTileMask;
+
+#ifndef RESTORE_VELOCITY_MAX
+#define RESTORE_VELOCITY_MAX 4.0f
+#endif
+
+float3 RestorePosition(uint Index)
+{
+    uint Base = Index * RestorePositionStride;
+    return mul(float4(RestorePositions[Base], RestorePositions[Base + 1], RestorePositions[Base + 2], 1), RestoreLocalToSim).xyz;
+}
+
+float2 RestorePixelPosition(float3 P)
+{
+    return (P.xy * RestoreInvCaptureSize + 0.5f) * float2(RestoreSize);
+}
+
+float RestoreCross(float2 A, float2 B) { return A.x * B.y - A.y * B.x; }
+
+bool RestoreTriangle(uint Tri, out uint3 Indices, out float3 A, out float3 B, out float3 C)
+{
+    Indices = uint3(RestoreIndices[Tri * 3], RestoreIndices[Tri * 3 + 1], RestoreIndices[Tri * 3 + 2]);
+    A = B = C = 0;
+    if (any(Indices >= RestoreVertexCount)) return false;
+    A = RestorePosition(Indices.x);
+    B = RestorePosition(Indices.y);
+    C = RestorePosition(Indices.z);
+    return all(isfinite(A)) && all(isfinite(B)) && all(isfinite(C));
+}
+
+bool RestoreBarycentric(float2 P, float2 A, float2 B, float2 C, out float3 Weights)
+{
+    float Area = RestoreCross(B - A, C - A);
+    Weights = 0;
+    if (abs(Area) < 1.0e-8f || !isfinite(Area)) return false;
+    Weights.y = RestoreCross(P - A, C - A) / Area;
+    Weights.z = RestoreCross(B - A, P - A) / Area;
+    Weights.x = 1.0f - Weights.y - Weights.z;
+    return all(Weights >= -1.0e-5f);
+}
+
+uint RestoreHeightKey(float Height)
+{
+    uint Bits = asuint(Height);
+    return (Bits & 0x80000000u) != 0u ? ~Bits : (Bits ^ 0x80000000u);
+}
+
+// Phase 0 selects the greatest surface height. Phase 1 breaks exact height ties by triangle ID.
+// Separate passes prevent an overlapping lower triangle from overwriting the winning attributes.
+[numthreads(64, 1, 1)]
+void RasterizeResultMeshCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+    uint Tri = (GroupId.y * 65535u + GroupId.x) * 64u + GroupIndex;
+    if (Tri >= RestoreTriangleCount) return;
+    uint3 Indices;
+    float3 A, B, C;
+    if (!RestoreTriangle(Tri, Indices, A, B, C)) return;
+    float2 PA = RestorePixelPosition(A), PB = RestorePixelPosition(B), PC = RestorePixelPosition(C);
+    if (!all(isfinite(PA)) || !all(isfinite(PB)) || !all(isfinite(PC))) return;
+    float2 Lower = max(min(PA, min(PB, PC)) - 0.5f, 0.0f);
+    float2 Upper = min(max(PA, max(PB, PC)) - 0.5f, float2(RestoreSize) - 1.0f);
+    if (any(Lower > Upper)) return;
+    int2 First = int2(ceil(Lower)), Last = int2(floor(Upper));
+    for (int Y = First.y; Y <= Last.y; ++Y)
+    {
+        for (int X = First.x; X <= Last.x; ++X)
+        {
+            float3 Weights;
+            if (!RestoreBarycentric(float2(X, Y) + 0.5f, PA, PB, PC, Weights)) continue;
+            float Height = dot(Weights, float3(A.z, B.z, C.z));
+            if (!isfinite(Height)) continue;
+            uint Pixel = Y * RestoreSize.x + X;
+            uint Key = RestoreHeightKey(Height);
+            if (RestoreRasterPhase == 0u) InterlockedMax(RestoreHeightKeys[Pixel], Key);
+            else if (RestoreHeightKeys[Pixel] == Key) InterlockedMin(RestoreTriangleIds[Pixel], Tri);
+        }
+    }
+}
+
+groupshared uint RestoreTileActive;
+
+[numthreads(16, 16, 1)]
+void ApplyResultMeshCS(uint3 DTid : SV_DispatchThreadID, uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+    if (GroupIndex == 0u) RestoreTileActive = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    if (all(DTid.xy < RestoreSize))
+    {
+        uint2 P = DTid.xy;
+        float4 CapturedGround = RestoreSceneDepth[P];
+        float SceneDepth = CapturedGround.x;
+        // Match ShallowWater.usf's actor-relative height convention.
+        float Ground = 10000.0f - SceneDepth;
+        // Capture alpha distinguishes an empty RT from geometry without depending on world Z.
+        // Uncovered rasterized pixels contain NaN depth and must remain empty as well.
+        bool HasGround = CapturedGround.a > 0.5f && isfinite(SceneDepth);
+        float4 State = 0;
+        float4 Result = float4(0, 0, -9999, 0);
+        float4 DepthWet = float4(0, HasGround ? Ground + RestoreActorZ - 100.0f : -9999.0f, 0, 0);
+        uint Tri = RestoreTriangleIds[P.y * RestoreSize.x + P.x];
+        if (HasGround && Tri < RestoreTriangleCount)
+        {
+            uint3 Indices;
+            float3 A, B, C, Weights;
+            if (RestoreTriangle(Tri, Indices, A, B, C)
+                && RestoreBarycentric(float2(P) + 0.5f, RestorePixelPosition(A), RestorePixelPosition(B), RestorePixelPosition(C), Weights))
+            {
+                float Height = dot(Weights, float3(A.z, B.z, C.z));
+                float Depth = max(Height - Ground, 0.0f);
+                if (Depth > 0.0001f && isfinite(Depth))
+                {
+                    float4 Data = float4(0.5f, 0.5f, 1, 0);
+                    if (RestoreHasColors != 0u) Data = RestoreColors[Indices.x].bgra * Weights.x + RestoreColors[Indices.y].bgra * Weights.y + RestoreColors[Indices.z].bgra * Weights.z;
+                    Data = saturate(Data);
+                    float2 Velocity = (Data.rg * 2.0f - 1.0f) * RESTORE_VELOCITY_MAX;
+                    // Both nearest 8-bit encodings of zero must remain at rest.
+                    Velocity = float2(abs(Velocity.x) <= RESTORE_VELOCITY_MAX / 255.0f + 1.0e-6f ? 0 : Velocity.x,
+                                      abs(Velocity.y) <= RESTORE_VELOCITY_MAX / 255.0f + 1.0e-6f ? 0 : Velocity.y);
+                    Velocity = mul(float4(Velocity, 0, 0), RestoreVelocityRotation).xy;
+                    Velocity *= min(1.0f, RESTORE_VELOCITY_MAX / max(length(Velocity), 1.0e-6f));
+                    State = float4(Velocity, Depth, Data.a);
+                    Result = float4(Velocity, Height, Data.a);
+                    DepthWet = float4(Depth, Height + RestoreActorZ, Depth, Data.b);
+                    InterlockedOr(RestoreTileActive, 1u);
+                }
+            }
+        }
+        RestoreState[P] = State;
+        RestoreResult[P] = Result;
+        RestoreDepthWet[P] = DepthWet;
+        RestoreSmoothHeight[P] = float4(0, HasGround ? Ground : 0, 0, 0);
+        RestoreDebug[P] = float4(0, 0.5f, 0, HasGround ? Ground : 0);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (GroupIndex == 0u) RestoreTileMask[GroupId.xy] = float4(RestoreTileActive != 0u ? 1 : 0, 0, 0, 0);
+}

@@ -2,6 +2,8 @@
 #include "GeometryEditorActor.h"
 
 #include "CSVineTube.h"
+#include "CSVineTriangleSurface.h"
+#include "CSVineGlobalDistanceField.h"
 #include "CSGroundShaperSteps.h"   // CSShaperSteps::ReserveCount —— 管子容量的台阶（unity 构建下别指望别人替你带进来）
 
 #include "EngineUtils.h"
@@ -95,7 +97,8 @@ class FVVVoxelCS : public FGlobalShader
 	// texcoords/colors/indices + indirect args + counters) instead of the legacy transient
 	// StructuredBuffers. The legacy path (false) stays byte-identical.
 	class FBaseStreams : SHADER_PERMUTATION_BOOL("VINE_OUTPUT_BASESTREAMS");
-	using FPermutationDomain = TShaderPermutationDomain<FBaseStreams>;
+	class FGlobalDistanceField : SHADER_PERMUTATION_BOOL("VINE_USE_GLOBAL_DISTANCE_FIELD");
+	using FPermutationDomain = TShaderPermutationDomain<FBaseStreams, FGlobalDistanceField>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PathPoints)
@@ -145,6 +148,8 @@ class FVVVoxelCS : public FGlobalShader
 		SHADER_PARAMETER(uint32, TargetBucketHashSlotCount)
 		SHADER_PARAMETER(uint32, TargetBucketSearchRadius)
 		SHADER_PARAMETER(uint32, VineSurfaceAdsorption)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FCSVineTriangleParameters, TriangleSurface)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FCSVineGDFParameters, GlobalDistanceField)
 		SHADER_PARAMETER(float, VinesOffset)
 		SHADER_PARAMETER(float, TinyZJitterStrength)
 		RDG_BUFFER_ACCESS(VineDispatchArgs, ERHIAccess::IndirectArgs)
@@ -428,6 +433,8 @@ class FVVVoxelBuildAxesCS : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FVVVoxelBuildAxesCS);
 	SHADER_USE_PARAMETER_STRUCT(FVVVoxelBuildAxesCS, FGlobalShader);
+	class FGlobalDistanceField : SHADER_PERMUTATION_BOOL("VINE_USE_GLOBAL_DISTANCE_FIELD");
+	using FPermutationDomain = TShaderPermutationDomain<FGlobalDistanceField>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PathPoints)
@@ -456,6 +463,8 @@ class FVVVoxelBuildAxesCS : public FGlobalShader
 		SHADER_PARAMETER(uint32, TargetBucketHashSlotCount)
 		SHADER_PARAMETER(uint32, TargetBucketSearchRadius)
 		SHADER_PARAMETER(uint32, VineSurfaceAdsorption)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FCSVineTriangleParameters, TriangleSurface)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FCSVineGDFParameters, GlobalDistanceField)
 		RDG_BUFFER_ACCESS(VineDispatchArgs, ERHIAccess::IndirectArgs)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -574,6 +583,8 @@ class FVVVoxelNoiseCS : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FVVVoxelNoiseCS);
 	SHADER_USE_PARAMETER_STRUCT(FVVVoxelNoiseCS, FGlobalShader);
+	class FGlobalDistanceField : SHADER_PERMUTATION_BOOL("VINE_USE_GLOBAL_DISTANCE_FIELD");
+	using FPermutationDomain = TShaderPermutationDomain<FGlobalDistanceField>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PathPoints)
@@ -597,6 +608,8 @@ class FVVVoxelNoiseCS : public FGlobalShader
 		SHADER_PARAMETER(uint32, TargetBucketHashSlotCount)
 		SHADER_PARAMETER(uint32, TargetBucketSearchRadius)
 		SHADER_PARAMETER(uint32, VineSurfaceAdsorption)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FCSVineTriangleParameters, TriangleSurface)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FCSVineGDFParameters, GlobalDistanceField)
 		SHADER_PARAMETER(float, CurlNoiseStrength)
 		SHADER_PARAMETER(float, CurlNoiseFrequency)
 		SHADER_PARAMETER(uint32, NoiseIterations)
@@ -652,6 +665,8 @@ class FVVVoxelFinalProjectCS : public FGlobalShader
 {
 	DECLARE_GLOBAL_SHADER(FVVVoxelFinalProjectCS);
 	SHADER_USE_PARAMETER_STRUCT(FVVVoxelFinalProjectCS, FGlobalShader);
+	class FGlobalDistanceField : SHADER_PERMUTATION_BOOL("VINE_USE_GLOBAL_DISTANCE_FIELD");
+	using FPermutationDomain = TShaderPermutationDomain<FGlobalDistanceField>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PathPointSurfaceTargets)
@@ -677,6 +692,8 @@ class FVVVoxelFinalProjectCS : public FGlobalShader
 		SHADER_PARAMETER(uint32, TargetBucketHashSlotCount)
 		SHADER_PARAMETER(uint32, TargetBucketSearchRadius)
 		SHADER_PARAMETER(uint32, VineSurfaceAdsorption)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FCSVineTriangleParameters, TriangleSurface)
+		SHADER_PARAMETER_STRUCT_INCLUDE(FCSVineGDFParameters, GlobalDistanceField)
 		SHADER_PARAMETER(float, VinesOffset)
 		RDG_BUFFER_ACCESS(VineDispatchArgs, ERHIAccess::IndirectArgs)
 	END_SHADER_PARAMETER_STRUCT()
@@ -1370,6 +1387,7 @@ struct FVineTargetBucketBuffers
 // HasGeneratedGeometry() has to ask about.
 struct FVineBuildInput
 {
+	TSharedPtr<FCSVineTriangleSurfaceInputs, ESPMode::ThreadSafe> TriangleSurface;
 	// Line geometry CPU-fallback arrays (empty on the fused GPU-lines path).
 	TArray<FVector4f> PathPoints;
 	TArray<FVector4f> PathPointAxes;
@@ -1767,6 +1785,9 @@ static constexpr uint32 VineArgOffset(uint32 Slot) { return Slot * 3u * uint32(s
 // synchronous AddVineMeshPasses call.
 struct FVineMeshPassInputs
 {
+	FCSVineTriangleParameters TriangleSurface{};
+	FCSVineGDFParameters GlobalDistanceField{};
+	bool bUseGlobalDistanceField = false;
 	// GPU-resident line geometry recorded earlier into the SAME graph by the fused SC + concat
 	// passes. Null on the CPU-array fallback below.
 	bool bSurfaceAdsorption = true;
@@ -2068,7 +2089,9 @@ static void AddVineMeshPasses(FRDGBuilder& GraphBuilder, ERHIFeatureLevel::Type 
 	// GPU noise loop output (voxel projection + CurlNoise). Downstream passes read this as the geometry source.
 	CSHelper::FRDGStructuredBufferRefs PathPointNoisedBuffer = CSHelper::CreateStructuredBuffer(GraphBuilder, sizeof(FVector4f), PathPointCount, TEXT("VVVoxel.PathPointsNoised"), true, true);
 
-	TShaderMapRef<FVVVoxelNoiseCS> NoiseShader(GetGlobalShaderMap(FeatureLevel));
+	FVVVoxelNoiseCS::FPermutationDomain NoiseShaderPermutation;
+	NoiseShaderPermutation.Set<FVVVoxelNoiseCS::FGlobalDistanceField>(In.bUseGlobalDistanceField);
+	TShaderMapRef<FVVVoxelNoiseCS> NoiseShader(GetGlobalShaderMap(FeatureLevel), NoiseShaderPermutation);
 	FVVVoxelNoiseCS::FParameters* NoiseParameters = GraphBuilder.AllocParameters<FVVVoxelNoiseCS::FParameters>();
 	NoiseParameters->PathPoints = PathPointBuffer.SRV;
 	NoiseParameters->VoxelCells = VoxelCellsBuffer.SRV;
@@ -2091,6 +2114,8 @@ static void AddVineMeshPasses(FRDGBuilder& GraphBuilder, ERHIFeatureLevel::Type 
 	NoiseParameters->TargetBucketHashSlotCount = TargetBuckets.HashSlotCount;
 	NoiseParameters->TargetBucketSearchRadius = TargetBuckets.SearchRadius;
 	NoiseParameters->VineSurfaceAdsorption = bSurfaceAdsorption ? 1u : 0u;
+	NoiseParameters->TriangleSurface = In.TriangleSurface;
+	NoiseParameters->GlobalDistanceField = In.GlobalDistanceField;
 	NoiseParameters->CurlNoiseStrength = CurlNoiseStrength;
 	NoiseParameters->CurlNoiseFrequency = CurlNoiseFrequency;
 	NoiseParameters->NoiseIterations = SafeNoiseIterations;
@@ -2099,7 +2124,9 @@ static void AddVineMeshPasses(FRDGBuilder& GraphBuilder, ERHIFeatureLevel::Type 
 	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VVVoxel.ApplyNoise"), NoiseShader, NoiseParameters,
 		DispatchArgsBuffer, VineArgOffset(VineArgSlot_Points));
 
-	TShaderMapRef<FVVVoxelBuildAxesCS> BuildAxesShader(GetGlobalShaderMap(FeatureLevel));
+	FVVVoxelBuildAxesCS::FPermutationDomain BuildAxesShaderPermutation;
+	BuildAxesShaderPermutation.Set<FVVVoxelBuildAxesCS::FGlobalDistanceField>(In.bUseGlobalDistanceField);
+	TShaderMapRef<FVVVoxelBuildAxesCS> BuildAxesShader(GetGlobalShaderMap(FeatureLevel), BuildAxesShaderPermutation);
 	FVVVoxelBuildAxesCS::FParameters* BuildAxesParameters = GraphBuilder.AllocParameters<FVVVoxelBuildAxesCS::FParameters>();
 	BuildAxesParameters->PathPoints = PathPointNoisedBuffer.SRV;
 	BuildAxesParameters->PathPointAxes = PathPointAxisBuffer.SRV;
@@ -2127,6 +2154,8 @@ static void AddVineMeshPasses(FRDGBuilder& GraphBuilder, ERHIFeatureLevel::Type 
 	BuildAxesParameters->TargetBucketHashSlotCount = TargetBuckets.HashSlotCount;
 	BuildAxesParameters->TargetBucketSearchRadius = TargetBuckets.SearchRadius;
 	BuildAxesParameters->VineSurfaceAdsorption = bSurfaceAdsorption ? 1u : 0u;
+	BuildAxesParameters->TriangleSurface = In.TriangleSurface;
+	BuildAxesParameters->GlobalDistanceField = In.GlobalDistanceField;
 	BuildAxesParameters->VineDispatchArgs = DispatchArgsBuffer;
 
 	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VVVoxel.BuildAxes"), BuildAxesShader, BuildAxesParameters,
@@ -2149,7 +2178,9 @@ static void AddVineMeshPasses(FRDGBuilder& GraphBuilder, ERHIFeatureLevel::Type 
 	// PerlinNoise left its result in the A buffers. Project those points back onto the
 	// voxel surface (A -> B) first; the smoothing ping-pong below then refines the
 	// already-projected surface instead of feeding the projection.
-	TShaderMapRef<FVVVoxelFinalProjectCS> FinalProjectShader(GetGlobalShaderMap(FeatureLevel));
+	FVVVoxelFinalProjectCS::FPermutationDomain FinalProjectShaderPermutation;
+	FinalProjectShaderPermutation.Set<FVVVoxelFinalProjectCS::FGlobalDistanceField>(In.bUseGlobalDistanceField);
+	TShaderMapRef<FVVVoxelFinalProjectCS> FinalProjectShader(GetGlobalShaderMap(FeatureLevel), FinalProjectShaderPermutation);
 	FVVVoxelFinalProjectCS::FParameters* FinalProjectParameters = GraphBuilder.AllocParameters<FVVVoxelFinalProjectCS::FParameters>();
 	FinalProjectParameters->PathPointSurfaceTargets = PathPointSurfaceTargetA.SRV;
 	FinalProjectParameters->PathPointSurfaceNormals = PathPointSurfaceNormalA.SRV;
@@ -2174,6 +2205,8 @@ static void AddVineMeshPasses(FRDGBuilder& GraphBuilder, ERHIFeatureLevel::Type 
 	FinalProjectParameters->TargetBucketHashSlotCount = TargetBuckets.HashSlotCount;
 	FinalProjectParameters->TargetBucketSearchRadius = TargetBuckets.SearchRadius;
 	FinalProjectParameters->VineSurfaceAdsorption = bSurfaceAdsorption ? 1u : 0u;
+	FinalProjectParameters->TriangleSurface = In.TriangleSurface;
+	FinalProjectParameters->GlobalDistanceField = In.GlobalDistanceField;
 	FinalProjectParameters->VinesOffset = VinesOffset;
 	FinalProjectParameters->VineDispatchArgs = DispatchArgsBuffer;
 
@@ -2250,7 +2283,23 @@ static void AddVineMeshPasses(FRDGBuilder& GraphBuilder, ERHIFeatureLevel::Type 
 		Swap(ReadSurfaceNormal, WriteSurfaceNormal);
 	}
 
-	// After resample + smoothing ping-pong, Read* points to the final geometry buffers.
+	// Euclidean smoothing can pull even exact triangle projections through a convex corner.
+	// Reproject AFTER smoothing; the legacy voxel mode keeps its original pass order for A/B.
+	if (bSurfaceAdsorption && (In.bUseGlobalDistanceField || In.TriangleSurface.VineSurfaceTriangleCount > 0u))
+	{
+		auto* Reproject = GraphBuilder.AllocParameters<FVVVoxelFinalProjectCS::FParameters>();
+		*Reproject = *FinalProjectParameters;
+		Reproject->PathPointSurfaceTargets = ReadSurfaceTarget->SRV;
+		Reproject->PathPointSurfaceNormals = ReadSurfaceNormal->SRV;
+		Reproject->RW_PathPointSurfaceTargets = WriteSurfaceTarget->UAV;
+		Reproject->RW_PathPointSurfaceNormals = WriteSurfaceNormal->UAV;
+		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("Vine.%sReprojectAfterSmooth", In.bUseGlobalDistanceField ? TEXT("GDF") : TEXT("Triangle")), FinalProjectShader, Reproject,
+			DispatchArgsBuffer, VineArgOffset(VineArgSlot_Points));
+		Swap(ReadSurfaceTarget, WriteSurfaceTarget);
+		Swap(ReadSurfaceNormal, WriteSurfaceNormal);
+	}
+
+	// After resample + smoothing + optional triangle correction, Read* is final.
 	const CSHelper::FRDGStructuredBufferRefs* GeometrySurfaceTargetBuffer = ReadSurfaceTarget;
 	const CSHelper::FRDGStructuredBufferRefs* GeometrySurfaceNormalBuffer = ReadSurfaceNormal;
 
@@ -2276,6 +2325,7 @@ static void AddVineMeshPasses(FRDGBuilder& GraphBuilder, ERHIFeatureLevel::Type 
 	CSHelper::FRDGStructuredBufferRefs& FinalFrameNormalsForBuild = PathPointFrameNormalA;
 
 	FVVVoxelCS::FPermutationDomain PermVec;
+	PermVec.Set<FVVVoxelCS::FGlobalDistanceField>(In.bUseGlobalDistanceField);
 	PermVec.Set<FVVVoxelCS::FBaseStreams>(Out.bBaseStreams);
 	TShaderMapRef<FVVVoxelCS> ComputeShader(GetGlobalShaderMap(FeatureLevel), PermVec);
 	FVVVoxelCS::FParameters* Parameters = GraphBuilder.AllocParameters<FVVVoxelCS::FParameters>();
@@ -2341,6 +2391,8 @@ static void AddVineMeshPasses(FRDGBuilder& GraphBuilder, ERHIFeatureLevel::Type 
 	Parameters->TargetBucketHashSlotCount = TargetBuckets.HashSlotCount;
 	Parameters->TargetBucketSearchRadius = TargetBuckets.SearchRadius;
 	Parameters->VineSurfaceAdsorption = bSurfaceAdsorption ? 1u : 0u;
+	Parameters->TriangleSurface = In.TriangleSurface;
+	Parameters->GlobalDistanceField = In.GlobalDistanceField;
 	Parameters->VinesOffset = VinesOffset;
 	Parameters->TinyZJitterStrength = TinyZJitterStrength;
 	Parameters->VineDispatchArgs = DispatchArgsBuffer;
@@ -2517,9 +2569,12 @@ static FVineBuildInput VineLeaf_BuildVineBuildInput(
 	FCSSurfaceVoxelPassInputs* FusedVoxels,
 	double* OutBuildVoxelUploadMs = nullptr,
 	double* OutBuildHashMs = nullptr,
-	double* OutBuildTargetBucketsMs = nullptr)
+	double* OutBuildTargetBucketsMs = nullptr,
+	TSharedPtr<FCSVineTriangleSurfaceInputs, ESPMode::ThreadSafe> TriangleSurface = nullptr,
+	bool bUseGlobalDistanceField = false)
 {
 	FVineBuildInput B;
+	B.TriangleSurface = MoveTemp(TriangleSurface);
 
 	// Copy the CPU-fallback line arrays verbatim (empty on the fused GPU-lines path).
 	B.PathPoints = PathPoints;
@@ -2592,7 +2647,7 @@ static FVineBuildInput VineLeaf_BuildVineBuildInput(
 	// RDG 在绑定时才炸，且报的是离这里很远的那个 pass。内容无所谓 —— shader 侧的
 	// `VineSurfaceAdsorption` uniform 在 `FindNearestVoxelSample` 开头就 return false 了，
 	// 这些字节一个都不会被读到。
-	if (!bSurfaceAdsorption)
+	if (!bSurfaceAdsorption || B.TriangleSurface.IsValid() || bUseGlobalDistanceField)
 	{
 		B.bUseGPUVoxels = false;
 		B.bUseFusedVoxels = false;
@@ -2631,6 +2686,7 @@ static FVineBuildInput VineLeaf_BuildVineBuildInput(
 			// 给一个不塌陷的盒子而不是 invalid —— 让失败停在"看得见的空网格"而不是静默返回。
 			B.LocalBounds = FBox(FVector::ZeroVector, FVector(100.0));
 		}
+		if (B.TriangleSurface) B.LocalBounds = B.TriangleSurface->Bounds.ExpandBy(FMath::Abs(VinesOffset) + FMath::Abs(CircleScale) * 40.0f + 50.0f);
 		B.bValid = true;
 		return B;
 	}
@@ -2945,6 +3001,7 @@ static bool BuildVineGeometryIntoMeshAsync(UCSMesh* Target, FVineBuildInput Inpu
 		if (!IndexBuf || !IndirectBuf || !CountersBuf) return;
 
 		FVineMeshPassInputs In = VineLeaf_MakePassInputs(Input);
+		In.TriangleSurface = AddVineTriangleSurfacePasses(GraphBuilder, Input.TriangleSurface.Get());
 
 		// 表面体素也记录进这张图。放在 SC 求解之前：求解要投影到表面，读的就是这里产出的
 		// 体素。同图内靠 UAV 依赖自动定序，不需要中间 Execute，也不需要把结果 extract 成
@@ -3061,6 +3118,100 @@ static bool BuildVineGeometryIntoMeshAsync(UCSMesh* Target, FVineBuildInput Inpu
 
 		if (OnBuilt) OnBuilt(bOk);
 	});
+}
+
+// GDF must be consumed in the renderer's current view graph, never copied as raw textures into
+// EditMeshAsync's later graph. Build independent output streams there, then publish by GPU copy.
+static bool BuildVineGeometryWithGlobalDistanceFieldAsync(UWorld* World, UCSMesh* Target, FVineBuildInput Input,
+	const FVV& Settings, TFunction<void(bool)> OnBuilt, TFunction<bool()> IsCurrent)
+{
+	if (!World || !Target || !Input.bValid || !Input.bUseGPULines || Target->IsEditInFlight()) return false;
+	if (!ensureMsgf(!Input.TriangleSurface.IsValid() && !Input.bUseFusedVoxels && !Input.bUseGPUVoxels,
+		TEXT("GDF vine generation must not receive scene triangle or voxel inputs."))) return false;
+	if (Input.OutputVertexCount == 0u || Input.OutputIndexCount == 0u || GMaxRHIFeatureLevel < ERHIFeatureLevel::SM5) return false;
+	const uint32 VertexCount = Input.OutputVertexCount;
+	const uint32 IndexCount = Input.OutputIndexCount;
+	const FBox Bounds = Input.LocalBounds;
+	auto Completion = MakeShared<TFunction<void(bool)>, ESPMode::ThreadSafe>(MoveTemp(OnBuilt));
+	FGDFJobRequest Request;
+	Request.Build = [Input = MoveTemp(Input), MaxDistance = Settings.GDFMaxProjectionDistance,
+		Tolerance = Settings.GDFProjectionTolerance, Iterations = Settings.GDFProjectionIterations]
+		(FRDGBuilder& GraphBuilder, const FSceneView& View, const FGlobalDistanceFieldParameterData& Data, FGDFJobOutputs& Outputs) mutable
+	{
+		FVineMeshPassInputs In = VineLeaf_MakePassInputs(Input);
+		In.bUseGlobalDistanceField = true;
+		In.GlobalDistanceField = MakeVineGDFParameters(View, Data, MaxDistance, Tolerance, Iterations);
+		// The GDF permutation has no triangle resources or surface extraction passes.
+		FVineFusedSCOutputs Lines;
+		if (!AddVineFusedSCConcatPasses(GraphBuilder, Input.FusedSC, Lines)) return;
+		In.GPULinePoints = Lines.PathPoints;
+		In.GPULineMeta = Lines.PathPointMeta;
+		In.GPULineSeg = Lines.SegmentMeta;
+		In.LineCountsBuffer = Lines.Counts;
+		const auto MakeOutput = [&GraphBuilder, &Outputs](const TCHAR* Name, uint32 Stride, uint32 Count, EPixelFormat Format)
+		{
+			FRDGBufferRef Buffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateBufferDesc(Stride, Count), Name);
+			Outputs.Add(FName(Name), GraphBuilder.ConvertToExternalBuffer(Buffer));
+			return GraphBuilder.CreateUAV(FRDGBufferUAVDesc(Buffer, Format));
+		};
+		FVineMeshPassOutputs Out;
+		Out.bBaseStreams = true;
+		Out.PositionUAV = MakeOutput(TEXT("Vine.GDF.Position"), 4, Input.OutputVertexCount * 3u, PF_R32_FLOAT);
+		Out.TangentUAV = MakeOutput(TEXT("Vine.GDF.Tangent"), 4, Input.OutputVertexCount * 2u, PF_R32_UINT);
+		Out.TexCoordUAV = MakeOutput(TEXT("Vine.GDF.TexCoord"), 4, Input.OutputVertexCount * 2u * Input.NumTexCoordSets, PF_R32_FLOAT);
+		Out.ColorUAV = MakeOutput(TEXT("Vine.GDF.Color"), 4, Input.OutputVertexCount, PF_R32_UINT);
+		Out.IndexUAV = MakeOutput(TEXT("Vine.GDF.Index"), 4, Input.OutputIndexCount, PF_R32_UINT);
+		Out.IndirectArgsUAV = MakeOutput(TEXT("Vine.GDF.Args"), 4, 5, PF_R32_UINT);
+		Out.MeshCountersUAV = MakeOutput(TEXT("Vine.GDF.Counts"), 4, 2, PF_R32_UINT);
+		Out.VineWorldToLocal = Input.VineWorldToLocal;
+		AddVineMeshPasses(GraphBuilder, GMaxRHIFeatureLevel, In, Out);
+	};
+	Request.OnComplete = [WeakTarget = TWeakObjectPtr<UCSMesh>(Target), Completion, VertexCount, IndexCount, Bounds, IsCurrent](FGDFJobOutputs& Outputs)
+	{
+		UCSMesh* Mesh = WeakTarget.Get();
+		if (!Mesh || (IsCurrent && !IsCurrent()) || Outputs.Buffers.Num() != 7 || Mesh->IsEditInFlight()
+			|| !Mesh->EnsureCapacitySync(int32(FMath::Max(VertexCount, 64u)), int32(FMath::Max(IndexCount, 192u))))
+		{
+			if (*Completion) (*Completion)(false);
+			return;
+		}
+		auto Copied = MakeShared<bool, ESPMode::ThreadSafe>(false);
+		const bool bIssued = Mesh->EditMeshAsync([Outputs = MoveTemp(Outputs), Bounds, Copied](FCSMeshEditContext& Context)
+		{
+			struct FCopy { const TCHAR* Name; FRDGBufferRef Destination; };
+			const FCopy Copies[] = {
+				{TEXT("Vine.GDF.Position"), Context.Positions()}, {TEXT("Vine.GDF.Tangent"), Context.Tangents()},
+				{TEXT("Vine.GDF.TexCoord"), Context.TexCoords()}, {TEXT("Vine.GDF.Color"), Context.Colors()},
+				{TEXT("Vine.GDF.Index"), Context.Indices()}, {TEXT("Vine.GDF.Args"), Context.IndirectArgs()},
+				{TEXT("Vine.GDF.Counts"), Context.Counters()}};
+			// Validate the entire copy before recording any writes to the previously displayed mesh.
+			for (const FCopy& Copy : Copies)
+			{
+				const auto Source = Outputs.Find(FName(Copy.Name));
+				if (!Source || !Copy.Destination || Source->GetSize() > Copy.Destination->Desc.GetSize()) return;
+			}
+			for (const FCopy& Copy : Copies)
+			{
+				const auto Source = Outputs.Find(FName(Copy.Name));
+				AddCopyBufferPass(Context.GraphBuilder, Copy.Destination, 0,
+					Context.GraphBuilder.RegisterExternalBuffer(Source), 0, Source->GetSize());
+			}
+			if (FRDGBufferRef Materials = Context.MaterialIds()) AddClearUAVPass(Context.GraphBuilder,
+				Context.GraphBuilder.CreateUAV(FRDGBufferUAVDesc(Materials, PF_R32_UINT)), 0u);
+			UCSMeshOps::InvalidateSections(Context);
+			Context.InvalidateKnownCounts();
+			Context.SetWorldBounds(Bounds);
+			Copied.Get() = true;
+		}, [Completion, Copied](bool bAlive)
+		{
+			if (*Completion) (*Completion)(bAlive && Copied.Get());
+		});
+		if (!bIssued && *Completion) (*Completion)(false);
+	};
+	return EnqueueVineGDFJob(World, Target->GetOuter(), MoveTemp(Request), [Completion]()
+	{
+		if (*Completion) (*Completion)(false);
+	}, MoveTemp(IsCurrent));
 }
 
 // May this actor run a blocking vine generation right now? Every case below is one where the
@@ -3486,6 +3637,7 @@ void AVineContainer::ExportTransformArrayToFoliage(UFoliageType* InFoliageType)
 }
 inline void AVineContainer::Clean()
 {
+	++VineGDFRequestGeneration;
 	ClearDebugVineSplineActor();
 
 	// The vine itself, which this used to leave standing: every CPU-side cache the generation
@@ -3548,6 +3700,17 @@ void AVineContainer::ClearDebugVineSplineActor()
 // 也没有 flush。分批仍然保留（见 AddCSSurfaceVoxelPasses），显存行为不变。
 bool AVineContainer::GenerateVineGPU()
 {
+	return GenerateVineGPUInternal(false);
+}
+
+bool AVineContainer::GenerateVineGPUWithGlobalDistanceField()
+{
+	return GenerateVineGPUInternal(true);
+}
+
+bool AVineContainer::GenerateVineGPUInternal(bool bGlobalDistanceField)
+{
+	const bool bUseGDF = bGlobalDistanceField && VV.bSurfaceAdsorption;
 	GV_ACTOR_TIME_SCOPE(TEXT("AVineContainer.GenerateVineGPU.Total"));
 
 	// 上一次生成还在渲染线程上排队。以前这条不可能发生——EditMeshSync 的 flush 让每次生成在
@@ -3577,64 +3740,76 @@ bool AVineContainer::GenerateVineGPU()
 	for (const FTransform& T : SourceTransforms) BoundsPoints.Add(T.GetLocation());
 	for (const FTransform& T : TargetTransforms) BoundsPoints.Add(T.GetLocation());
 
-	SurfaceVoxelBlurIterations = FMath::Max(0, VV.GenerateVineVoxelNormalBlurIterations);
-
 	const FBox Bounds = FBox(BoundsPoints).ExpandBy(50.0);
-	const FVector Center = Bounds.GetCenter();
-	const FVector Extent = Bounds.GetExtent();
-
-	// 1. 摆盒子：后面的体素查询范围（GetGeneratorBoundsWorldBox）就是从 GeneratorBounds 读的。
-	//    纯 CPU / 组件操作，不碰 GPU。
-	//
-	//    这里以前调的是 EnsureTriangleCacheByBox，但藤蔓只需要「盒子被摆好」这个副作用：表面体素
-	//    走的是 PrepareSurfaceVoxelPassInputs 自己的场景三角形收集，从不读脏页三角缓存的任何产出
-	//    （句柄当场就被 (void) 丢掉了），而那次调用要为每个参考点扫一遍 17³ 邻域并管理页分配。
-	//    产出无人消费，改为只摆盒子。VoxelGridSettings 仍要写：缓存以外的路径也读它。
-	{
-		VoxelGridSettings.VoxelSize = SC.VoxelSize;
-		VoxelGridSettings.ActivationRadius = SC.VoxelSize * 8.0f;
-		if (GeneratorBounds)
-		{
-			GeneratorBounds->SetWorldLocation(Center);
-			GeneratorBounds->SetBoxExtent(FVector(
-				FMath::Max(0.0, Extent.X), FMath::Max(0.0, Extent.Y), FMath::Max(0.0, Extent.Z)));
-		}
-	}
-
-	// 重建三角形剔除用的参考点。剔除按「离任一参考点多远」来砍，而 ReferencePoints 历史上只有
-	// 视口按钮那条路会写——蓝图直接调生成入口时它要么是空的（剔除静默失效），要么还是上一批
-	// target（按错误位置剔除，表面整块缺失、藤蔓穿模）。两种都是错误结果，所以不依赖调用者，
-	// 每次都用当前这批 target 重填。
-	ReferencePoints.Reset();
-	ReferencePoints.Reserve(TargetTransforms.Num());
-	for (const FTransform& T : TargetTransforms) ReferencePoints.Add(T.GetLocation());
-
-	// 表面三角形的参考点剔除距离。三个三角形展开 pass（Extract / FilterInitialTriangleSoup /
-	// AppendNaniteSource）本来就是边展开边按参考点剔除的，但这里以前传 0——而 0 会让
-	// ReferenceFilterDistanceSq 取 FLT_MAX，开关却仍是 1（ReferencePoints 是非空的 target 列表），
-	// 于是每个三角形都对全部 target 跑一遍无 early-out 的最近距离循环再无条件通过：代价照付，一个
-	// 不剔。ReferencePoints 就是 target 位置，藤蔓中心线不会长到离 target 更远处，按生长影响半径的
-	// 倍数取即可；下限压着体素投影的搜索半径（VoxelSize*8）——剔除范围一旦小于投影搜索范围，边界
-	// 处就会找不到吸附目标，中心线会飘离表面。
-	const float SurfaceTriangleFilterDistance = FMath::Max(SC.InfluenceRadius * 2.0f, SC.VoxelSize * 8.0f);
-
-	// 2. 体素：只做 CPU 侧准备（收集并解析三角形请求、地形三角形、参数），不 dispatch。
-	//    产出的 bundle 一路带到叶子的图里由 AddCSSurfaceVoxelPasses 记录。
+	// Discard previous surface inputs. GDF only needs source/target transforms and the current view.
 	PendingSurfaceVoxelInputs = FCSSurfaceVoxelPassInputs();
-	if (VV.bSurfaceAdsorption)
+	PendingTriangleSurface.Reset();
+	if (!bGlobalDistanceField)
 	{
-		GV_ACTOR_TIME_SCOPE(TEXT("AVineContainer.GenerateVineGPU.PrepareSurfaceVoxelInputs"));
-		if (!PrepareSurfaceVoxelPassInputs(SC.VoxelSize, SurfaceTriangleFilterDistance, PendingSurfaceVoxelInputs))
+		SurfaceVoxelBlurIterations = FMath::Max(0, VV.GenerateVineVoxelNormalBlurIterations);
+
+		const FVector Center = Bounds.GetCenter();
+		const FVector Extent = Bounds.GetExtent();
+
+		// 1. 摆盒子：后面的体素查询范围（GetGeneratorBoundsWorldBox）就是从 GeneratorBounds 读的。
+		//    纯 CPU / 组件操作，不碰 GPU。
+		//
+		//    这里以前调的是 EnsureTriangleCacheByBox，但藤蔓只需要「盒子被摆好」这个副作用：表面体素
+		//    走的是 PrepareSurfaceVoxelPassInputs 自己的场景三角形收集，从不读脏页三角缓存的任何产出
+		//    （句柄当场就被 (void) 丢掉了），而那次调用要为每个参考点扫一遍 17³ 邻域并管理页分配。
+		//    产出无人消费，改为只摆盒子。VoxelGridSettings 仍要写：缓存以外的路径也读它。
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[GenerateVineGPU] 范围内没有可体素化的几何，%s 无法生成藤蔓。"), *GetActorNameOrLabel());
-			return false;
+			VoxelGridSettings.VoxelSize = SC.VoxelSize;
+			VoxelGridSettings.ActivationRadius = SC.VoxelSize * 8.0f;
+			if (GeneratorBounds)
+			{
+				GeneratorBounds->SetWorldLocation(Center);
+				GeneratorBounds->SetBoxExtent(FVector(
+					FMath::Max(0.0, Extent.X), FMath::Max(0.0, Extent.Y), FMath::Max(0.0, Extent.Z)));
+			}
+		}
+
+		// 重建三角形剔除用的参考点。剔除按「离任一参考点多远」来砍，而 ReferencePoints 历史上只有
+		// 视口按钮那条路会写——蓝图直接调生成入口时它要么是空的（剔除静默失效），要么还是上一批
+		// target（按错误位置剔除，表面整块缺失、藤蔓穿模）。两种都是错误结果，所以不依赖调用者，
+		// 每次都用当前这批 target 重填。
+		ReferencePoints.Reset();
+		ReferencePoints.Reserve(TargetTransforms.Num());
+		for (const FTransform& T : TargetTransforms) ReferencePoints.Add(T.GetLocation());
+
+		// 表面三角形的参考点剔除距离。三个三角形展开 pass（Extract / FilterInitialTriangleSoup /
+		// AppendNaniteSource）本来就是边展开边按参考点剔除的，但这里以前传 0——而 0 会让
+		// ReferenceFilterDistanceSq 取 FLT_MAX，开关却仍是 1（ReferencePoints 是非空的 target 列表），
+		// 于是每个三角形都对全部 target 跑一遍无 early-out 的最近距离循环再无条件通过：代价照付，一个
+		// 不剔。ReferencePoints 就是 target 位置，藤蔓中心线不会长到离 target 更远处，按生长影响半径的
+		// 倍数取即可；下限压着体素投影的搜索半径（VoxelSize*8）——剔除范围一旦小于投影搜索范围，边界
+		// 处就会找不到吸附目标，中心线会飘离表面。
+		const float SurfaceTriangleFilterDistance = FMath::Max(SC.InfluenceRadius * 2.0f, SC.VoxelSize * 8.0f);
+
+		// 2. 体素：只做 CPU 侧准备（收集并解析三角形请求、地形三角形、参数），不 dispatch。
+		//    产出的 bundle 一路带到叶子的图里由 AddCSSurfaceVoxelPasses 记录。
+		if (VV.bSurfaceAdsorption && VV.bUseNaniteTriangleSurface)
+		{
+			GV_ACTOR_TIME_SCOPE(TEXT("AVineContainer.GenerateVineGPU.PrepareNaniteTriangles"));
+			FCSBoxSceneCollectOptions Options = MakeBoxSceneCollectOptions(Bounds);
+			PendingTriangleSurface = PrepareVineTriangleSurface(this, GetWorld(), Options,
+				VV.NaniteSurfaceCutError, VV.SurfaceMemoryBudgetMiB, SurfaceTriangleFilterDistance);
+			if (!PendingTriangleSurface)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[GenerateVineGPU] Triangle surface preparation failed for %s."), *GetActorNameOrLabel());
+				return false;
+			}
+		}
+		else if (VV.bSurfaceAdsorption)
+		{
+			GV_ACTOR_TIME_SCOPE(TEXT("AVineContainer.GenerateVineGPU.PrepareSurfaceVoxelInputs"));
+			if (!PrepareSurfaceVoxelPassInputs(SC.VoxelSize, SurfaceTriangleFilterDistance, PendingSurfaceVoxelInputs))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[GenerateVineGPU] 范围内没有可体素化的几何，%s 无法生成藤蔓。"), *GetActorNameOrLabel());
+				return false;
+			}
 		}
 	}
-	// 关掉吸附：这一步整个不做。**它就是这条路上的大头** —— 实测基线里
-	// `GenerateVineGPU.Total` 的 12.4–14.6 ms 有 10–12 ms 花在这里（收集场景 + 地形三角形，
-	// 规模由 `SC.VoxelSize` 与包围盒决定、与 target 数无关）。
-	// ⚠️ 上面那句无条件的重置不能省：`PendingSurfaceVoxelInputs` 是成员，留着上一次的内容会让
-	// `VineLeaf_BuildVineBuildInput` 误判成"有融合体素"，于是关了开关却仍走吸附路径。
 	// Cache generation bounds for subsequent GPU visualization.
 	InstanceBound = Bounds;
 
@@ -3788,10 +3963,12 @@ bool AVineContainer::GenerateVineGPU()
 			EmptySurfaceVoxelData,
 			VV.bSurfaceAdsorption,
 			&FusedSCInputs,
-			LastSurfaceVoxelGPUBuffers.IsValid() ? &LastSurfaceVoxelGPUBuffers : nullptr,
+			!bGlobalDistanceField && LastSurfaceVoxelGPUBuffers.IsValid() ? &LastSurfaceVoxelGPUBuffers : nullptr,
 			// GenerateVineGPU 备好的融合体素输入。有效时体素在构建那张图里现算，
 			// 上面那个 pooled 参数就用不上了；会被 MoveTemp 进 bundle，故本次消费后即失效。
-			PendingSurfaceVoxelInputs.IsValid() ? &PendingSurfaceVoxelInputs : nullptr);
+			!bGlobalDistanceField && PendingSurfaceVoxelInputs.IsValid() ? &PendingSurfaceVoxelInputs : nullptr,
+			nullptr, nullptr, nullptr, MoveTemp(PendingTriangleSurface), bUseGDF);
+		if (bUseGDF) LeafInput.LocalBounds = Bounds.ExpandBy(VV.GDFMaxProjectionDistance + FMath::Abs(VV.VinesOffset) + FMath::Abs(VV.CircleScale) * 40.0f);
 		if (!LeafInput.bValid)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[VisVineGPU] Vine build input was invalid; nothing generated."));
@@ -3803,7 +3980,7 @@ bool AVineContainer::GenerateVineGPU()
 
 		// 体素调试：只在真要画的时候才挂出口，否则一次 extract 都不做。
 		// 条件与旧的调试块一致（开关 + 时长），差别是不再另跑一遍体素化。
-		const bool bWantVoxelDebug = GPUProjectionDebug.bDrawGPUProjectionVoxelDebugPoints
+		const bool bWantVoxelDebug = !bGlobalDistanceField && GPUProjectionDebug.bDrawGPUProjectionVoxelDebugPoints
 			&& (GPUProjectionDebug.GPUProjectionVoxelDebugDuration > 0.0f || GPUProjectionDebug.bGPUProjectionVoxelDebugPointsPersistent)
 			&& DisplayComponent != nullptr;
 		if (bWantVoxelDebug)
@@ -3826,10 +4003,11 @@ bool AVineContainer::GenerateVineGPU()
 		TWeakObjectPtr<AVineContainer> WeakThis(this);
 		const uint32 IssuedVertexCount = LeafVertexCount;
 		const uint32 IssuedIndexCount = LeafIndexCount;
+		const uint64 GDFGeneration = bUseGDF ? ++VineGDFRequestGeneration : VineGDFRequestGeneration;
 
 		bVineBuildInFlight = true;
-		const bool bIssued = BuildVineGeometryIntoMeshAsync(VineGeometry, MoveTemp(LeafInput),
-			[WeakThis, DebugVoxelSource, BuildLeafStartSeconds, IssuedVertexCount, IssuedIndexCount](bool bBuilt)
+		TFunction<void(bool)> OnBuilt =
+			[WeakThis, DebugVoxelSource, BuildLeafStartSeconds, IssuedVertexCount, IssuedIndexCount, bUseGDF](bool bBuilt)
 		{
 			AVineContainer* Container = WeakThis.Get();
 			if (!Container) return;
@@ -3839,6 +4017,11 @@ bool AVineContainer::GenerateVineGPU()
 
 			if (!bBuilt)
 			{
+				if (bUseGDF)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[VineGDF] Build failed; previous vine retained."));
+					return;
+				}
 				// Nothing was built, so what the mesh still holds is the PREVIOUS vine. Leaving it drawn
 				// next to sources and targets it no longer matches is the worst outcome: it looks like a
 				// successful generation. Release rather than merely unbind — the allocation was sized for
@@ -3888,7 +4071,15 @@ bool AVineContainer::GenerateVineGPU()
 			UE_LOG(LogTemp, Log, TEXT("[VisVineGPU] Built tube vine on the GPU. Vertices=%u Indices=%u"),
 				IssuedVertexCount,
 				IssuedIndexCount);
-		});
+		};
+
+		const bool bIssued = bUseGDF
+			? BuildVineGeometryWithGlobalDistanceFieldAsync(GetWorld(), VineGeometry, MoveTemp(LeafInput), VV, MoveTemp(OnBuilt), [WeakThis, GDFGeneration]()
+			{
+				const AVineContainer* Container = WeakThis.Get();
+				return Container && Container->VineGDFRequestGeneration == GDFGeneration;
+			})
+			: BuildVineGeometryIntoMeshAsync(VineGeometry, MoveTemp(LeafInput), MoveTemp(OnBuilt));
 
 		if (!bIssued)
 		{

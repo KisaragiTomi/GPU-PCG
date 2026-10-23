@@ -7,6 +7,7 @@
 #include "CSGpuSharedLayout.ush"
 #include "CSGpuInstancedMeshComponent.generated.h"
 
+class IConsoleVariable;
 class UCSMesh;
 class UCSGpuInstancedNaniteComponent;
 class UStaticMesh;
@@ -122,6 +123,13 @@ struct FCSGpuInstancedBaseMesh
  * ⚠️ **[3].w < 0 = 这个实例藏起来**（组件级契约，2026-09-15）：经典路的剔除 pass 跳过它，Nanite 路的
  * GPU-Scene 写入把它写成 HIDDEN，`SaveToStaticMesh` 不烘它。以前这条哨兵只有 `M_TinyGladeBrick` 的
  * OpacityMask 认（门框砖的转角墩剔除），组件改成默认画资产材质之后材质就不再可靠，契约因此下沉到组件。
+ *
+ * ⚠️ **一个视图族的渲染期间不许改写这几块 buffer**（2026-10-02，「可见源行号」布局的前提，见
+ * FCSGpuInstancedGpuLayout::bVisibleSourceIndex）：那种布局下剔除只记"第几行可见"，这一帧后面的每个 pass
+ * （预通道、基通道、阴影、速度）都是拿着行号回来读这里的行与 custom data。剔除之后、绘制之前把行原地重排 / 重散，
+ * 画出来的就是"上一批的行号 + 这一批的行"。在渲染命令里改（游戏线程 Tick / 编辑操作发出的 ENQUEUE_RENDER_COMMAND，
+ * 与视图族渲染是先后两条命令）是安全的，现有生产者全是这样；别在 view extension 的 PostRenderBasePass 之类
+ * 帧内回调里改。点云源不受这条约束：它的行是剔除前现打进组件自己的常驻流里的快照。
  */
 struct FCSGpuInstanceSourceGPU
 {
@@ -137,6 +145,17 @@ struct FCSGpuInstanceSourceGPU
 	TRefCountPtr<FRDGPooledBuffer> CustomData;
 	uint32 Capacity = 0;                            // instances the buffer can hold
 	FBox LocalBounds = FBox(ForceInit);             // conservative bounds of the whole scatter
+
+	/**
+	 * 生产者的承诺（Nanite 路用，InstanceCullingOptimization.md §7）：每次**原地**改写这几块 buffer（行 / 计数器 / custom data）
+	 * 之后，都会调一次 `UCSGpuInstancedMeshComponent::NotifyInstanceSourceChanged()`（重新交接 SetInstanceSourceGPU 本身就算一次）。
+	 *   true   Nanite 路只在被通知的那一帧重写 GPU-Scene：没改的帧不写，VSM 也不再每帧把这批实例的缓存页当"动了"作废；
+	 *   false  （默认）照旧每帧整份重写 —— "生产者原地重写、从不通知"的老契约，生产者一个字都不用改。
+	 * 承诺了却漏通知的后果：Nanite 路的画面停在上一次写入的样子，没有任何报错。所以它是逐源自愿的，不是组件上的总开关；
+	 * 经 `CSShaperSteps::HandOverInstanceSources` 交接的生产者在那边统一开（FHandoverOptions::bNotifiesChanges）。
+	 * 经典路不看它：剔除本来就每帧现读 buffer。
+	 */
+	bool bNotifiesChanges = false;
 
 	bool IsValid() const { return PackedInstances.IsValid() && Counter.IsValid() && Capacity > 0; }
 	void Reset() { *this = FCSGpuInstanceSourceGPU(); }
@@ -159,6 +178,10 @@ struct FCSGpuInstancePointSourceGPU
 	uint32 Capacity = 0;
 	float InstanceScale = 1.0f;
 	FBox WorldBounds = FBox(ForceInit);
+
+	/** 同 FCSGpuInstanceSourceGPU::bNotifiesChanges：承诺每次原地改写点 / 法线 / 计数器之后都通知。
+	 *  点刷不承诺（它在渲染线程的帧内回调里追加点，游戏线程不知道哪一帧加了几个），所以默认 false。 */
+	bool bNotifiesChanges = false;
 
 	bool IsValid() const { return Positions.IsValid() && Normals.IsValid() && Counter.IsValid() && Capacity > 0; }
 	void Reset() { *this = FCSGpuInstancePointSourceGPU(); }
@@ -198,7 +221,55 @@ struct FCSGpuInstancedGpuLayout
 	uint32 NumClusters = 0;
 	uint32 ClusterSize = 0;
 
+	/**
+	 * 可见缓冲的形态（InstanceCullingOptimization.md §5），建常驻缓冲时按 `r.CSGpuInstanced.VisibleSourceIndex` 定下来：
+	 *   false  剔除把每个可见实例的完整属性抄进可见缓冲（88 B / 槽），绘制读那份副本（引擎的 LocalVertexFactory.ush）；
+	 *   true   剔除只写 4 字节的源行号，绘制经它直接读源实例行（CSGpuInstancedIndexedVertexFactory.ush）。
+	 * 是布局的一部分：两种形态声明的常驻流不同、代理用的顶点工厂不同，所以它跟着布局一起抄进代理，
+	 * 代理不许自己再去读一遍 CVar（建缓冲与建代理之间 CVar 变了的话两边就对不上）。
+	 */
+	bool bVisibleSourceIndex = false;
+
 	bool IsValid() const { return InstanceCapacity > 0 && NumLODs > 0; }
+};
+
+/**
+ * CPU 实例数组里一个实例的**稳定句柄** —— InstanceCullingOptimization.md §3.1 的 StableInstanceID。
+ *
+ * 实例存活期间句柄不变：别的实例增删、`RemoveInstance` 把末尾实例换进空位、Morton 重排、可见槽与 LOD 变化都不动它。
+ * 要跟着某一个实例走的状态（逐实例随机数、选中、交互记录、动画起点……）一律挂在句柄上，不要挂在数组下标上。
+ *
+ *   Slot        稳定槽号。实例活着就不变；实例删掉后槽回收，可以被之后新加的实例**复用**。
+ *               取值稠密（不超过同时存活过的实例数峰值），可以直接当一张逐实例状态表的下标。
+ *   Generation  这个槽被回收过几次。实例一删掉槽的代数就 +1，所以删掉之后旧句柄立刻失效，
+ *               之后占了同一个槽的新实例是**另一个**实例（代数不同），旧句柄访问不到它。
+ *
+ * 作用域是**单个组件**：两个组件各有各的槽号，句柄不能跨组件比较，也不是全局唯一 ID。
+ * 随组件存盘（槽表与代数表都是 UPROPERTY），所以存在别处的句柄跨存读盘仍然指向同一个实例、或者仍然是失效的。
+ *
+ * "删了再加回来"是**新实例**：哪怕位置一模一样，也拿到新的代数。身份不由位置隐式判定。
+ * `SetInstances` / `ClearInstances` 是整套换掉：此前的句柄全部失效，新实例按给入顺序占槽 0..N-1。
+ */
+USTRUCT(BlueprintType)
+struct FCSGpuInstanceHandle
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "CS GPU Instanced Mesh|Instances")
+	int32 Slot = INDEX_NONE;
+
+	UPROPERTY(BlueprintReadOnly, Category = "CS GPU Instanced Mesh|Instances")
+	int32 Generation = 0;
+
+	FCSGpuInstanceHandle() = default;
+	FCSGpuInstanceHandle(int32 InSlot, int32 InGeneration) : Slot(InSlot), Generation(InGeneration) {}
+
+	/** 只说明"填过"，不说明"还活着" —— 后者问组件的 IsInstanceHandleValid。 */
+	bool IsSet() const { return Slot != INDEX_NONE; }
+
+	friend bool operator==(const FCSGpuInstanceHandle& A, const FCSGpuInstanceHandle& B) { return A.Slot == B.Slot && A.Generation == B.Generation; }
+	friend bool operator!=(const FCSGpuInstanceHandle& A, const FCSGpuInstanceHandle& B) { return !(A == B); }
+	friend uint32 GetTypeHash(const FCSGpuInstanceHandle& Handle) { return HashCombine(::GetTypeHash(Handle.Slot), ::GetTypeHash(Handle.Generation)); }
 };
 
 /**
@@ -207,9 +278,12 @@ struct FCSGpuInstancedGpuLayout
  * One GPU-resident copy of the base mesh (all LODs concatenated) plus a per-instance transform
  * buffer. Every frame a compute pass culls a two-level hierarchy — clusters first, then the
  * instances inside surviving clusters — picks a LOD per instance from its screen size, compacts
- * the survivors into per-LOD regions of the visible-instance buffers and writes one
- * DrawIndexedIndirect arg set per LOD. The draw then reads the instance transform in the vertex
- * shader by SV_InstanceID (see FCSGpuInstancedMeshVertexFactory), so geometry is stored once no
+ * the survivors into per-LOD regions of the visible buffer and writes one DrawIndexedIndirect arg
+ * set per LOD. What a visible slot holds is the survivor's **source row index** (4 bytes): the
+ * vertex shader looks it up by SV_InstanceID and reads the instance straight out of the source rows
+ * (FCSGpuInstancedIndexedVertexFactory; default since 2026-10-02 — the older form, a full 88-byte
+ * copy of the instance per visible slot drawn by FCSGpuInstancedMeshVertexFactory, is kept behind
+ * `r.CSGpuInstanced.VisibleSourceIndex 0` as the comparison baseline). Geometry is stored once no
  * matter how many instances there are and the visible set never touches the CPU.
  *
  * Relative to UHierarchicalInstancedStaticMeshComponent:
@@ -282,8 +356,12 @@ struct FCSGpuInstancedGpuLayout
  * 这两条经典路都做不到（见构造函数里那段实测）。
  *
  *   · 仍然有效：BaseMesh、InstanceMaterial（设了就盖住资产的每个材质槽，没设用资产自己的材质）、
- *     InstanceEndCullDistance、投影 / 可见性等渲染开关（替身每帧从本体抄）、全部实例源 API、烘焙出口与两条诊断。
+ *     距离带三件（InstanceStart/EndCullDistance + InstanceCullFadeDistance，2026-09-29 起在 GPU-Scene 写入
+ *     pass 里按逐实例随机数抖动，与经典路同一条带，见 SetDistanceCullViewOverride）、InstanceWPODisableDistance、
+ *     投影 / 可见性等渲染开关（替身每帧从本体抄）、全部实例源 API、烘焙出口与两条诊断。
  *   · 不再生效：InstancesPerCluster / bGpuFrustumCulling / bGpuLODSelection / LODScreenSizeScale。
+ *   · 影子想留在 CSM（比 VSM 软）时开 bClassicShadowOnNanitePath：主通道仍由 Nanite 替身画、替身不投影，
+ *     本组件自己再挂一份只投影的经典代理 —— 那份进不了 VSM、只进 CSM 级联（见构造函数里那段机制）。
  *   · 资产开了 Nanite 但这台机器画不了 Nanite（r.Nanite 0、平台不支持、材质不被 Nanite 支持）时，
  *     替身由引擎 ISM 代理画资产的回退网格，仍然吃 GPU-Scene 实例；连 GPU-Scene 都没有的平台才退回 GPU 剔除路。
  *   · SetBaseMeshFromGpuData 喂进来的网格不是资产、没有 Nanite 设置，永远走 GPU 剔除路。
@@ -292,6 +370,24 @@ struct FCSGpuInstancedGpuLayout
  *   ⚠️ 上面那份通道字典在这条路上**不成立**：顶点色是资产自己的数据，alpha 没法清零，材质里的
  *     `PerInstanceRandom + VertexColor.A` 会整体多出资产的 alpha（通常是 1，整族亮一档，不报错）。
  *     用这条等式的材质配开了 Nanite 的资产时，资产的顶点色 alpha 必须是 0。
+ *
+ * -----------------------------------------------------------------------------
+ * 实例的四种"编号"（InstanceCullingOptimization.md §3）—— 只有第一种能拿来认实例
+ * -----------------------------------------------------------------------------
+ *   · 稳定句柄 `FCSGpuInstanceHandle`：逻辑身份，实例活着就不变。CPU 实例数组的每个实例都有（见 GetInstanceHandle）。
+ *   · 数组下标（AddInstance 返回的、RemoveInstance / UpdateInstanceTransform 收的那个 int32）：
+ *     `PerInstanceTransforms` 的当前位置。删除是把**末尾**实例换进空位，被换的那个下标就变了。
+ *   · 源行号 SourceIndex：packed 行（`PackedInstances` / GPU 源的 buffer）里的位置，剔除与 GPU-Scene 写入按它取数。
+ *     CPU 源是 Morton 序，任何一次增删都可能整体重排（包围盒一变编码的归一化范围就变）；
+ *     `GetPackedInstanceSlots()` 给出"第几行是哪个槽"。GPU 源的行号归生产者管：只改计数器、不搬行，行号就不变。
+ *   · 可见槽 VisibleIndex（SV_InstanceID + 区段起点）与 GPU-Scene 地址（Nanite 路的 `InstanceSceneDataOffset + 行号`）：
+ *     前者由原子计数压出来，同一帧内线程到达顺序都不固定；后者随代理重建换区间。都只在当帧内部自洽。
+ *
+ * 逐实例随机数（packed 行 `Origin.w`、材质里的 `PerInstanceRandom`）：CPU 源按**稳定槽**取（2026-10-02 以前按数组下标取，
+ * 中间删一个实例，被换进空位的那个实例随机数就变了）。从没删过实例的内容槽号 == 下标，数值与改动前逐位相同。
+ * GPU 源的随机数由生产者写进行里：要它跨重排 / 重新生成保持稳定，生产者得用稳定的生成键（格子坐标、路径参数……）取，
+ * 不能用本帧的行号 —— 地被、石阶、门框砖、瓦、藤都是按生成键取的；点云源（PackPointInstancesCS）按行号取，
+ * 只在生产者只追加、不搬行时稳定（点刷就是这样）。
  *
  * The one thing that does NOT go through UCSMesh::EditMeshSync is the per-frame cull, which has to
  * run inside the renderer's own graph and can neither build a graph of its own nor block on a
@@ -373,7 +469,11 @@ public:
 	// Every one of these repacks the whole instance array and re-uploads it, which now includes a
 	// blocking render flush. That was always the shape of this API (the sort alone is O(N log N) per
 	// call), but the flush makes the difference visible: use AddInstances / SetInstances for more
-	// than a handful, or the batching form of UpdateInstanceTransform below.
+	// than a handful, or wrap any run of edits in BeginInstanceUpdate / EndInstanceUpdate below
+	// (one repack and one upload for the whole run, whatever mix of adds, removes and moves it is).
+	//
+	// ⚠️ 这一组收 / 返回的 int32 是**数组下标**，不是身份：RemoveInstance 把末尾实例换进空位，被换的那个实例
+	// 下标就变了（与 UInstancedStaticMeshComponent 同一个契约）。要长期认一个实例，用下面"稳定句柄"那一组。
 	// -------------------------------------------------------------------------
 
 	UFUNCTION(BlueprintCallable, Category = "CS GPU Instanced Mesh|Instances")
@@ -388,9 +488,10 @@ public:
 	bool RemoveInstance(int32 InstanceIndex);
 
 	/** bMarkRenderStateDirty=false is the batching form: the CPU-side instance array is updated but
-	 *  neither the GPU buffers nor the render state are, so a run of edits costs one upload instead
-	 *  of one per edit. The display keeps showing the previous set until a call that does update
-	 *  (any other mutator, or this one with the flag set) lands. */
+	 *  neither the packed rows, the GPU buffers nor the render state are, so a run of edits costs one
+	 *  sort and one upload instead of one per edit. The display keeps showing the previous set until a
+	 *  call that does update (any other mutator, this one with the flag set, or EndInstanceUpdate) lands.
+	 *  （2026-10-02 以前 false 仍然当场整份重排打包、只省上传：10 万个实例连改 8 个要 82 ms，全花在那 8 次排序上。） */
 	UFUNCTION(BlueprintCallable, Category = "CS GPU Instanced Mesh|Instances")
 	bool UpdateInstanceTransform(int32 InstanceIndex, const FTransform& NewInstanceTransform, bool bWorldSpace = false, bool bMarkRenderStateDirty = true);
 
@@ -403,9 +504,73 @@ public:
 	UFUNCTION(BlueprintPure, Category = "CS GPU Instanced Mesh|Instances")
 	int32 GetInstanceCount() const { return PerInstanceTransforms.Num(); }
 
-	/** Replace the whole instance set in one go — one proxy rebuild instead of N. */
+	/** Replace the whole instance set in one go — one proxy rebuild instead of N.
+	 *  整套换掉：此前的稳定句柄全部失效，新实例按给入顺序占槽 0..N-1（所以同一份输入每次得到同一批逐实例随机数）。 */
 	UFUNCTION(BlueprintCallable, Category = "CS GPU Instanced Mesh|Instances")
 	void SetInstances(const TArray<FTransform>& InstanceTransforms, bool bWorldSpace = false);
+
+	/**
+	 * 成批改实例（InstanceCullingOptimization.md §6.1）。Begin 与**最外层** End 之间，这一组 CPU 实例接口
+	 * （AddInstance(s) / RemoveInstance(s) / UpdateInstanceTransform / SetInstances / ClearInstances，含按句柄的那几个）
+	 * 只改 CPU 侧的实例数组与身份表：不重排、不打包、不上传、不重建渲染状态；最外层 End 时统一做**一次**。可嵌套。
+	 *
+	 * 区间内：
+	 *   · 下标与句柄当场有效 —— AddInstance 的返回值、GetInstanceHandle、按句柄的查 / 改 / 删都照常；
+	 *   · 画面、GPU 上的缓冲、GetGpuLayout() 与包围盒停在区间之前；
+	 *   · GetPackedInstances() / GetClusterBounds() / GetPackedInstanceSlots() 读的时候当场补一次打包（只是 CPU 那一半，
+	 *     所以在区间里每改一个就读一次等于没合批）。
+	 * 忘了 End 的后果是这一族的画面再也不更新（没有任何报错）—— C++ 里用 FCSGpuInstancedUpdateScope。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CS GPU Instanced Mesh|Instances")
+	void BeginInstanceUpdate();
+
+	UFUNCTION(BlueprintCallable, Category = "CS GPU Instanced Mesh|Instances")
+	void EndInstanceUpdate();
+
+	UFUNCTION(BlueprintPure, Category = "CS GPU Instanced Mesh|Instances")
+	bool IsInInstanceUpdate() const { return InstanceUpdateDepth > 0; }
+
+	/** 一次删一批。下标都是**调用这一刻**的下标（内部按从大到小删，前面的删除不会让后面的下标指到别的实例）；
+	 *  重复的、越界的跳过。返回实际删掉几个。整批一次重排、一次上传。 */
+	UFUNCTION(BlueprintCallable, Category = "CS GPU Instanced Mesh|Instances")
+	int32 RemoveInstances(const TArray<int32>& InstanceIndices);
+
+	/** packed 行重排打包过几次（只增不减）。诊断 / 测试用：一批改动该是 +1，不是每个改动 +1。 */
+	int32 GetInstancePackSerial() const { return InstancePackSerial; }
+
+	// -------------------------------------------------------------------------
+	// Instances — 稳定句柄（CPU 实例源；语义见 FCSGpuInstanceHandle 与类注释「实例的四种编号」）
+	//
+	// 新增能力，不改上面那组按下标的接口的语义。句柄随实例一生不变，查询是 O(1)。
+	// -------------------------------------------------------------------------
+
+	/** 下标 InstanceIndex 上**此刻**那个实例的稳定句柄。下标越界返回未填的句柄（IsSet() 为假）。 */
+	UFUNCTION(BlueprintPure, Category = "CS GPU Instanced Mesh|Instances")
+	FCSGpuInstanceHandle GetInstanceHandle(int32 InstanceIndex) const;
+
+	/** 句柄指的实例现在在哪个数组下标上；实例已删（或句柄属于被 SetInstances / ClearInstances 换掉的那一批）返回 INDEX_NONE。 */
+	UFUNCTION(BlueprintPure, Category = "CS GPU Instanced Mesh|Instances")
+	int32 GetInstanceIndexFromHandle(FCSGpuInstanceHandle Handle) const;
+
+	UFUNCTION(BlueprintPure, Category = "CS GPU Instanced Mesh|Instances")
+	bool IsInstanceHandleValid(FCSGpuInstanceHandle Handle) const { return GetInstanceIndexFromHandle(Handle) != INDEX_NONE; }
+
+	/** 按句柄删。句柄已失效返回 false、什么都不动 —— 不会误删后来占了同一个槽的实例。 */
+	UFUNCTION(BlueprintCallable, Category = "CS GPU Instanced Mesh|Instances")
+	bool RemoveInstanceByHandle(FCSGpuInstanceHandle Handle);
+
+	UFUNCTION(BlueprintCallable, Category = "CS GPU Instanced Mesh|Instances")
+	bool UpdateInstanceTransformByHandle(FCSGpuInstanceHandle Handle, const FTransform& NewInstanceTransform, bool bWorldSpace = false, bool bMarkRenderStateDirty = true);
+
+	UFUNCTION(BlueprintCallable, Category = "CS GPU Instanced Mesh|Instances")
+	bool GetInstanceTransformByHandle(FCSGpuInstanceHandle Handle, FTransform& OutInstanceTransform, bool bWorldSpace = false) const;
+
+	/**
+	 * packed 行（`GetPackedInstances()`，Morton 序）的第 r 行是哪个稳定槽 —— SourceIndex → 稳定身份的那张表。
+	 * 只有 CPU 实例源有；GPU 源时为空（行归生产者管，身份也归它）。与 PackedInstances 同时重建，长度 = 行数。
+	 * 剔除 / GPU-Scene 写入回读出来的是源行号，拿这张表换成槽号才能跨帧、跨重排比较"是不是同一个实例"。
+	 */
+	const TArray<int32>& GetPackedInstanceSlots() const { EnsureInstancePacking(); return PackedRowSlots; }
 
 	// -------------------------------------------------------------------------
 	// Instances — GPU source
@@ -422,6 +587,13 @@ public:
 
 	void ClearInstanceSourceGPU();
 	bool HasInstanceSourceGPU() const { return GpuInstanceSource.IsValid() || GpuPointSource.IsValid(); }
+
+	/**
+	 * 生产者刚**原地**改写了 GPU 实例源（行 / 计数器 / custom data，或点云源的点）。不阻塞。
+	 * 只对承诺了 `bNotifiesChanges` 的源有意义：Nanite 路据此在下一次渲染之前重写 GPU-Scene。没承诺的源本来每帧都重写，
+	 * 经典路每帧现读 buffer —— 那两种情形调不调都一样，所以生产者可以无条件调。
+	 */
+	void NotifyInstanceSourceChanged();
 
 	// -------------------------------------------------------------------------
 	// 诊断 / 验收（**阻塞**，绝对不许出现在交互路径上）
@@ -511,6 +683,30 @@ public:
 	 */
 	bool DebugReadInstanceRandomsSync(TArray<float>& OutRandoms) const;
 
+	/**
+	 * 回读**上一次剔除**压出来的逐 LOD 可见实例数（`LodCounters` 流：`InstanceCullCS` 的压缩游标）。
+	 * **阻塞**，与上面几条同一道警戒线 —— 只给诊断、测试与性能基线（InstanceCullingOptimization.md §4.1）用。
+	 *
+	 * 读到的是最近跑过的那一次剔除：哪个视图由剔除的 view extension 决定（一个 view family 只剔第一个视图），
+	 * 所以要先真渲染过一帧。OutPerLod 的长度 = 布局的 LOD 数，每项按容量钳过（游标是先加后判的）。
+	 * 返回 false = **读不到**（没有经典路的常驻缓冲 —— 纯 Nanite 路没有这份计数 —— 或回读没完成），
+	 * 与"真的一个都没看见"（返回 true、全 0）分开。
+	 */
+	bool DebugReadVisibleCountsSync(TArray<int32>& OutPerLod) const;
+
+	/**
+	 * 「可见源行号」布局（`GetGpuLayout().bVisibleSourceIndex`）下，回读**上一次剔除**压进可见缓冲的源行号：
+	 * 逐 LOD 一张表，长度 = 那一级的可见数。**阻塞**，诊断 / 测试专用。
+	 *
+	 * 表里的次序没有意义（槽位是原子计数分的，同一帧里线程到达顺序都不固定），当集合用。
+	 * 行号是**当前**源行号，不是身份：CPU 实例源拿 `GetPackedInstanceSlots()[行号]` 换成稳定槽之后，才能跨帧、
+	 * 跨 Morton 重排比较"看见的是不是同一批实例"。返回 false = 读不到（不是这种布局 / 没分配 / 回读没完成）。
+	 */
+	bool DebugReadVisibleSourceIndicesSync(TArray<TArray<int32>>& OutPerLod) const;
+
+	/** `r.CSGpuInstanced.VisibleSourceIndex` 变了：布局与它不一致的已注册组件就地重建。只由那个 CVar 的回调调。 */
+	static void HandleVisibleSourceIndexCVarChanged(IConsoleVariable* Variable);
+
 	// -------------------------------------------------------------------------
 	// Culling / LOD
 	// -------------------------------------------------------------------------
@@ -527,7 +723,9 @@ public:
 	/**
 	 * 离视点**近于**这个距离的实例不画（cm，0 = 不限）—— 与 `InstanceEndCullDistance` 配成一条距离带。
 	 * 地被的近 / 远两档就是两个组件各拿一半：近处单根草 `End = B`、远处组合草 `Start = B`（2026-09-22）。
-	 * ⚠️ 只在经典剔除路上生效；Nanite 路只转交得了 `InstanceEndCullDistance`（引擎那边没有起始距离的逐实例入口）。
+	 * 两条路都认：经典路在剔除 pass 里逐视图判；Nanite 路在 GPU-Scene 写入 pass 里按**一个**视点判
+	 * （引擎的 Nanite 距离剔除是硬边、没有过渡带，所以带内的抖动只能由我们在写入时做），视点见
+	 * `SetDistanceCullViewOverride`。
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS GPU Instanced Mesh|Culling", meta = (ClampMin = "0"))
 	float InstanceStartCullDistance = 0.0f;
@@ -539,6 +737,52 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS GPU Instanced Mesh|Culling", meta = (ClampMin = "0"))
 	float InstanceCullFadeDistance = 0.0f;
+
+	/**
+	 * Nanite 路：离视点远于这个距离（cm）的实例**不求 WPO**（0 = 一律求）。交给引擎 Nanite 的逐实例
+	 * WPO 关闭距离 —— 关掉的实例还会退回固定功能光栅，省掉可编程光栅那一整套开销。
+	 * 这是硬切：要看不出切点，材质自己得先在切点之前把 WPO 淡到 0（地被的 `M_TG_Grass` 按
+	 * custom primitive data 里的淡出区间做，见 `ACSGroundActor`）。经典路不认这一条 —— 它的 WPO 全靠材质淡出。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS GPU Instanced Mesh|Culling", meta = (ClampMin = "0"))
+	int32 InstanceWPODisableDistance = 0;
+
+	/**
+	 * Nanite 路上把**影子**留在经典路（2026-09-29 用户：花走 Nanite，但影子仍要 CSM 那份软度）。
+	 *
+	 * 开着且走 Nanite 路时：Nanite 替身只画主通道、不投影；本组件照经典路建常驻网格与剔除，但代理**只进阴影**
+	 * （主通道 / 深度预通道都不画）。经典路的顶点工厂进不了 VSM，于是这份影子落进 CSM 级联 —— 与切 Nanite
+	 * 之前逐位同一套投影。代价：实例多剔除一趟、多一份常驻网格（基础网格读的是资产的回退 LOD，编辑器外要开
+	 * Allow CPU Access）；可见实例集仍按主视锥压，视锥外的实例不投影（与切换前相同）。
+	 * 不走 Nanite 路时这一条什么都不做。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS GPU Instanced Mesh|Shadow")
+	bool bClassicShadowOnNanitePath = false;
+
+	/** 现在是不是「Nanite 画主通道 + 经典代理只投影」这种组合（判据，不是开关）。 */
+	UFUNCTION(BlueprintPure, Category = "CS GPU Instanced Mesh")
+	bool IsClassicShadowCopyActive() const;
+
+	/** 代码里改 bClassicShadowOnNanitePath 走这里：变了才建 / 还那套经典缓冲并重建渲染状态（直接写属性不会触发）。 */
+	UFUNCTION(BlueprintCallable, Category = "CS GPU Instanced Mesh")
+	void SetClassicShadowOnNanitePath(bool bEnable);
+
+	/**
+	 * Nanite 路的距离带用哪个视点判（世界坐标）。经典路逐视图用各自的视点，不看这里。
+	 *
+	 * 不设时替身每帧取「上一帧画过这个世界的透视视点」里离上次最近的那一个（多视口时不来回跳）；
+	 * 一个都没有（无头、只有场景捕获）时带内不抖、只剩引擎的硬边距离剔除 —— 近处组件画到 End、
+	 * 远处组件从 `Start − Fade` 起画，两档在带里重叠而不是露出一圈空地。
+	 * 出图脚本用场景捕获时要显式设（场景捕获不往 `ViewLocationsRenderedLastFrame` 里填）。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CS GPU Instanced Mesh|Culling")
+	void SetDistanceCullViewOverride(FVector WorldLocation);
+
+	UFUNCTION(BlueprintCallable, Category = "CS GPU Instanced Mesh|Culling")
+	void ClearDistanceCullViewOverride();
+
+	/** 设了覆盖视点就填它并返回 true。 */
+	bool GetDistanceCullViewOverride(FVector& OutWorldLocation) const;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS GPU Instanced Mesh|Culling")
 	bool bGpuFrustumCulling = true;
@@ -556,8 +800,8 @@ public:
 	// -------------------------------------------------------------------------
 
 	const FCSGpuInstancedBaseMesh& GetBaseMeshSnapshot() const { return BaseMeshSnapshot; }
-	const TArray<FVector4f>& GetPackedInstances() const { return PackedInstances; }
-	const TArray<FVector4f>& GetClusterBounds() const { return ClusterBounds; }
+	const TArray<FVector4f>& GetPackedInstances() const { EnsureInstancePacking(); return PackedInstances; }
+	const TArray<FVector4f>& GetClusterBounds() const { EnsureInstancePacking(); return ClusterBounds; }
 	const FCSGpuInstanceSourceGPU& GetInstanceSourceGPU() const { return GpuInstanceSource; }
 	const FCSGpuInstancePointSourceGPU& GetInstancePointSourceGPU() const { return GpuPointSource; }
 
@@ -591,14 +835,16 @@ public:
 	virtual void PostLoad() override;
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	/** 撤销 / 重做把实例数组与槽表整套换回去了：槽 → 下标的缓存与 packed 行都要跟着重建。 */
+	virtual void PostEditUndo() override;
 #endif
 
 protected:
 	//~ UCSGpuMeshComponent interface
 	/** 基座只认一张材质；多段时报第 0 段的（GetUsedMaterials 已被本类覆写成逐槽上报）。 */
 	virtual UMaterialInterface* GetRenderMaterial() const override { return GetSectionMaterial(0); }
-	/** Nanite 路上本组件没有代理（画的是替身），ReadbackMeshSync 那次 static_cast 必须拦在前面。 */
-	virtual bool IsGpuMeshProxyActive() const override { return !IsNaniteRenderPath(); }
+	/** Nanite 路上本组件没有代理（画的是替身；只投影的经典副本除外），ReadbackMeshSync 那次 static_cast 必须拦在前面。 */
+	virtual bool IsGpuMeshProxyActive() const override { return !IsNaniteRenderPath() || IsClassicShadowCopyActive(); }
 
 private:
 	/**
@@ -620,9 +866,8 @@ private:
 	 * instances and forget to upload them — the two used to be separated by a proxy rebuild, and
 	 * with a retained mesh nothing else would ever notice the omission.
 	 *
-	 * bRebuildGpuMesh=false does the CPU half only, for a caller that is batching edits
-	 * (UpdateInstanceTransform's bMarkRenderStateDirty). The GPU half blocks on a render flush, so
-	 * it must not run once per instance in a loop.
+	 * bRebuildGpuMesh=false does the CPU half only. (Batching no longer goes through it: a deferred edit
+	 * just marks the packing dirty — see NotifyInstancesChanged — and nothing is sorted until somebody needs it.)
 	 */
 	void RebuildInstanceData(bool bRebuildGpuMesh = true);
 
@@ -682,6 +927,62 @@ private:
 	UPROPERTY()
 	TArray<FTransform> PerInstanceTransforms;
 
+	// -------------------------------------------------------------------------
+	// 实例身份（FCSGpuInstanceHandle）。存盘的真值是下面两张表；SlotToIndex / FreeSlots 是能从它们重建的缓存。
+	// -------------------------------------------------------------------------
+
+	/** 与 PerInstanceTransforms 并列：下标 i 上那个实例的稳定槽。RemoveAtSwap 时两张表一起换。 */
+	UPROPERTY()
+	TArray<int32> PerInstanceSlots;
+
+	/** 每个槽的代数，长度 = 槽数（同时存活过的实例数峰值，只增不减 —— 缩掉它旧句柄就可能撞上新实例）。 */
+	UPROPERTY()
+	TArray<int32> SlotGenerations;
+
+	/** 槽 → 数组下标，INDEX_NONE = 空闲。缓存：不存盘，由 PerInstanceSlots 重建。 */
+	TArray<int32> SlotToIndex;
+
+	/** 空闲槽的栈。末尾是下一个要用的；整套重置后按降序压，所以只增不删的内容拿到的槽号恒等于下标。 */
+	TArray<int32> FreeSlots;
+
+	/** packed 行 → 稳定槽（Morton 序），见 GetPackedInstanceSlots。 */
+	TArray<int32> PackedRowSlots;
+
+	/** 缓存要不要整个重建：读盘、撤销、复制之后为真（那几条路直接换掉了 UPROPERTY，没经过任何 mutator）。 */
+	bool bInstanceIdentityCacheDirty = true;
+
+	/**
+	 * 把缓存对齐到两张真值表；真值表自己不自洽（老资产没有槽表、槽号越界或重复）时先修：全部实例重新占槽 0..N-1，
+	 * 旧槽的代数 +1（此前发出去的句柄一律失效 —— 修出来的身份不该冒充修之前的）。平时 O(1)，要重建时 O(N)。
+	 * 逻辑上不改实例集，所以 const 的查询经 const_cast 调它（UPROPERTY 成员不能标 mutable）。
+	 */
+	void EnsureInstanceIdentity();
+
+	/** 整套换掉实例集时的身份重置：在用的槽代数 +1，N 个新实例按顺序占槽 0..N-1。 */
+	void ResetInstanceIdentity(int32 NumInstances);
+
+	/** 给下标 InstanceIndex 上新加的实例发一个槽（先用回收的，没有再开新的）。PerInstanceSlots 必须正好缺这一项。 */
+	void AllocateInstanceSlot(int32 InstanceIndex);
+
+	// ---- 成批改实例（BeginInstanceUpdate / EndInstanceUpdate）----
+
+	/** CPU 实例数组刚被改过。bApplyNow 且不在成批区间里 ⇒ 当场重排、打包、上传；否则只记脏，等下一次真要更新的调用。 */
+	void NotifyInstancesChanged(bool bApplyNow = true);
+
+	/** 把攒着的改动落下去：重排打包（如果还脏）→ 上传 → 渲染状态与包围盒。 */
+	void ApplyInstanceChanges();
+
+	/** packed 行 / 簇球 / 行表落后于实例数组时补一次打包（只是 CPU 那一半，不上传）。读这三张表之前调。 */
+	void EnsureInstancePacking() const;
+
+	/** BeginInstanceUpdate 的嵌套深度。> 0 时所有 CPU 实例改动只记脏。 */
+	int32 InstanceUpdateDepth = 0;
+	/** packed 行 / 簇球 / 行表落后于 PerInstanceTransforms（有改动还没重排打包）。 */
+	bool bInstancePackingDirty = false;
+	/** 有改动还没传到 GPU、渲染状态与包围盒也还没更新。 */
+	bool bInstanceUploadPending = false;
+	int32 InstancePackSerial = 0;
+
 	/** Base mesh uploaded to the GPU. Filled from BaseMesh, or directly by
 	 *  SetBaseMeshFromGpuData (in which case bBaseMeshIsExternal suppresses re-extraction). */
 	FCSGpuInstancedBaseMesh BaseMeshSnapshot;
@@ -725,6 +1026,9 @@ private:
 	UPROPERTY(Transient, DuplicateTransient)
 	TObjectPtr<UCSGpuInstancedNaniteComponent> NaniteComponent;
 
+	/** SetDistanceCullViewOverride 设的视点（世界坐标）。不存盘：它描述的是这一刻的相机。 */
+	TOptional<FVector> DistanceCullViewOverride;
+
 	/**
 	 * 有变更在未注册期间被跳过，重注册时必须重建一次。
 	 *
@@ -736,4 +1040,28 @@ private:
 	 * 现在未注册期只记脏、什么都不动，重注册时按这面旗子决定要不要真重建。
 	 */
 	bool bGpuMeshDirty = false;
+};
+
+/**
+ * BeginInstanceUpdate / EndInstanceUpdate 的作用域形态：构造时 Begin，析构时 End（提前 return、异常路径都不会漏）。
+ * 组件为空时什么都不做。
+ */
+struct FCSGpuInstancedUpdateScope
+{
+	explicit FCSGpuInstancedUpdateScope(UCSGpuInstancedMeshComponent* InComponent)
+		: Component(InComponent)
+	{
+		if (Component) Component->BeginInstanceUpdate();
+	}
+
+	~FCSGpuInstancedUpdateScope()
+	{
+		if (Component) Component->EndInstanceUpdate();
+	}
+
+	FCSGpuInstancedUpdateScope(const FCSGpuInstancedUpdateScope&) = delete;
+	FCSGpuInstancedUpdateScope& operator=(const FCSGpuInstancedUpdateScope&) = delete;
+
+private:
+	UCSGpuInstancedMeshComponent* Component = nullptr;
 };

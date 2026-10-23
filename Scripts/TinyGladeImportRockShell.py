@@ -7,7 +7,7 @@
 它是披挂岩壳（链 B）的唯一离线输入，逐顶点胞腔数据打包在多 UV 通道里，
 所以**这几个导入选项是承重的，不是调优**：焊接会毁掉 `Tri*3+k` 的逐三角展开，
 半精度 UV 会毁掉 `cell_id`，不开 CPU 访问就读不到顶点缓冲去填 aux 流。
-逐项理由与实测数字见 `Docs/TinyGlade/CSRockShellPattern.md`。
+逐项理由与实测数字见 `Docs/TinyGlade/RockShell_Pattern.md`。
 
 ⚠️ **别导错文件**：`assets/meshes/terrain_rocks.json`（已经在
 `/PCGPlugins/HouseTest/TinyGladeAsset/Meshes/terrain_rocks`）是 ±430 m 的背景岩石，零 cell 属性，**不是这一份**。
@@ -29,7 +29,7 @@ import unreal
 
 # 可用环境变量 ROCKSHELL_SRC_GLB 覆盖：假倒角管线用它指向
 # Docs/TinyGlade/geo/bevel/rocky_terrain_shell.glb（COLOR_0 已按通道字典 v2 重烘，
-# 见 Docs/TinyGlade/CSRockShellEdgeBevel.md）。不设则导原件（COLOR_0 = 胞腔辨认色）。
+# 见 Docs/TinyGlade/RockShell_EdgeBevel.md）。不设则导原件（COLOR_0 = 胞腔辨认色）。
 SRC_GLB = os.environ.get(
     "ROCKSHELL_SRC_GLB",
     r"D:\MyProject\Tiny Glade\extracted\meshes\rocky_terrain_shell.glb")
@@ -167,7 +167,7 @@ def verify(mesh):
     # [0,1] —— 一旦归一化，cell_id 就废了，而且是静默的。这一项没法从 StaticMesh 的 Python
     # 接口直接读逐顶点 UV，首次导入后请在 StaticMesh 编辑器的 UV 视图里目视确认 UV1 的范围
     # 远大于 1（或用 C++/蓝图取 LOD0 的 UV 缓冲打一行日志）。
-    log("!! 还需人工确认：UV1.x 的值域应是 0..608（不是 0..1）。见 Docs/TinyGlade/CSRockShellPattern.md")
+    log("!! 还需人工确认：UV1.x 的值域应是 0..608（不是 0..1）。见 Docs/TinyGlade/RockShell_Pattern.md")
     return ok
 
 

@@ -10,7 +10,7 @@ struct FCSGpuMeshCPUData;
 
 /**
  * 墙（TG `PublicWalls` 那一层）的**纯函数核心** —— 2026-09-22「房子变成墙」，计划见
- * `Docs/TinyGlade/TinyGladeWall_Plan.md`。
+ * `Docs/TinyGlade/Plan_Wall.md`。
  *
  * TG 里实体只有墙：`InnerWalls` → `publish_public_wall_state` → `PublicWalls`，屋顶是另挂的实体，
  * "建筑"只是"围合的墙 + 屋顶"的派生叫法。这一层把**墙自己的那部分**按"一条路径（开口或闭合）"描述：

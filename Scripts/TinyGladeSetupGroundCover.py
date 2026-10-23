@@ -33,7 +33,8 @@
 材质：草走 `MI_TG_Grass`（`M_TG_Grass` 的实例，两面 foliage + 程序化风，无贴图 —— 与 TG 的草
 "PS 一张贴图都不采、纯顶点色 + 解析法线"同路）。TG 的 clutter 把颜色全烘在**顶点流**里，花从前
 走 `M_TG_VertexColor`；2026-09-14 起两种花都换成同一个母材质的实例（`UseVertexColor` 开着，颜色仍取
-顶点色），为的是和草吃同一个风场：`MI_TG_LowpolyFlower`（另开 `VertexColorIsSRGB`，淡黄）、
+顶点色），为的是和草吃同一个风场：`MI_TG_LowpolyFlower`（2026-09-29 起关了 `UseVertexColor`，淡黄改由
+`GrassColor` 给，见 `Docs/TinyGlade/Ground_Cover.md`「白花的颜色」；本脚本不碰材质参数）、
 `MI_TG_Lavender`（走旧的 sqrt 路径，紫色与 `M_TG_VertexColor` 一致）。
 
 投影：花投、草不投（`bCastShadow`，2026-09-06 / 09-12 两次裁决）。脚本新建的物种结构体默认是 true，
@@ -84,6 +85,13 @@ FLOWER_SPECS = [
     ("%s/Meshes/lowpoly_flower" % ASSET,            "%s/Materials/MI_TG_LowpolyFlower" % ASSET, 1.2,  CAP, 0.9,  1.6,  8.0,  0.0, 3),
     ("%s/Meshes/garden_flower_01_lavender" % ASSET, "%s/Materials/MI_TG_Lavender" % ASSET,      0.25, CAP, 0.35, 0.55, 5.0, 25.0, 5),
 ]
+
+# 花的聚散（2026-09-29 用户："让花的分布有一些聚散"）：网格名 -> (PatchSize cm, Coverage, Softness, SparseDensity)。
+# 与 TinyGladeSetupFlowerPatches.py 的 PATCHES 是同一张表（那份只补聚散、不冲关卡里手调的其余值）。
+FLOWER_PATCHES = {
+    "lowpoly_flower": (350.0, 0.35, 0.35, 0.12),
+    "garden_flower_01_lavender": (120.0, 0.10, 0.15, 0.02),
+}
 
 
 def load(path):
@@ -202,7 +210,18 @@ for path, mat_path, density, cap, lo, hi, lean, height_offset, salt in FLOWER_SP
                % (mesh.get_name(), mesh.get_num_triangles(0),
                   box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z,
                   box.min.z, height_offset, box.min.z + height_offset))
-    flowers.append(make_species(mesh, flower_mat, density, cap, lo, hi, lean, height_offset, salt, True))
+    species = make_species(mesh, flower_mat, density, cap, lo, hi, lean, height_offset, salt, True)
+    # 聚散（2026-09-29）：与 TinyGladeSetupFlowerPatches.py 同一张表。表里的密度是"均匀散布"时的量，
+    # 开聚散后按平均保留比例除回去，总株数与均匀散布时差不多。
+    patch = FLOWER_PATCHES.get(mesh.get_name())
+    if patch:
+        size, coverage, softness, sparse = patch
+        species.set_editor_property("PatchSize", size)
+        species.set_editor_property("PatchCoverage", coverage)
+        species.set_editor_property("PatchSoftness", softness)
+        species.set_editor_property("PatchSparseDensity", sparse)
+        species.set_editor_property("DensityPerSqM", density / max(sparse + (1.0 - sparse) * coverage, 1e-3))
+    flowers.append(species)
 
 
 def apply(obj, where):

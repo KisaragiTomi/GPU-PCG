@@ -4,6 +4,8 @@
 #include "CSMesh.h"
 #include "RenderGraphResources.h"
 
+class UTextureRenderTarget2D;
+
 /**
  * 地被（草 + 花）：100% GPU 散布 + 零回读。形状照 Tiny Glade 的 `_generate_grass.cs` 那条链
  * （对照见 `Docs/TinyGlade/`）。
@@ -33,7 +35,8 @@
  * 2. **容量一次性定死、永不重算**。CPU 不知道长了几株（只有 GPU 知道），所以既不能按实例数
  *    算容量，也不能按实例数算包围盒 —— 后者会让 `bNeedHandover` 每一笔都成立，把阻塞的
  *    `SetInstanceSourceGPU` 拖进交互热路径。
- * 3. **遮罩读 GPU 色流，不读 CPU 镜像的拷贝**。色流就是笔刷双写出来的那份权威投影；上传一份
+ * 3. **遮罩读 GPU 上的那一份，不读 CPU 镜像的拷贝**。默认读地面遮罩（地面 actor 从笔刷双写出来的
+ *    色流现算的那张贴图，地面材质混贴图也用它 —— 2026-09-29 用户："地形 mask 决定草"）；上传一份
  *    拷贝是第三条路，迟早与另外两条错开一帧，症状（草比路慢一笔）只在快速涂抹时才看得见。
  */
 namespace CSGroundCover
@@ -100,6 +103,18 @@ struct FScatterParams
 	float MaskEnd = 0.45f;
 	/** 遮罩 → 压高比例。TG 在路上把草高乘 (1 − path × 0.7)，路边因此是矮草过渡而不是一刀切。 */
 	float MaskShorten = 0.7f;
+	/**
+	 * 遮罩读**地面遮罩**（`Scatter` 的 `GroundMask`：处理过的路权重，地面材质混贴图用的也是它）。
+	 * false = 读色流的原始 `MaskChannel`（选了 G/B/A 的物种，或地面还没有遮罩）。
+	 * 为真却没传 `GroundMask` 时按 false 处理（占位贴图，读到的全是 0 ⇒ 满地长草，不会整片消失）。
+	 */
+	bool bUseGroundMask = false;
+	/**
+	 * 读地面遮罩前的采样扰动（`CSGroundMaskWarp.ush`，TG 的 path mask domain warp）：强度（cm，0 = 关）与噪声底层波长（cm）。
+	 * 地面材质按同一对参数扰动 —— 由 `ACSGroundActor` 统一喂，两边不许各设各的。只在 `bUseGroundMask` 时生效。
+	 */
+	float MaskWarpStrength = 0.0f;
+	float MaskWarpWavelength = 133.3f;
 
 	float Chance = 1.0f;
 	float Jitter = 1.0f;
@@ -153,6 +168,12 @@ struct FScatterParams
 	float RingMinScale = 0.4f;           // 环带缩放低于它就不长
 	/** 叠加物种：父物种长了的格子里再抽一次签（参数与盐必须和父物种逐项相同）。1 = 不抽。 */
 	float OverlayChance = 1.0f;
+
+	// --- 聚散（2026-09-29 用户："让花的分布有一些聚散"，`CSGroundCover.usf` 的「2.6) 聚散」）---
+	float PatchSize = 0.0f;              // 成片的特征尺寸（cm，三层值噪声的底格）；≤ 0 = 不走这道门控（草、灌木）
+	float PatchCoverage = 0.35f;         // 成片区域占地面的比例（按噪声分位数，实测误差 ±2%）
+	float PatchSoftness = 0.3f;          // 片边软硬：过渡带在分位数上的宽度（0 = 一刀切）
+	float PatchSparseDensity = 0.1f;     // 片外还留多少（相对片内的密度比例）
 };
 
 /** 房屋外皮多边形的打包布局：每栋 `BuildingStride` 个 float4（与 `CSGroundCover.usf` 同一份，经宏注入）。 */
@@ -197,7 +218,8 @@ COMPUTESHADERGENERATOR_API bool Scatter(
 	const TArray<FCoverBuffers>& Buffers,
 	const TArray<FScatterParams>& Params,
 	const TArray<FVector4f>& ShaperParams,
-	const TArray<FVector4f>& BuildingPolygons = TArray<FVector4f>());   // PackBuildingPolygons 的产物；只有 RingWidth > 0 的物种读它
+	const TArray<FVector4f>& BuildingPolygons = TArray<FVector4f>(),   // PackBuildingPolygons 的产物；只有 RingWidth > 0 的物种读它
+	UTextureRenderTarget2D* GroundMask = nullptr);                      // 地面遮罩（`ACSGroundActor::GroundMask`）；bUseGroundMask 的物种读它
 
 COMPUTESHADERGENERATOR_API void ReleaseOnRenderThread(FCoverBuffers& Buffers);
 

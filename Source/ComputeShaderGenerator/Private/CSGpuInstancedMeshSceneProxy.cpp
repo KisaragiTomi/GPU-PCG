@@ -9,6 +9,7 @@
 #include "Materials/MaterialRenderProxy.h"
 #include "MaterialDomain.h"
 #include "MeshBatch.h"
+#include "ProfilingDebugging/RealtimeGPUProfiler.h" // DECLARE_GPU_STAT_NAMED
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
 #include "RHICommandList.h"
@@ -20,6 +21,36 @@
 #include "ShaderParameterStruct.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogCSGpuInstancedProxy, Log, All);
+
+// 分段 GPU 计时（`stat gpu` / `r.GPUCsvStatsEnabled 1` 的 CSV）。每个 pass 一条，全部代理累加到同一条上；
+// 基线与每一步优化的 A/B 都读这几条（InstanceCullingOptimization.md §4.1），所以改 pass 结构时别把 scope 弄丢。
+DECLARE_GPU_STAT_NAMED(CSGpuInstancedPackPoints, TEXT("CSGpuInstanced PackPoints"));
+DECLARE_GPU_STAT_NAMED(CSGpuInstancedClusterCull, TEXT("CSGpuInstanced ClusterCull"));
+DECLARE_GPU_STAT_NAMED(CSGpuInstancedInstanceCull, TEXT("CSGpuInstanced InstanceCull"));
+DECLARE_GPU_STAT_NAMED(CSGpuInstancedBuildArgs, TEXT("CSGpuInstanced BuildArgs"));
+
+CSV_DEFINE_CATEGORY(CSGpuInstanced, true);
+
+// 每个代理每帧的剔除建图（InstanceCullingOptimization.md §6.4：组件多了之后这是最大的一笔固定成本）。
+// 两项各占一位，可以单独开关（单独量、单独排查）：
+//   位 0（1）只登记剔除真用到的常驻流（间接参数 + aux，不登记基础网格那七八条）；
+//   位 1（2）CPU 实例数组的行数走 uniform，不再每帧建一块计数 buffer 再清一遍（每个代理每帧 5 个 pass → 4 个）。
+// 0 = 2026-10-02 以前的做法，留作对照。
+// 逐 LOD 计数器的清零 pass 留着：把它并进 BuildArgs（抄完顺手清）量过，与位 1 同开时 GPU 反而更慢，见
+// Docs/InstanceCulling/Step3_20261002.md。
+namespace CSGpuInstancedLeanCull
+{
+	constexpr int32 SubsetStreams = 1;
+	constexpr int32 CountUniform = 2;
+}
+
+static TAutoConsoleVariable<int32> CVarCSGpuInstancedLeanCullSetup(
+	TEXT("r.CSGpuInstanced.LeanCullSetup"),
+	CSGpuInstancedLeanCull::SubsetStreams | CSGpuInstancedLeanCull::CountUniform,
+	TEXT("UCSGpuInstancedMeshComponent 经典剔除路每帧的建图方式（位标志，默认 3）。\n")
+	TEXT(" 0: 登记全部常驻流、CPU 源每帧建一块计数 buffer（旧做法，留作对照）。\n")
+	TEXT(" 1: 只登记剔除用到的流。 2: CPU 源的实例数走 uniform。"),
+	ECVF_RenderThreadSafe);
 
 // -----------------------------------------------------------------------------
 // Cull / LOD compute shaders (Shaders/Private/CSGpuInstancedMesh.usf)
@@ -89,15 +120,24 @@ public:
 	DECLARE_GLOBAL_SHADER(FCSInstancedInstanceCullCS);
 	SHADER_USE_PARAMETER_STRUCT(FCSInstancedInstanceCullCS, FGlobalShader);
 
+	/** 输出形态：关 = 抄完整的可见属性（四条 RWVis* 缓冲），开 = 只写源行号（RWVisSourceIndices）。
+	 *  permutation 而不是 uniform 分支：两种形态声明的 UAV 根本不是同一批，没用到的那批不该出现在着色器里。 */
+	class FOutputSourceIndex : SHADER_PERMUTATION_BOOL("CS_INSTANCE_CULL_OUTPUT_INDEX");
+	/** 实例数从哪儿来：关 = SrcInstanceCount[0]（GPU 源的计数器），开 = uniform SrcInstanceCountValue（CPU 实例数组）。 */
+	class FCountUniform : SHADER_PERMUTATION_BOOL("CS_INSTANCE_COUNT_UNIFORM");
+	using FPermutationDomain = TShaderPermutationDomain<FOutputSourceIndex, FCountUniform>;
+
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<float4>, SrcInstances)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<float>, SrcCustomData)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, SrcInstanceCount)
+		SHADER_PARAMETER(uint32, SrcInstanceCountValue)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWClusterVisible)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<float4>, RWVisTransforms)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<float4>, RWVisOrigins)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<float4>, RWVisLightmap)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<float>, RWVisCustomData)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWVisSourceIndices)
 		// 0 = 生产者没给 custom data（石阶 / 摆件 / 砖 / 瓦都不给）⇒ 可见槽写零。
 		// 用 uniform 而不是 permutation：分支全 wave 一致，运行时代价为零。
 		SHADER_PARAMETER(uint32, bHasCustomData)
@@ -151,6 +191,19 @@ IMPLEMENT_GLOBAL_SHADER(FCSInstancedClusterCullCS, "/Plugin/PCGPlugins/Shaders/P
 IMPLEMENT_GLOBAL_SHADER(FCSInstancedInstanceCullCS, "/Plugin/PCGPlugins/Shaders/Private/CSGpuInstancedMesh.usf", "InstanceCullCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FCSInstancedBuildArgsCS, "/Plugin/PCGPlugins/Shaders/Private/CSGpuInstancedMesh.usf", "BuildArgsCS", SF_Compute);
 
+FRDGBufferRef CSGpuInstancedRegisterProducerBuffer(FRDGBuilder& GraphBuilder, const TRefCountPtr<FRDGPooledBuffer>& Pooled)
+{
+	FRDGBufferRef Buffer = GraphBuilder.RegisterExternalBuffer(Pooled);
+	// 同一张图里前面可能已经有人（另一条路的 pass、另一个 view family）把它交到外部访问状态了；拿回来对内部状态是空操作。
+	GraphBuilder.UseInternalAccessMode(Buffer);
+	return Buffer;
+}
+
+void CSGpuInstancedHandOffProducerBuffer(FRDGBuilder& GraphBuilder, FRDGBufferRef Buffer)
+{
+	if (Buffer) GraphBuilder.UseExternalAccessMode(Buffer, ERHIAccess::SRVMask);
+}
+
 void CSGpuInstancedAddPackPointsPass(
 	FRDGBuilder& GraphBuilder,
 	FGlobalShaderMap* ShaderMap,
@@ -176,6 +229,7 @@ void CSGpuInstancedAddPackPointsPass(
 	Params->MaxSourceInstances = MaxSourceInstances;
 
 	TShaderMapRef<FCSInstancedPackPointsCS> Shader(ShaderMap);
+	RDG_EVENT_SCOPE_STAT(GraphBuilder, CSGpuInstancedPackPoints, "CSGpuInstanced.PackPoints");
 	FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("PackPointInstances"), Shader, Params,
 		FComputeShaderUtils::GetGroupCount(MaxSourceInstances, CullGroupSize));
 }
@@ -224,7 +278,23 @@ namespace
 			if (bCulledThisFamily) return;
 			bCulledThisFamily = true;
 
-			for (FCSGpuInstancedMeshSceneProxy* Proxy : GetRegisteredProxies()) Proxy->RunCulling(GraphBuilder, InView);
+#if CSV_PROFILER_STATS
+			const double SetupStartSeconds = FPlatformTime::Seconds();
+#endif
+			// 只剔这个视图族所在场景的代理。登记表是全进程一张（编辑器世界、PIE 世界、材质 / 缩略图预览场景都在里面），
+			// 以前每个视图族都把所有场景的代理剔一遍：别的世界的相机压出来的结果没人画，纯属白干，
+			// 开着 PIE 或一排缩略图时这笔白干的活是成倍的。
+			const FSceneInterface* FamilyScene = InView.Family ? InView.Family->Scene : nullptr;
+			for (FCSGpuInstancedMeshSceneProxy* Proxy : GetRegisteredProxies())
+			{
+				if (FamilyScene && &Proxy->GetScene() != FamilyScene) continue;
+				Proxy->RunCulling(GraphBuilder, InView);
+			}
+#if CSV_PROFILER_STATS
+			// 累加而不是覆盖：一帧里可能有几个 view family（主视图 + 场景捕获），每个都剔一遍。
+			CSV_CUSTOM_STAT(CSGpuInstanced, CullSetupMs, float((FPlatformTime::Seconds() - SetupStartSeconds) * 1000.0), ECsvCustomStatOp::Accumulate);
+			CSV_CUSTOM_STAT(CSGpuInstanced, CullProxies, GetRegisteredProxies().Num(), ECsvCustomStatOp::Accumulate);
+#endif
 		}
 
 	private:
@@ -264,6 +334,7 @@ FCSGpuInstancedMeshSceneProxy::FCSGpuInstancedMeshSceneProxy(UCSGpuInstancedMesh
 	, LodScreenSizeScale(FMath::Max(Component->LODScreenSizeScale, 0.01f))
 	, bFrustumCull(Component->bGpuFrustumCulling)
 	, bLodSelect(Component->bGpuLODSelection)
+	, bShadowOnly(Component->IsClassicShadowCopyActive())
 	, Layout(Component->GetGpuLayout())
 {
 	// Holding the shared reference (not a raw pointer) is what makes both teardown orders safe:
@@ -308,7 +379,8 @@ FCSGpuInstancedMeshSceneProxy::FCSGpuInstancedMeshSceneProxy(UCSGpuInstancedMesh
 	// per slot (3+1+1 float4). Still worth a warning even though the mesh's VRAM pre-flight now
 	// refuses an allocation past the device's share outright: a request that fits is not the same
 	// as a request that was a good idea, and it is measured against the ratcheted capacity.
-	const uint64 VisibleBytes = uint64(Layout.InstanceCapacity) * Layout.NumLODs * uint64(CS_GPU_INSTANCED_ROW_FLOAT4S) * sizeof(FVector4f);
+	const uint64 VisibleBytesPerSlot = Layout.bVisibleSourceIndex ? sizeof(uint32) : uint64(CS_GPU_INSTANCED_ROW_FLOAT4S) * sizeof(FVector4f);
+	const uint64 VisibleBytes = uint64(Layout.InstanceCapacity) * Layout.NumLODs * VisibleBytesPerSlot;
 	if (VisibleBytes > 64ull * 1024ull * 1024ull)
 	{
 		UE_LOG(LogCSGpuInstancedProxy, Warning,
@@ -329,6 +401,7 @@ SIZE_T FCSGpuInstancedMeshSceneProxy::GetTypeHash() const
 
 TUniquePtr<FLocalVertexFactory> FCSGpuInstancedMeshSceneProxy::CreateVertexFactory(ERHIFeatureLevel::Type InFeatureLevel, const char* InDebugName) const
 {
+	if (Layout.bVisibleSourceIndex) return MakeUnique<FCSGpuInstancedIndexedVertexFactory>(InFeatureLevel, InDebugName);
 	return MakeUnique<FCSGpuInstancedMeshVertexFactory>(InFeatureLevel, InDebugName);
 }
 
@@ -373,6 +446,9 @@ void FCSGpuInstancedMeshSceneProxy::DestroyRenderThreadResources()
 
 	InstancedLooseUniformBuffer.SafeRelease();
 	FCSGpuMeshSceneProxy::DestroyRenderThreadResources();
+	// 顶点工厂（上一行里已经释放）手上那两个裸指针指的就是它们，所以排在后面。
+	ProducerRowsSRV.SafeRelease();
+	ProducerCustomDataSRV.SafeRelease();
 }
 
 // -----------------------------------------------------------------------------
@@ -415,11 +491,22 @@ void CSGpuInstancedBuildAuxStreamDescs(
 		bExternalPackedSource ? 1u : Layout.InstanceCapacity * CS_GPU_INSTANCED_ROW_FLOAT4S);
 	AddAux(TEXT("CSGpuInstanced.ClusterBounds"), ECSGpuInstancedAuxSlot::ClusterBounds, sizeof(FVector4f), PF_A32B32G32R32F, ClusterCapacity);
 	AddAux(TEXT("CSGpuInstanced.ClusterVisible"), ECSGpuInstancedAuxSlot::ClusterVisible, sizeof(uint32), PF_R32_UINT, ClusterCapacity);
-	AddAux(TEXT("CSGpuInstanced.VisibleTransforms"), ECSGpuInstancedAuxSlot::VisibleTransforms, sizeof(FVector4f), PF_A32B32G32R32F, VisibleSlots * 3u);
-	AddAux(TEXT("CSGpuInstanced.VisibleOrigins"), ECSGpuInstancedAuxSlot::VisibleOrigins, sizeof(FVector4f), PF_A32B32G32R32F, VisibleSlots);
-	AddAux(TEXT("CSGpuInstanced.VisibleLightmap"), ECSGpuInstancedAuxSlot::VisibleLightmap, sizeof(FVector4f), PF_A32B32G32R32F, VisibleSlots);
-	AddAux(TEXT("CSGpuInstanced.VisibleCustomData"), ECSGpuInstancedAuxSlot::VisibleCustomData, sizeof(float), PF_R32_FLOAT,
-		VisibleSlots * uint32(CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS));
+	if (Layout.bVisibleSourceIndex)
+	{
+		// 每个可见槽 4 字节的源行号（旧布局是 88 字节的完整属性）；绘制经它直接读源实例行。
+		AddAux(TEXT("CSGpuInstanced.VisibleSourceIndices"), ECSGpuInstancedAuxSlot::VisibleSourceIndices, sizeof(uint32), PF_R32_UINT, VisibleSlots);
+		// 一行零：生产者没给 custom data 时材质读它（见 ECSGpuInstancedAuxSlot::CustomDataFallback）。大小与实例数无关。
+		AddAux(TEXT("CSGpuInstanced.CustomDataFallback"), ECSGpuInstancedAuxSlot::CustomDataFallback, sizeof(float), PF_R32_FLOAT,
+			uint32(CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS));
+	}
+	else
+	{
+		AddAux(TEXT("CSGpuInstanced.VisibleTransforms"), ECSGpuInstancedAuxSlot::VisibleTransforms, sizeof(FVector4f), PF_A32B32G32R32F, VisibleSlots * 3u);
+		AddAux(TEXT("CSGpuInstanced.VisibleOrigins"), ECSGpuInstancedAuxSlot::VisibleOrigins, sizeof(FVector4f), PF_A32B32G32R32F, VisibleSlots);
+		AddAux(TEXT("CSGpuInstanced.VisibleLightmap"), ECSGpuInstancedAuxSlot::VisibleLightmap, sizeof(FVector4f), PF_A32B32G32R32F, VisibleSlots);
+		AddAux(TEXT("CSGpuInstanced.VisibleCustomData"), ECSGpuInstancedAuxSlot::VisibleCustomData, sizeof(float), PF_R32_FLOAT,
+			VisibleSlots * uint32(CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS));
+	}
 	// Fixed at the maximum rather than sized to NumLODs: 16 bytes, and it keeps a base mesh gaining
 	// or losing a LOD from re-declaring this stream (which reallocates the whole resident set).
 	AddAux(TEXT("CSGpuInstanced.LodCounters"), ECSGpuInstancedAuxSlot::LodCounters, sizeof(uint32), PF_R32_UINT, CS_GPU_INSTANCED_MAX_LODS);
@@ -433,8 +520,67 @@ void FCSGpuInstancedMeshSceneProxy::OnStreamsAllocated(FRHICommandListBase& RHIC
 	// proxy as stale from birth. See AdoptedAllocationGeneration.
 	AdoptedAllocationGeneration = Resident.IsValid() ? Resident->AllocationGeneration : 0u;
 
+	// 剔除只碰间接参数与本叶子的 aux 流（那一行 custom data 零除外：它只在上传时清一次）。流表变了分配代数就变，
+	// RunCulling 开头那道代数检查会先拦住，所以这张位图不会对着另一张流表用。
+	CullStreamMask = ~0ull;
+	if (Resident.IsValid() && Resident->Streams.Num() <= 64)
+	{
+		CullStreamMask = 0ull;
+		for (int32 Index = 0; Index < Resident->Streams.Num(); ++Index)
+		{
+			const FCSGpuStreamDesc& Desc = Resident->Streams[Index].Desc;
+			const bool bLeafAux = Desc.Role == ECSGpuStreamRole::AuxVertex
+				&& Desc.TexCoordIndex >= uint8(ECSGpuInstancedAuxSlot::SourceInstances)
+				&& Desc.TexCoordIndex != uint8(ECSGpuInstancedAuxSlot::CustomDataFallback);
+			if (bLeafAux || Desc.Role == ECSGpuStreamRole::IndirectArgs) CullStreamMask |= 1ull << Index;
+		}
+	}
+
 	auto* InstancedVF = static_cast<FCSGpuInstancedMeshVertexFactory*>(VertexFactory.Get());
 	if (!InstancedVF) return;
+
+	if (Layout.bVisibleSourceIndex)
+	{
+		// 源行：packed GPU 源读生产者自己那块 buffer（常驻流里那条只是占位），其余读常驻流 SourceInstances
+		// （CPU 源是上传进去的，点云源是每帧剔除前现打进去的）。
+		FRHIShaderResourceView* Rows = nullptr;
+		if (GpuSource.IsValid())
+		{
+			ProducerRowsSRV = RHICmdList.CreateShaderResourceView(GpuSource.PackedInstances->GetRHI(),
+				FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_A32B32G32R32F));
+			Rows = ProducerRowsSRV;
+		}
+		else
+		{
+			Rows = GetStreamSRV(ECSGpuStreamRole::AuxVertex, uint8(ECSGpuInstancedAuxSlot::SourceInstances));
+		}
+
+		// custom data：生产者给了就直接读它那条（逐源行，下标就是源行号）；没给读那一行零，下标钉成 0。
+		const bool bSourceCustomData = GpuSource.IsValid() && GpuSource.CustomData.IsValid();
+		FRHIShaderResourceView* CustomData = nullptr;
+		if (bSourceCustomData)
+		{
+			ProducerCustomDataSRV = RHICmdList.CreateShaderResourceView(GpuSource.CustomData->GetRHI(),
+				FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R32_FLOAT));
+			CustomData = ProducerCustomDataSRV;
+		}
+		else
+		{
+			CustomData = GetStreamSRV(ECSGpuStreamRole::AuxVertex, uint8(ECSGpuInstancedAuxSlot::CustomDataFallback));
+		}
+
+		FRHIShaderResourceView* VisibleIndices = GetStreamSRV(ECSGpuStreamRole::AuxVertex, uint8(ECSGpuInstancedAuxSlot::VisibleSourceIndices));
+		if (!Rows || !VisibleIndices || !CustomData)
+		{
+			UE_LOG(LogCSGpuInstancedProxy, Error,
+				TEXT("[CSGpuInstanced] %s: the visible-source-index streams did not resolve (rows=%d indices=%d customdata=%d). ")
+				TEXT("The mesh's stream layout is missing this leaf's aux slots — check ECSGpuInstancedAuxSlot against the retained set."),
+				*GetOwnerName().ToString(), Rows ? 1 : 0, VisibleIndices ? 1 : 0, CustomData ? 1 : 0);
+			return;
+		}
+		static_cast<FCSGpuInstancedIndexedVertexFactory*>(InstancedVF)->SetIndexedInstanceStreams(Rows, VisibleIndices, CustomData, bSourceCustomData);
+		return;
+	}
 
 	FRHIShaderResourceView* Origins = GetStreamSRV(ECSGpuStreamRole::AuxVertex, uint8(ECSGpuInstancedAuxSlot::VisibleOrigins));
 	FRHIShaderResourceView* Transforms = GetStreamSRV(ECSGpuStreamRole::AuxVertex, uint8(ECSGpuInstancedAuxSlot::VisibleTransforms));
@@ -526,7 +672,10 @@ void FCSGpuInstancedMeshSceneProxy::RunCulling(FRDGBuilder& GraphBuilder, const 
 	// down there, which made this function the second copy of a rule whose violations are silent: a
 	// stream left in RDG's default epilogue (SRVMask) is illegal for index / indirect use and the
 	// mesh simply stops drawing. A pass added below now needs no list kept in step with it.
-	FCSMeshRenderThreadEdit Edit(GraphBuilder, *Resident);
+	const int32 LeanFlags = CVarCSGpuInstancedLeanCullSetup.GetValueOnRenderThread();
+	const bool bLeanStreams = (LeanFlags & CSGpuInstancedLeanCull::SubsetStreams) != 0;
+	const bool bLeanCount = (LeanFlags & CSGpuInstancedLeanCull::CountUniform) != 0;
+	FCSMeshRenderThreadEdit Edit(GraphBuilder, *Resident, bLeanStreams ? CullStreamMask : ~0ull);
 
 	// A missing slot means the layout was refused at declaration time (OnStreamsAllocated already
 	// logged which one); culling into nothing is the right response every frame after that.
@@ -535,42 +684,47 @@ void FCSGpuInstancedMeshSceneProxy::RunCulling(FRDGBuilder& GraphBuilder, const 
 		return Edit->Find(ECSGpuStreamRole::AuxVertex, uint8(Slot));
 	};
 
+	const bool bOutputSourceIndex = Layout.bVisibleSourceIndex;
+
 	FRDGBufferRef ClusterBoundsBuffer = Aux(ECSGpuInstancedAuxSlot::ClusterBounds);
 	FRDGBufferRef ClusterVisible = Aux(ECSGpuInstancedAuxSlot::ClusterVisible);
-	FRDGBufferRef VisTransforms = Aux(ECSGpuInstancedAuxSlot::VisibleTransforms);
-	FRDGBufferRef VisOrigins = Aux(ECSGpuInstancedAuxSlot::VisibleOrigins);
-	FRDGBufferRef VisLightmap = Aux(ECSGpuInstancedAuxSlot::VisibleLightmap);
-	FRDGBufferRef VisCustomData = Aux(ECSGpuInstancedAuxSlot::VisibleCustomData);
+	// 两种布局各有各的可见缓冲（见 CSGpuInstancedBuildAuxStreamDescs），另一种的那几条压根没声明。
+	FRDGBufferRef VisTransforms = bOutputSourceIndex ? nullptr : Aux(ECSGpuInstancedAuxSlot::VisibleTransforms);
+	FRDGBufferRef VisOrigins = bOutputSourceIndex ? nullptr : Aux(ECSGpuInstancedAuxSlot::VisibleOrigins);
+	FRDGBufferRef VisLightmap = bOutputSourceIndex ? nullptr : Aux(ECSGpuInstancedAuxSlot::VisibleLightmap);
+	FRDGBufferRef VisCustomData = bOutputSourceIndex ? nullptr : Aux(ECSGpuInstancedAuxSlot::VisibleCustomData);
+	FRDGBufferRef VisSourceIndices = bOutputSourceIndex ? Aux(ECSGpuInstancedAuxSlot::VisibleSourceIndices) : nullptr;
 	FRDGBufferRef LodCounters = Aux(ECSGpuInstancedAuxSlot::LodCounters);
 	FRDGBufferRef IndirectArgs = Edit->IndirectArgs();
 	// A packed GPU source replaces this stream outright; the mesh then carries only a placeholder.
 	// It belongs to the producer rather than to the mesh, so it is registered directly and is not
 	// the edit's to restore — the cull only ever reads it.
-	FRDGBufferRef SourceInstances = GpuSource.IsValid()
-		? GraphBuilder.RegisterExternalBuffer(GpuSource.PackedInstances)
-		: Aux(ECSGpuInstancedAuxSlot::SourceInstances);
+	FRDGBufferRef ProducerRows = GpuSource.IsValid() ? CSGpuInstancedRegisterProducerBuffer(GraphBuilder, GpuSource.PackedInstances) : nullptr;
+	FRDGBufferRef SourceInstances = ProducerRows ? ProducerRows : Aux(ECSGpuInstancedAuxSlot::SourceInstances);
 
-	if (!ClusterBoundsBuffer || !ClusterVisible || !VisTransforms || !VisOrigins || !VisLightmap) return;
-	if (!VisCustomData) return;
+	if (!ClusterBoundsBuffer || !ClusterVisible) return;
+	if (bOutputSourceIndex ? !VisSourceIndices : (!VisTransforms || !VisOrigins || !VisLightmap || !VisCustomData)) return;
 
 	// 生产者的 custom data（可空）。与 SourceInstances 同一条口径：它属于生产者而不是这张网格，
-	// 直接 register，剔除只读不写。
-	FRDGBufferRef SourceCustomData = (GpuSource.IsValid() && GpuSource.CustomData.IsValid())
-		? GraphBuilder.RegisterExternalBuffer(GpuSource.CustomData)
+	// 直接 register，剔除只读不写。源行号布局下剔除根本不碰它 —— 绘制经源行号直接读（见 OnStreamsAllocated）。
+	FRDGBufferRef SourceCustomData = (!bOutputSourceIndex && GpuSource.IsValid() && GpuSource.CustomData.IsValid())
+		? CSGpuInstancedRegisterProducerBuffer(GraphBuilder, GpuSource.CustomData)
 		: nullptr;
 	if (!LodCounters || !IndirectArgs || !SourceInstances) return;
 
 	// Instance count: a plain uniform for the CPU array, the producer's GPU counter otherwise. The
 	// CPU value is the LIVE row count, not the capacity — the source buffer ratchets, so the rows
 	// past the live count are the previous instance set and would draw as ghosts.
-	FRDGBufferRef InstanceCount;
+	FRDGBufferRef InstanceCount = nullptr;
 	if (GpuSource.IsValid()) InstanceCount = GraphBuilder.RegisterExternalBuffer(GpuSource.Counter);
 	else if (GpuPointSource.IsValid()) InstanceCount = GraphBuilder.RegisterExternalBuffer(GpuPointSource.Counter);
-	else
+	else if (!bLeanCount)
 	{
 		InstanceCount = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), 1), TEXT("CSGpuInstanced.InstanceCount"));
 		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(FRDGBufferUAVDesc(InstanceCount, PF_R32_UINT)), Layout.NumSourceInstances);
 	}
+	// 精简建图下 CPU 实例数组没有计数 buffer：行数直接当 uniform 交给剔除（FCountUniform permutation）。
+	const bool bCountUniform = InstanceCount == nullptr;
 
 	FRDGBufferUAVRef ClusterVisibleUAV = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(ClusterVisible, PF_R32_UINT));
 	FRDGBufferUAVRef LodCountersUAV = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(LodCounters, PF_R32_UINT));
@@ -604,6 +758,7 @@ void FCSGpuInstancedMeshSceneProxy::RunCulling(FRDGBuilder& GraphBuilder, const 
 		Params->bFrustumCull = bFrustumCull ? 1u : 0u;
 
 		TShaderMapRef<FCSInstancedClusterCullCS> Shader(ShaderMap);
+		RDG_EVENT_SCOPE_STAT(GraphBuilder, CSGpuInstancedClusterCull, "CSGpuInstanced.ClusterCull");
 		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("ClusterCull"), Shader, Params,
 			FComputeShaderUtils::GetGroupCount(Layout.NumClusters, CullGroupSize));
 	}
@@ -612,17 +767,28 @@ void FCSGpuInstancedMeshSceneProxy::RunCulling(FRDGBuilder& GraphBuilder, const 
 	{
 		FCSInstancedInstanceCullCS::FParameters* Params = GraphBuilder.AllocParameters<FCSInstancedInstanceCullCS::FParameters>();
 		Params->SrcInstances = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(SourceInstances, PF_A32B32G32R32F));
-		Params->SrcInstanceCount = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(InstanceCount, PF_R32_UINT));
+		// 计数 buffer 与 uniform 二选一，另一个在那个 permutation 里不存在，留空即可。
+		if (bCountUniform) Params->SrcInstanceCountValue = Layout.NumSourceInstances;
+		else Params->SrcInstanceCount = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(InstanceCount, PF_R32_UINT));
 		Params->RWClusterVisible = ClusterVisibleUAV;
-		Params->RWVisTransforms = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(VisTransforms, PF_A32B32G32R32F));
-		Params->RWVisOrigins = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(VisOrigins, PF_A32B32G32R32F));
-		Params->RWVisLightmap = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(VisLightmap, PF_A32B32G32R32F));
-		Params->RWVisCustomData = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(VisCustomData, PF_R32_FLOAT));
-		// 源为空时也必须绑一条**非空** SRV（RDG 拒绝 null 绑定）：拿可见缓冲自己当哑源，
-		// 有 bHasCustomData 挡着，一个字节都不会被读。
-		Params->SrcCustomData = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(
-			SourceCustomData ? SourceCustomData : VisCustomData, PF_R32_FLOAT));
-		Params->bHasCustomData = SourceCustomData ? 1u : 0u;
+		if (bOutputSourceIndex)
+		{
+			// 只写源行号：四条可见属性缓冲与 custom data 源在这个 permutation 里都不存在，留空即可
+			// （FComputeShaderUtils::AddPass 按着色器实际用到的参数校验）。
+			Params->RWVisSourceIndices = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(VisSourceIndices, PF_R32_UINT));
+		}
+		else
+		{
+			Params->RWVisTransforms = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(VisTransforms, PF_A32B32G32R32F));
+			Params->RWVisOrigins = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(VisOrigins, PF_A32B32G32R32F));
+			Params->RWVisLightmap = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(VisLightmap, PF_A32B32G32R32F));
+			Params->RWVisCustomData = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(VisCustomData, PF_R32_FLOAT));
+			// 源为空时也必须绑一条**非空** SRV（RDG 拒绝 null 绑定）：拿可见缓冲自己当哑源，
+			// 有 bHasCustomData 挡着，一个字节都不会被读。
+			Params->SrcCustomData = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(
+				SourceCustomData ? SourceCustomData : VisCustomData, PF_R32_FLOAT));
+			Params->bHasCustomData = SourceCustomData ? 1u : 0u;
+		}
 		Params->RWLodCounters = LodCountersUAV;
 		for (int32 i = 0; i < 6; ++i) Params->FrustumPlanes[i] = FrustumPlanes[i];
 		Params->ViewOriginLocal = ViewOriginLocal;
@@ -641,9 +807,18 @@ void FCSGpuInstancedMeshSceneProxy::RunCulling(FRDGBuilder& GraphBuilder, const 
 		Params->bFrustumCull = bFrustumCull ? 1u : 0u;
 		Params->bLodSelect = bLodSelect ? 1u : 0u;
 
-		TShaderMapRef<FCSInstancedInstanceCullCS> Shader(ShaderMap);
+		FCSInstancedInstanceCullCS::FPermutationDomain Permutation;
+		Permutation.Set<FCSInstancedInstanceCullCS::FOutputSourceIndex>(bOutputSourceIndex);
+		Permutation.Set<FCSInstancedInstanceCullCS::FCountUniform>(bCountUniform);
+		TShaderMapRef<FCSInstancedInstanceCullCS> Shader(ShaderMap, Permutation);
+		RDG_EVENT_SCOPE_STAT(GraphBuilder, CSGpuInstancedInstanceCull, "CSGpuInstanced.InstanceCull");
+		// 派发范围 = 布局里的源行数，不是容量（InstanceCullingOptimization.md §6.2）：CPU 实例数组的行数 CPU 自己知道，
+		// 容量按 1.5 倍棘轮，多出来的那三分之一线程组一进来就返回、没必要派。GPU 源的行数只有 GPU 计数器知道，
+		// 布局里记的就是容量，仍然整段派发 —— 改成间接派发要多一个建参数的 pass，而实测 70 万行空槽才 0.06–0.08 ms，不划算。
+		const uint32 DispatchRows = FMath::Clamp(Layout.NumSourceInstances, 1u, Layout.InstanceCapacity);
 		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("InstanceCull"), Shader, Params,
-			FComputeShaderUtils::GetGroupCount(Layout.InstanceCapacity, CullGroupSize));
+			FComputeShaderUtils::GetGroupCount(DispatchRows, CullGroupSize));
+		CSV_CUSTOM_STAT(CSGpuInstanced, CullDispatchRows, int32(DispatchRows), ECsvCustomStatOp::Accumulate);
 	}
 
 	// Indirect args, one set per draw (a material section of a LOD). Every section of a LOD reads that
@@ -662,6 +837,7 @@ void FCSGpuInstancedMeshSceneProxy::RunCulling(FRDGBuilder& GraphBuilder, const 
 		Params->MaxInstancesPerLod = Layout.InstanceCapacity;
 
 		TShaderMapRef<FCSInstancedBuildArgsCS> Shader(ShaderMap);
+		RDG_EVENT_SCOPE_STAT(GraphBuilder, CSGpuInstancedBuildArgs, "CSGpuInstanced.BuildArgs");
 		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("BuildArgs"), Shader, Params, FIntVector(1, 1, 1));
 	}
 
@@ -694,6 +870,10 @@ void FCSGpuInstancedMeshSceneProxy::RunCulling(FRDGBuilder& GraphBuilder, const 
 		DiagnosticState = EDiagnosticState::Done;
 	}
 
+	// 源行号布局下，本帧后面的绘制经裸 SRV 直接读生产者那块行 buffer（顶点着色器）。RDG 不知道那些读者：
+	// 不在这里交出去的话，它停在剔除 pass 留下的访问状态上，而不是绘制要的 SRVMask。常驻流那一半由下面的析构负责。
+	if (bOutputSourceIndex) CSGpuInstancedHandOffProducerBuffer(GraphBuilder, ProducerRows);
+
 	// Nothing to do here on the way out: ~FCSMeshRenderThreadEdit runs next and transitions every
 	// resident stream to CSGpuMeshStreams::FinalAccessForRole's state, immediately rather than in
 	// the graph epilogue — the draw that reads them is a later pass in this same graph. The
@@ -704,6 +884,22 @@ void FCSGpuInstancedMeshSceneProxy::RunCulling(FRDGBuilder& GraphBuilder, const 
 // -----------------------------------------------------------------------------
 // Draw
 // -----------------------------------------------------------------------------
+
+FPrimitiveViewRelevance FCSGpuInstancedMeshSceneProxy::GetViewRelevance(const FSceneView* View) const
+{
+	FPrimitiveViewRelevance Result = FCSGpuMeshSceneProxy::GetViewRelevance(View);
+	if (bShadowOnly)
+	{
+		// 主通道由 Nanite 替身画；这份只为把影子送进 CSM 级联（本工厂进不了 VSM，见组件构造函数）。
+		// 阴影收集走 bShadowRelevance，与这四项无关 —— 2026-09-14 树的只投影副本就是这么验过的
+		// （当时关的是组件的 bRenderInMainPass，效果与这里相同：影子逐像素重合、主通道一个像素都不画）。
+		Result.bRenderInMainPass = false;
+		Result.bRenderInDepthPass = false;
+		Result.bRenderCustomDepth = false;
+		Result.bVelocityRelevance = false;
+	}
+	return Result;
+}
 
 void FCSGpuInstancedMeshSceneProxy::GetDynamicMeshElements(const TArray<const FSceneView*>& Views,
 	const FSceneViewFamily& ViewFamily, uint32 VisibilityMap, FMeshElementCollector& Collector) const

@@ -21,6 +21,17 @@ struct FCSGpuNaniteInstanceFeed
 	FCSGpuInstancePointSourceGPU Points;
 
 	bool IsGpu() const { return Packed.IsValid() || Points.IsValid(); }
+
+	/**
+	 * 这份源变了会不会有人来说一声。CPU 行恒为真（组件自己改的，改完就重新交接）；GPU 源看生产者的承诺
+	 * （FCSGpuInstanceSourceGPU::bNotifiesChanges）。假 ⇒ 只能每帧重写。
+	 */
+	bool NotifiesChanges() const
+	{
+		if (Packed.IsValid()) return Packed.bNotifiesChanges;
+		if (Points.IsValid()) return Points.bNotifiesChanges;
+		return true;
+	}
 	bool IsValid() const { return IsGpu() || (CpuRows.IsValid() && CpuRows->Num() >= CS_GPU_INSTANCED_ROW_FLOAT4S); }
 
 	/** GPU-Scene 要给这个图元分几个实例槽。GPU 源取容量：活着的个数只有 GPU 计数器知道，
@@ -54,9 +65,11 @@ struct FCSGpuNaniteWriteStats
  * `NumInstanceUploads` 对它恒为 0），区间里的每个槽初始化成 HIDDEN，写什么全靠我们：
  *   · 代理新建（换槽数 / 换网格 / 任何属性导致的重建）⇒ 新区间，必须当帧写，否则整族闪一帧；
  *   · 图元一动 ⇒ GPU-Scene 里存的是实例的**世界**变换，全部过期，必须重写；
- *   · GPU 源 ⇒ 生产者在同一批 buffer 里原地重写、从不通知（它们只在容量 / 包围盒变了时才重新交接），
- *     所以**每帧**都重抄一遍 —— 与经典路每帧剔除时现读 buffer 同一个"不需要通知"的口径。
+ *   · GPU 源 ⇒ 生产者在同一批 buffer 里原地重写（它们只在容量 / 包围盒变了时才重新交接）。
+ *     默认它们**从不通知**，所以**每帧**都重抄一遍 —— 与经典路每帧剔除时现读 buffer 同一个"不需要通知"的口径。
  *     代价要说清楚：每帧的实例更新会让 VSM 把这批实例的缓存页当"动了"作废，影子每帧重画。
+ *     承诺了通知的源（FCSGpuInstanceSourceGPU::bNotifiesChanges，2026-10-02）只在被通知时重写：
+ *     NotifyFeedChanged 记一笔，下一次帧末更新开头（或 Tick）补发 —— 与"代理新建"那条走的是同一个欠账口。
  *
  * 引擎硬性要求 CPU 端有实例数据的几条特性在这里一律关掉，而且**必须**关：Lumen 场景（card 表示）
  * 与距离场场景对 GPU-only 实例是 `check()`（LumenScene.cpp / DistanceFieldObjectManagement.cpp），
@@ -81,6 +94,9 @@ public:
 	/** 换实例源。槽数变了只能换代理（实例区间的大小是代理构造时定的），新代理由
 	 *  CreateRenderState_Concurrent 负责写；槽数没变就当帧重发一次写入。 */
 	void SetFeed(FCSGpuNaniteInstanceFeed&& InFeed, const FBox& InInstancesLocalBounds);
+
+	/** 生产者原地改写了源（UCSGpuInstancedMeshComponent::NotifyInstanceSourceChanged 转过来的）：欠一次写入，渲染前补上。 */
+	void NotifyFeedChanged() { bWritePending = true; }
 
 	uint32 GetGpuSceneSlotCount() const { return NumGpuSceneSlots; }
 	bool IsFeedingGpuSource() const { return Feed.IsGpu(); }
@@ -136,6 +152,15 @@ private:
 	/** 当前代理还没收到过写入（新建的、或上次发写入时代理还不存在）。 */
 	bool NeedsWrite() const;
 
+	/** 距离带要不要在写入时抖（有过渡带、且至少有一道边界）。没有过渡带时引擎的硬边距离剔除就够了。 */
+	bool IsDistanceBandActive() const { return BandFade > 0.0f && (BandStart > 0.0f || BandEnd > 0.0f); }
+
+	/**
+	 * 距离带用的视点（世界坐标）：本体设的覆盖视点 > 上一帧画过这个世界的透视视点里离上次最近的那个 >
+	 * 上次用过的那个。一个都没有时返回 false（带内不抖，只剩引擎的硬边）。
+	 */
+	bool ResolveCullView(FVector& OutWorldLocation);
+
 	/** 把 Feed 交给 GPU-Scene 写进当前代理的实例区间。游戏线程；没有代理时只记下"欠一次"。 */
 	void IssueGpuSceneWrite();
 
@@ -147,8 +172,26 @@ private:
 	/** GPU-Scene 实例槽数，代理构造时读。 */
 	uint32 NumGpuSceneSlots = 0;
 
-	/** 本体的 InstanceEndCullDistance，交给引擎做逐实例距离剔除。 */
+	/**
+	 * 交给引擎的**硬边**距离剔除（Nanite 代理的 InstanceDrawDistance）：End = 本体的 End；Min = 本体的
+	 * `Start − Fade`（带的最外沿）。只有 End > 0 引擎才认 Min，所以只有起点的组件把 End 填成一个大数。
+	 * 带内逐实例的抖动不归引擎（它的距离剔除没有过渡带），由写入 pass 做 —— 两者口径一致：引擎的硬边
+	 * 恒在抖动边界之外，永远不会切掉写入 pass 留下的实例。
+	 */
+	int32 InstanceMinDrawDistance = 0;
 	int32 InstanceEndCullDistance = 0;
+
+	/** 本体的距离带原值（cm），每次写入时连同视点一起交给写入 pass。 */
+	float BandStart = 0.0f;
+	float BandEnd = 0.0f;
+	float BandFade = 0.0f;
+
+	/** ResolveCullView 的记忆：多视口时挑离它最近的视点，列表空着的那几次（帧末更新期间）沿用它。 */
+	FVector LastCullView = FVector::ZeroVector;
+	bool bHasLastCullView = false;
+	/** 上一次带着距离带发出去的视点。会通知的源（CPU 行、承诺了通知的 GPU 源）只在它挪得够远时才重写；别的 GPU 源本来就每帧重写。 */
+	FVector LastWrittenCullView = FVector::ZeroVector;
+	bool bWroteWithBand = false;
 
 	/** 每建一次渲染状态 +1。与 WrittenProxy 一起判"当前代理收没收到写入" —— 只比指针的话，
 	 *  新代理恰好分配在旧代理的地址上就会被当成已经写过，整族 HIDDEN 而不报错。 */

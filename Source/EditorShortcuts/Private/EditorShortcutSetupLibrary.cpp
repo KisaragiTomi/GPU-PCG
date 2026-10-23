@@ -66,19 +66,19 @@ FTagOp ResolveTagOp(EEditorShortcutTagOp Op)
 }
 
 /**
- * Builds one function: an Actors input wired straight into the tag library call,
- * with the tag written into the call's Tag pin.
+ * Clears out the function if it is already there and creates it empty, returning its entry node.
+ * Rebuilding rather than editing in place keeps a regenerated function identical to a fresh one.
  */
-bool BuildTagFunction(UBlueprint* Blueprint, FName FunctionName, FName Tag, FName TagFunction, FString& OutError)
+UK2Node_FunctionEntry* RebuildFunctionGraph(UBlueprint* Blueprint, FName FunctionName, UEdGraph*& OutGraph, FString& OutError)
 {
-	// Rebuild rather than duplicate when the function is already there.
+	OutGraph = nullptr;
 	if (UEdGraph* Existing = FindObject<UEdGraph>(Blueprint, *FunctionName.ToString())) FBlueprintEditorUtils::RemoveGraph(Blueprint, Existing);
 
 	UEdGraph* Graph = FBlueprintEditorUtils::CreateNewGraph(Blueprint, FunctionName, UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
 	if (!Graph)
 	{
 		OutError = FString::Printf(TEXT("could not create a graph for %s"), *FunctionName.ToString());
-		return false;
+		return nullptr;
 	}
 
 	FBlueprintEditorUtils::AddFunctionGraph<UClass>(Blueprint, Graph, /*bIsUserCreated=*/true, nullptr);
@@ -88,19 +88,21 @@ bool BuildTagFunction(UBlueprint* Blueprint, FName FunctionName, FName Tag, FNam
 	if (EntryNodes.IsEmpty())
 	{
 		OutError = FString::Printf(TEXT("%s has no entry node"), *FunctionName.ToString());
-		return false;
+		return nullptr;
 	}
 
-	UK2Node_FunctionEntry* EntryNode = EntryNodes[0];
-	UEdGraphPin* ActorsOut = EntryNode->CreateUserDefinedPin(TEXT("Actors"), MakeActorArrayPinType(), EGPD_Output);
-	if (!ActorsOut)
-	{
-		OutError = FString::Printf(TEXT("could not add the Actors input to %s"), *FunctionName.ToString());
-		return false;
-	}
+	OutGraph = Graph;
+	return EntryNodes[0];
+}
 
+/**
+ * Places a call to `Class::Function` right of the entry node and wires the exec pins.
+ * Null when either side has no exec pin, which only happens for a pure or unresolved function.
+ */
+UK2Node_CallFunction* AddCallAfterEntry(UEdGraph* Graph, UK2Node_FunctionEntry* EntryNode, UClass* Class, FName Function)
+{
 	UK2Node_CallFunction* CallNode = NewObject<UK2Node_CallFunction>(Graph);
-	CallNode->FunctionReference.SetExternalMember(TagFunction, UEditorShortcutTagLibrary::StaticClass());
+	CallNode->FunctionReference.SetExternalMember(Function, Class);
 	CallNode->CreateNewGuid();
 	CallNode->PostPlacedNewNode();
 	CallNode->SetFlags(RF_Transactional);
@@ -111,35 +113,92 @@ bool BuildTagFunction(UBlueprint* Blueprint, FName FunctionName, FName Tag, FNam
 
 	UEdGraphPin* EntryThen = EntryNode->FindPin(UEdGraphSchema_K2::PN_Then, EGPD_Output);
 	UEdGraphPin* CallExec = CallNode->FindPin(UEdGraphSchema_K2::PN_Execute, EGPD_Input);
-	UEdGraphPin* CallActors = CallNode->FindPin(TEXT("Actors"), EGPD_Input);
-	UEdGraphPin* CallTag = CallNode->FindPin(TEXT("Tag"), EGPD_Input);
+	if (!EntryThen || !CallExec) return nullptr;
 
-	if (!EntryThen || !CallExec || !CallActors || !CallTag)
+	EntryThen->MakeLinkTo(CallExec);
+	return CallNode;
+}
+
+/**
+ * Builds one function: an Actors input wired straight into the tag library call,
+ * with the tag written into the call's Tag pin.
+ */
+bool BuildTagFunction(UBlueprint* Blueprint, FName FunctionName, FName Tag, FName TagFunction, FString& OutError)
+{
+	UEdGraph* Graph = nullptr;
+	UK2Node_FunctionEntry* EntryNode = RebuildFunctionGraph(Blueprint, FunctionName, Graph, OutError);
+	if (!EntryNode) return false;
+
+	UEdGraphPin* ActorsOut = EntryNode->CreateUserDefinedPin(TEXT("Actors"), MakeActorArrayPinType(), EGPD_Output);
+	if (!ActorsOut)
+	{
+		OutError = FString::Printf(TEXT("could not add the Actors input to %s"), *FunctionName.ToString());
+		return false;
+	}
+
+	UK2Node_CallFunction* CallNode = AddCallAfterEntry(Graph, EntryNode, UEditorShortcutTagLibrary::StaticClass(), TagFunction);
+	UEdGraphPin* CallActors = CallNode ? CallNode->FindPin(TEXT("Actors"), EGPD_Input) : nullptr;
+	UEdGraphPin* CallTag = CallNode ? CallNode->FindPin(TEXT("Tag"), EGPD_Input) : nullptr;
+
+	if (!CallActors || !CallTag)
 	{
 		OutError = FString::Printf(TEXT("%s: %s did not expose the expected pins"), *FunctionName.ToString(), *TagFunction.ToString());
 		return false;
 	}
 
-	EntryThen->MakeLinkTo(CallExec);
 	ActorsOut->MakeLinkTo(CallActors);
 	CallTag->DefaultValue = Tag.ToString();
 
 	return true;
 }
-} // namespace
 
-FString UEditorShortcutSetupLibrary::CreateTagLibrary(const FString& PackageName, const TArray<FName>& Tags, EEditorShortcutTagOp Op, bool bSave)
+/**
+ * Builds one no-argument function whose body is a single Execute Python Command.
+ *
+ * Marked Call In Editor like a hand-made one, so it also shows up as a button on the
+ * library. PythonScriptLibrary is resolved by path: the Python plugin is an editor plugin
+ * this module does not link against, and a missing plugin should fail here, not at load.
+ */
+bool BuildPythonCommandFunction(UBlueprint* Blueprint, FName FunctionName, const FString& PythonCommand, FString& OutError)
 {
+	UClass* PythonLibrary = FindObject<UClass>(nullptr, TEXT("/Script/PythonScriptPlugin.PythonScriptLibrary"));
+	if (!PythonLibrary)
+	{
+		OutError = TEXT("could not resolve /Script/PythonScriptPlugin.PythonScriptLibrary; is the Python Editor Script Plugin enabled?");
+		return false;
+	}
+
+	UEdGraph* Graph = nullptr;
+	UK2Node_FunctionEntry* EntryNode = RebuildFunctionGraph(Blueprint, FunctionName, Graph, OutError);
+	if (!EntryNode) return false;
+	EntryNode->MetaData.bCallInEditor = true;
+
+	UK2Node_CallFunction* CallNode = AddCallAfterEntry(Graph, EntryNode, PythonLibrary, TEXT("ExecutePythonCommand"));
+	UEdGraphPin* CallCommand = CallNode ? CallNode->FindPin(TEXT("PythonCommand"), EGPD_Input) : nullptr;
+	if (!CallCommand)
+	{
+		OutError = FString::Printf(TEXT("%s: ExecutePythonCommand did not expose the expected pins"), *FunctionName.ToString());
+		return false;
+	}
+
+	CallCommand->DefaultValue = PythonCommand;
+	return true;
+}
+
+/**
+ * Finds the shortcut library at PackageName or creates it. An asset with the wrong parent
+ * is replaced: the parent class is what decides whether editor functions may be called,
+ * so such an asset can never compile.
+ */
+UBlueprint* LoadOrCreateShortcutBlueprint(const FString& PackageName, UPackage*& OutPackage, bool& bOutIsNew)
+{
+	OutPackage = nullptr;
+	bOutIsNew = false;
+
 	if (!FPackageName::IsValidLongPackageName(PackageName))
 	{
 		UE_LOG(LogEditorShortcuts, Error, TEXT("'%s' is not a valid package name"), *PackageName);
-		return FString();
-	}
-
-	if (Tags.IsEmpty())
-	{
-		UE_LOG(LogEditorShortcuts, Error, TEXT("no tags given, nothing to generate"));
-		return FString();
+		return nullptr;
 	}
 
 	const FString AssetName = FPackageName::GetShortName(PackageName);
@@ -148,7 +207,7 @@ FString UEditorShortcutSetupLibrary::CreateTagLibrary(const FString& PackageName
 	if (!Package)
 	{
 		UE_LOG(LogEditorShortcuts, Error, TEXT("could not create package %s"), *PackageName);
-		return FString();
+		return nullptr;
 	}
 	Package->FullyLoad();
 
@@ -156,13 +215,11 @@ FString UEditorShortcutSetupLibrary::CreateTagLibrary(const FString& PackageName
 	if (!ParentClass)
 	{
 		UE_LOG(LogEditorShortcuts, Error, TEXT("could not resolve /Script/Blutility.EditorFunctionLibrary; is the Blutility module loaded?"));
-		return FString();
+		return nullptr;
 	}
 
 	UBlueprint* Blueprint = FindObject<UBlueprint>(Package, *AssetName);
 
-	// The parent class is what decides whether editor functions may be called, so an
-	// asset carrying the wrong one can never compile and has to be replaced outright.
 	if (Blueprint && (Blueprint->ParentClass != ParentClass || !Blueprint->IsA<UEditorUtilityBlueprint>()))
 	{
 		UE_LOG(LogEditorShortcuts, Warning, TEXT("%s cannot call editor functions (parent %s); replacing it"),
@@ -172,8 +229,8 @@ FString UEditorShortcutSetupLibrary::CreateTagLibrary(const FString& PackageName
 		Blueprint = nullptr;
 	}
 
-	const bool bIsNew = Blueprint == nullptr;
-	if (bIsNew)
+	bOutIsNew = Blueprint == nullptr;
+	if (bOutIsNew)
 	{
 		// Deliberately the same shape UEditorUtilityBlueprintFactory produces for this
 		// parent, so a generated asset and a hand-made one are indistinguishable.
@@ -189,29 +246,16 @@ FString UEditorShortcutSetupLibrary::CreateTagLibrary(const FString& PackageName
 	if (!Blueprint)
 	{
 		UE_LOG(LogEditorShortcuts, Error, TEXT("could not create blueprint %s"), *PackageName);
-		return FString();
+		return nullptr;
 	}
 
-	const FTagOp TagOp = ResolveTagOp(Op);
+	OutPackage = Package;
+	return Blueprint;
+}
 
-	int32 Built = 0;
-	for (FName Tag : Tags)
-	{
-		if (Tag.IsNone()) continue;
-
-		const FName FunctionName(*FString::Printf(TEXT("%s%s"), TagOp.Prefix, *Tag.ToString()));
-
-		FString Error;
-		if (!BuildTagFunction(Blueprint, FunctionName, Tag, TagOp.Function, Error))
-		{
-			UE_LOG(LogEditorShortcuts, Error, TEXT("%s"), *Error);
-			continue;
-		}
-
-		UE_LOG(LogEditorShortcuts, Log, TEXT("Generated %s -> %s(Actors, %s)"), *FunctionName.ToString(), *TagOp.Function.ToString(), *Tag.ToString());
-		++Built;
-	}
-
+/** Compiles, registers a new asset and optionally saves. Returns the generated class path, empty on failure. */
+FString FinishShortcutBlueprint(UBlueprint* Blueprint, UPackage* Package, const FString& PackageName, bool bIsNew, bool bSave)
+{
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 	FKismetEditorUtilities::CompileBlueprint(Blueprint);
 
@@ -233,7 +277,73 @@ FString UEditorShortcutSetupLibrary::CreateTagLibrary(const FString& PackageName
 		}
 	}
 
-	UE_LOG(LogEditorShortcuts, Log, TEXT("%s %s with %d function(s)"), bIsNew ? TEXT("Created") : TEXT("Updated"), *PackageName, Built);
+	return FString::Printf(TEXT("%s.%s_C"), *PackageName, *FPackageName::GetShortName(PackageName));
+}
+} // namespace
 
-	return FString::Printf(TEXT("%s.%s_C"), *PackageName, *AssetName);
+FString UEditorShortcutSetupLibrary::CreateTagLibrary(const FString& PackageName, const TArray<FName>& Tags, EEditorShortcutTagOp Op, bool bSave)
+{
+	if (Tags.IsEmpty())
+	{
+		UE_LOG(LogEditorShortcuts, Error, TEXT("no tags given, nothing to generate"));
+		return FString();
+	}
+
+	UPackage* Package = nullptr;
+	bool bIsNew = false;
+	UBlueprint* Blueprint = LoadOrCreateShortcutBlueprint(PackageName, Package, bIsNew);
+	if (!Blueprint) return FString();
+
+	const FTagOp TagOp = ResolveTagOp(Op);
+
+	int32 Built = 0;
+	for (FName Tag : Tags)
+	{
+		if (Tag.IsNone()) continue;
+
+		const FName FunctionName(*FString::Printf(TEXT("%s%s"), TagOp.Prefix, *Tag.ToString()));
+
+		FString Error;
+		if (!BuildTagFunction(Blueprint, FunctionName, Tag, TagOp.Function, Error))
+		{
+			UE_LOG(LogEditorShortcuts, Error, TEXT("%s"), *Error);
+			continue;
+		}
+
+		UE_LOG(LogEditorShortcuts, Log, TEXT("Generated %s -> %s(Actors, %s)"), *FunctionName.ToString(), *TagOp.Function.ToString(), *Tag.ToString());
+		++Built;
+	}
+
+	const FString ClassPath = FinishShortcutBlueprint(Blueprint, Package, PackageName, bIsNew, bSave);
+	if (ClassPath.IsEmpty()) return FString();
+
+	UE_LOG(LogEditorShortcuts, Log, TEXT("%s %s with %d function(s)"), bIsNew ? TEXT("Created") : TEXT("Updated"), *PackageName, Built);
+	return ClassPath;
+}
+
+FString UEditorShortcutSetupLibrary::SetPythonCommandFunction(const FString& PackageName, FName FunctionName, const FString& PythonCommand, bool bSave)
+{
+	if (FunctionName.IsNone() || PythonCommand.TrimStartAndEnd().IsEmpty())
+	{
+		UE_LOG(LogEditorShortcuts, Error, TEXT("a function name and a Python command are both required"));
+		return FString();
+	}
+
+	UPackage* Package = nullptr;
+	bool bIsNew = false;
+	UBlueprint* Blueprint = LoadOrCreateShortcutBlueprint(PackageName, Package, bIsNew);
+	if (!Blueprint) return FString();
+
+	FString Error;
+	if (!BuildPythonCommandFunction(Blueprint, FunctionName, PythonCommand, Error))
+	{
+		UE_LOG(LogEditorShortcuts, Error, TEXT("%s"), *Error);
+		return FString();
+	}
+
+	const FString ClassPath = FinishShortcutBlueprint(Blueprint, Package, PackageName, bIsNew, bSave);
+	if (ClassPath.IsEmpty()) return FString();
+
+	UE_LOG(LogEditorShortcuts, Log, TEXT("%s %s::%s -> ExecutePythonCommand"), bIsNew ? TEXT("Created") : TEXT("Updated"), *PackageName, *FunctionName.ToString());
+	return ClassPath;
 }

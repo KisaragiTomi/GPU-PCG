@@ -16,6 +16,7 @@
 #include "NaniteSceneProxy.h"
 #include "PrimitiveSceneDesc.h"
 #include "PrimitiveSceneProxy.h"
+#include "ProfilingDebugging/RealtimeGPUProfiler.h" // DECLARE_GPU_STAT_NAMED
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
 #include "RenderUtils.h"                  // UseGPUScene
@@ -23,6 +24,20 @@
 #include "ShaderParameterStruct.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogCSGpuInstancedNanite, Log, All);
+
+// GPU-Scene 写入 pass 的分段计时（与经典路那四条同一套口径，见 CSGpuInstancedMeshSceneProxy.cpp）。
+DECLARE_GPU_STAT_NAMED(CSGpuInstancedNaniteWrite, TEXT("CSGpuInstanced NaniteWrite"));
+
+// 承诺了"改了就通知"的 GPU 源（FCSGpuInstanceSourceGPU::bNotifiesChanges）要不要真的跳过没变的帧。
+// 0 = 不信那份承诺，照旧每帧重写 —— 对照用的基线开关（InstanceCullingOptimization.md §9.3），也是怀疑某个生产者漏通知时的排查手段：
+// 设成 0 画面就对了，说明它有一条改 buffer 的路径没通知。
+static TAutoConsoleVariable<int32> CVarCSGpuInstancedNaniteSkipUnchangedWrites(
+	TEXT("r.CSGpuInstanced.Nanite.SkipUnchangedWrites"),
+	1,
+	TEXT("Nanite 路：承诺了改动通知的 GPU 实例源，数据没变的帧不重写 GPU-Scene。\n")
+	TEXT(" 0: 每帧都重写（2026-10-02 以前的行为，对照 / 排查漏通知用）。\n")
+	TEXT(" 1: 只在被通知、图元动了、代理重建或距离带的视点挪动时重写（默认）。"),
+	ECVF_Default);
 
 // -----------------------------------------------------------------------------
 // GPU-Scene 写入 pass（Shaders/Private/CSGpuInstancedNaniteWriter.usf）
@@ -46,6 +61,13 @@ public:
 		SHADER_PARAMETER(uint32, WritePrimitiveId)
 		SHADER_PARAMETER(uint32, WritePayloadFlags)
 		SHADER_PARAMETER(uint32, WriteCustomDataCount)
+		// 距离带（与经典路 InstanceCullCS 同一条判据；bCullBand = 0 时整段不跑）。
+		SHADER_PARAMETER(uint32, bCullBand)
+		SHADER_PARAMETER(FVector3f, CullViewLocal)
+		SHADER_PARAMETER(float, CullComponentScale)
+		SHADER_PARAMETER(float, CullStart)
+		SHADER_PARAMETER(float, CullEnd)
+		SHADER_PARAMETER(float, CullFade)
 		// 整份旧式参数结构而不是只挂 GPUSceneWriterUB：SceneDefinitions.h 把
 		// ENABLE_SCENE_DATA_DX11_UB_ERROR_WORKAROUND 定成 1，着色器那一侧读的是全局 RW buffer，
 		// 只绑 UB 的话 GPU-Scene 的 UAV 根本没绑上（PCG 的场景写入器也是这么绑的）。
@@ -77,12 +99,27 @@ namespace
 		FMatrix44f WorldToComponent = FMatrix44f::Identity; // 只有点云源用
 		uint32 NumSlots = 0;
 		TSharedPtr<FCSGpuNaniteWriteStats, ESPMode::ThreadSafe> Stats;
+
+		/** 距离带：视点换进组件空间，距离再乘组件缩放回到世界单位（与经典路剔除同一口径）。 */
+		bool bCullBand = false;
+		FVector3f CullViewLocal = FVector3f::ZeroVector;
+		float CullComponentScale = 1.0f;
+		float CullStart = 0.0f;
+		float CullEnd = 0.0f;
+		float CullFade = 0.0f;
+
+		/**
+		 * 本体同时挂着经典路的只投影副本，而且那份副本画的是「可见源行号」布局：它的绘制经裸 SRV **直接读生产者的
+		 * 行 / custom data**。写入 pass 读完之后要把这两条交回 SRVMask（CSGpuInstancedHandOffProducerBuffer），
+		 * 否则它们停在 compute 的访问状态上。别的情形不交 —— 没有绘制读它们，让 RDG 照常在图末收尾。
+		 */
+		bool bHandOffProducerBuffers = false;
 	};
 
 	/** 渲染线程，GPU-Scene 更新时序里（FGPUScene::UpdateInternal 的 UpdateInstancesFromCompute 段）。 */
 	void CSGpuInstancedNanite_AddWritePasses(FRDGBuilder& GraphBuilder, const FGPUSceneWriteDelegateParams& Params, const FCSGpuNaniteWriteInputs& In)
 	{
-		RDG_EVENT_SCOPE(GraphBuilder, "CSGpuInstanced.NaniteWrite");
+		RDG_EVENT_SCOPE_STAT(GraphBuilder, CSGpuInstancedNaniteWrite, "CSGpuInstanced.NaniteWrite");
 		UE_LOG(LogCSGpuInstancedNanite, Verbose, TEXT("[NaniteWrite] dispatch: PersistentPrimitiveId=%u InstanceSceneDataOffset=%u Slots=%u Source=%s"),
 			Params.PersistentPrimitiveId, Params.InstanceSceneDataOffset, In.NumSlots,
 			In.Feed.Packed.IsValid() ? TEXT("packed") : (In.Feed.Points.IsValid() ? TEXT("points") : TEXT("cpu")));
@@ -94,14 +131,23 @@ namespace
 		FRDGBufferRef Rows = nullptr;
 		FRDGBufferRef Count = nullptr;
 		FRDGBufferRef CustomData = nullptr;
+		// 生产者自己的那两条（读完要交回外部访问状态，见下面 AddPass 之后）。临时建的行 / custom data 不算。
+		FRDGBufferRef ProducerRows = nullptr;
+		FRDGBufferRef ProducerCustomData = nullptr;
 		uint32 MaxSourceInstances = 0;
 
 		if (Feed.Packed.IsValid())
 		{
-			// 生产者的 buffer：只读，直接 register（与剔除 pass 同一条口径）。
-			Rows = GraphBuilder.RegisterExternalBuffer(Feed.Packed.PackedInstances);
+			// 生产者的 buffer：只读（与剔除 pass 同一条口径）。同一张图里经典路的只投影副本可能已经读过它、
+			// 并把它交到外部访问状态了（「可见源行号」布局），所以经 CSGpuInstancedRegisterProducerBuffer 拿回来再用。
+			ProducerRows = CSGpuInstancedRegisterProducerBuffer(GraphBuilder, Feed.Packed.PackedInstances);
+			Rows = ProducerRows;
 			Count = GraphBuilder.RegisterExternalBuffer(Feed.Packed.Counter);
-			if (Feed.Packed.CustomData.IsValid()) CustomData = GraphBuilder.RegisterExternalBuffer(Feed.Packed.CustomData);
+			if (Feed.Packed.CustomData.IsValid())
+			{
+				ProducerCustomData = CSGpuInstancedRegisterProducerBuffer(GraphBuilder, Feed.Packed.CustomData);
+				CustomData = ProducerCustomData;
+			}
 			MaxSourceInstances = Feed.Packed.Capacity;
 		}
 		else if (Feed.Points.IsValid())
@@ -146,6 +192,12 @@ namespace
 		PassParameters->WritePrimitiveId = Params.PersistentPrimitiveId;
 		PassParameters->WritePayloadFlags = Params.PackedInstanceSceneDataFlags;
 		PassParameters->WriteCustomDataCount = Params.NumCustomDataFloats == uint32(INDEX_NONE) ? 0u : Params.NumCustomDataFloats;
+		PassParameters->bCullBand = In.bCullBand ? 1u : 0u;
+		PassParameters->CullViewLocal = In.CullViewLocal;
+		PassParameters->CullComponentScale = In.CullComponentScale;
+		PassParameters->CullStart = In.CullStart;
+		PassParameters->CullEnd = In.CullEnd;
+		PassParameters->CullFade = In.CullFade;
 		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		PassParameters->GPUSceneWriterParameters = Params.GPUWriteParams;
 		PRAGMA_ENABLE_DEPRECATION_WARNINGS
@@ -156,7 +208,17 @@ namespace
 			ERDGPassFlags::Compute | ERDGPassFlags::NeverCull, Shader, PassParameters,
 			FComputeShaderUtils::GetGroupCountWrapped(int32(FMath::DivideAndRoundUp(In.NumSlots, FCSGpuInstancedNaniteWriteCS::NumThreadsPerGroup))));
 
+		// 同一个生产者还喂着经典路的只投影副本时，那边的绘制经裸 SRV 直接读这两条：读完交回 SRVMask，
+		// 而不是让它们停在这个 compute pass 的访问状态上（理由见 bHandOffProducerBuffers）。
+		if (In.bHandOffProducerBuffers)
+		{
+			CSGpuInstancedHandOffProducerBuffer(GraphBuilder, ProducerRows);
+			CSGpuInstancedHandOffProducerBuffer(GraphBuilder, ProducerCustomData);
+		}
+
 		if (In.Stats.IsValid()) In.Stats->DispatchedWrites.fetch_add(1);
+		CSV_CUSTOM_STAT(CSGpuInstanced, NaniteWrites, 1, ECsvCustomStatOp::Accumulate);
+		CSV_CUSTOM_STAT(CSGpuInstanced, NaniteWriteSlots, int32(In.NumSlots), ECsvCustomStatOp::Accumulate);
 	}
 }
 
@@ -209,17 +271,28 @@ void UCSGpuInstancedNaniteComponent::SyncFromOwner(const UCSGpuInstancedMeshComp
 		bDirty = true;
 	}
 
-	const int32 WantedCullDistance = FMath::Max(0, FMath::RoundToInt(Owner.InstanceEndCullDistance));
-	if (InstanceEndCullDistance != WantedCullDistance)
+	// 距离带：原值留给写入 pass 逐实例抖；引擎只拿带的两道最外沿当硬边（见 InstanceMinDrawDistance 的注释）。
+	BandStart = FMath::Max(Owner.InstanceStartCullDistance, 0.0f);
+	BandEnd = FMath::Max(Owner.InstanceEndCullDistance, 0.0f);
+	BandFade = FMath::Max(Owner.InstanceCullFadeDistance, 0.0f);
+	const int32 WantedMinDraw = BandStart > 0.0f ? FMath::Max(0, FMath::RoundToInt(BandStart - BandFade)) : 0;
+	int32 WantedEndCull = BandEnd > 0.0f ? FMath::Max(1, FMath::RoundToInt(BandEnd)) : 0;
+	// 引擎只在 End > 0 时才认 Min（Nanite::FSceneProxy::GetInstanceDrawDistanceMinMax）：只有起点的组件（远处组合草）
+	// 给 End 填一个远到不起作用的数，否则它的起点被整个忽略，近处也画一层组合草。
+	if (WantedMinDraw > 0 && WantedEndCull == 0) WantedEndCull = MAX_int32 / 2;
+	if (InstanceEndCullDistance != WantedEndCull || InstanceMinDrawDistance != WantedMinDraw)
 	{
-		InstanceEndCullDistance = WantedCullDistance;
+		InstanceEndCullDistance = WantedEndCull;
+		InstanceMinDrawDistance = WantedMinDraw;
 		bDirty = true;
 	}
 
 	// 位域成员不能绑引用，逐条比。只抄生产者真会改的那几条（投影开关是逐物种的，见 CSGroundActor）。
-	if (CastShadow != Owner.CastShadow)
+	// 影子交给经典副本时（bClassicShadowOnNanitePath）替身自己不投影 —— 否则 VSM 里再落一份硬影子。
+	const bool bWantCastShadow = Owner.CastShadow && !Owner.IsClassicShadowCopyActive();
+	if (CastShadow != bWantCastShadow)
 	{
-		CastShadow = Owner.CastShadow;
+		CastShadow = bWantCastShadow;
 		bDirty = true;
 	}
 	if (bCastDynamicShadow != Owner.bCastDynamicShadow)
@@ -258,6 +331,12 @@ void UCSGpuInstancedNaniteComponent::SyncFromOwner(const UCSGpuInstancedMeshComp
 	}
 
 	if (bDirty) MarkRenderStateDirty();
+
+	// WPO 关闭距离有自己的 setter：代理在就当场改它（Nanite 代理有游戏线程入口），不重建。
+	if (WorldPositionOffsetDisableDistance != FMath::Max(Owner.InstanceWPODisableDistance, 0))
+	{
+		SetWorldPositionOffsetDisableDistance(FMath::Max(Owner.InstanceWPODisableDistance, 0));
+	}
 
 	// CustomPrimitiveData：经典路的 proxy 把本体的这份送进 primitive uniform buffer，替身也得有同一份，
 	// 同一张材质在两条路上才读到同一个值。
@@ -330,6 +409,31 @@ void UCSGpuInstancedNaniteComponent::IssueGpuSceneWrite()
 	Inputs.WorldToComponent = FMatrix44f(GetComponentTransform().ToInverseMatrixWithScale());
 	Inputs.NumSlots = NumGpuSceneSlots;
 	Inputs.Stats = Stats;
+	if (const UCSGpuInstancedMeshComponent* Owner = Cast<UCSGpuInstancedMeshComponent>(GetOuter()))
+	{
+		Inputs.bHandOffProducerBuffers = Owner->IsClassicShadowCopyActive() && Owner->GetGpuLayout().bVisibleSourceIndex;
+	}
+
+	// 距离带：视点每次写入时现取（不通知的 GPU 源每帧都写，带因此跟着相机走；会通知的源由 Tick 里的 10 cm 判据触发）。取不到视点就不抖 —— 引擎的硬边还在，
+	// 两档只是在带里重叠，而不是露出一圈空地。
+	FVector CullView;
+	if (IsDistanceBandActive() && ResolveCullView(CullView))
+	{
+		const FTransform& ComponentTransform = GetComponentTransform();
+		const FVector Scale = ComponentTransform.GetScale3D().GetAbs();
+		Inputs.bCullBand = true;
+		Inputs.CullViewLocal = FVector3f(ComponentTransform.InverseTransformPosition(CullView));
+		Inputs.CullComponentScale = FMath::Max(float(FMath::Max3(Scale.X, Scale.Y, Scale.Z)), UE_KINDA_SMALL_NUMBER);
+		Inputs.CullStart = BandStart;
+		Inputs.CullEnd = BandEnd;
+		Inputs.CullFade = BandFade;
+		LastWrittenCullView = CullView;
+		bWroteWithBand = true;
+	}
+	else
+	{
+		bWroteWithBand = false;
+	}
 
 	FPrimitiveSceneDesc PrimitiveSceneDesc;
 	PrimitiveSceneDesc.SceneProxy = Proxy;
@@ -381,7 +485,56 @@ void UCSGpuInstancedNaniteComponent::TickComponent(float DeltaTime, ELevelTick T
 	// 替身的 Outer 就是本体（UCSGpuInstancedMeshComponent::UpdateNaniteComponent 建的）。
 	if (const UCSGpuInstancedMeshComponent* Owner = Cast<UCSGpuInstancedMeshComponent>(GetOuter())) SyncFromOwner(*Owner);
 
-	if (Feed.IsGpu() || NeedsWrite()) IssueGpuSceneWrite();
+	// 会通知的源（CPU 行、承诺了 bNotifiesChanges 的 GPU 源）平时只在变了时写 —— 变了的那一笔记在 bWritePending 上，
+	// NeedsWrite 会看到。开着距离带时带要跟相机走，视点挪过 10 cm 就重写一次。
+	// 不通知的 GPU 源（老契约）每帧都写：生产者原地改了什么没人知道。
+	const bool bEveryFrame = !Feed.NotifiesChanges() || (Feed.IsGpu() && CVarCSGpuInstancedNaniteSkipUnchangedWrites.GetValueOnGameThread() == 0);
+	bool bBandMoved = false;
+	if (!bEveryFrame && IsDistanceBandActive())
+	{
+		FVector CullView;
+		if (ResolveCullView(CullView)) bBandMoved = !bWroteWithBand || FVector::DistSquared(CullView, LastWrittenCullView) > 100.0;
+	}
+
+	if (bEveryFrame || NeedsWrite() || bBandMoved) IssueGpuSceneWrite();
+}
+
+bool UCSGpuInstancedNaniteComponent::ResolveCullView(FVector& OutWorldLocation)
+{
+	const UCSGpuInstancedMeshComponent* Owner = Cast<UCSGpuInstancedMeshComponent>(GetOuter());
+	if (Owner && Owner->GetDistanceCullViewOverride(OutWorldLocation))
+	{
+		LastCullView = OutWorldLocation;
+		bHasLastCullView = true;
+		return true;
+	}
+
+	// 上一帧画过这个世界的透视视点（编辑器透视视口 / 游戏视口往里填，场景捕获不填）。
+	// ⚠️ 多视口时这张表的次序随绘制次序变，取 [0] 会让带在几个机位之间来回跳；取离上次最近的那个
+	// （与 ACSGroundActor::UpdateGroundCoverView 同一个理由）。它在 UWorld::Tick 末尾清空 —— 帧末更新
+	// 那一次写入读到的是空表，沿用上次的视点。
+	const UWorld* World = GetWorld();
+	if (World && !World->ViewLocationsRenderedLastFrame.IsEmpty())
+	{
+		FVector Best = World->ViewLocationsRenderedLastFrame[0];
+		if (bHasLastCullView)
+		{
+			double BestDistance = TNumericLimits<double>::Max();
+			for (const FVector& Candidate : World->ViewLocationsRenderedLastFrame)
+			{
+				const double Distance = FVector::DistSquared(Candidate, LastCullView);
+				if (Distance >= BestDistance) continue;
+				BestDistance = Distance;
+				Best = Candidate;
+			}
+		}
+		LastCullView = Best;
+		bHasLastCullView = true;
+	}
+
+	if (!bHasLastCullView) return false;
+	OutWorldLocation = LastCullView;
+	return true;
 }
 
 void UCSGpuInstancedNaniteComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Context)
@@ -448,6 +601,7 @@ FPrimitiveSceneProxy* UCSGpuInstancedNaniteComponent::CreateStaticMeshSceneProxy
 	FInstancedStaticMeshSceneProxyDesc Desc;
 	Desc.InitializeFromStaticMeshComponent(this);
 	Desc.InstanceDataSceneProxy = MakeShared<FInstanceDataSceneProxy, ESPMode::ThreadSafe>(MoveTemp(InstanceSceneDataBuffers));
+	Desc.InstanceMinDrawDistance = InstanceMinDrawDistance;
 	Desc.InstanceEndCullDistance = InstanceEndCullDistance;
 	Desc.bUseGpuLodSelection = true;
 

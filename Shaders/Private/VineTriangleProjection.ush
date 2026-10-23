@@ -1,0 +1,84 @@
+#pragma once
+
+Buffer<float4> VineSurfaceTriangles;
+Buffer<float4> VineSurfaceBVH;
+uint VineSurfaceTriangleCount;
+float VineSurfaceMaxDistance;
+
+float3 VineClosestTrianglePoint(float3 P, float3 A, float3 B, float3 C)
+{
+    float3 AB = B - A, AC = C - A, AP = P - A;
+    float D1 = dot(AB, AP), D2 = dot(AC, AP);
+    if (D1 <= 0.0f && D2 <= 0.0f) return A;
+    float3 BP = P - B;
+    float D3 = dot(AB, BP), D4 = dot(AC, BP);
+    if (D3 >= 0.0f && D4 <= D3) return B;
+    float VC = D1 * D4 - D3 * D2;
+    if (VC <= 0.0f && D1 >= 0.0f && D3 <= 0.0f) return A + AB * (D1 / (D1 - D3));
+    float3 CP = P - C;
+    float D5 = dot(AB, CP), D6 = dot(AC, CP);
+    if (D6 >= 0.0f && D5 <= D6) return C;
+    float VB = D5 * D2 - D1 * D6;
+    if (VB <= 0.0f && D2 >= 0.0f && D6 <= 0.0f) return A + AC * (D2 / (D2 - D6));
+    float VA = D3 * D6 - D5 * D4;
+    if (VA <= 0.0f && D4 >= D3 && D5 >= D6) return B + (C - B) * ((D4 - D3) / ((D4 - D3) + (D5 - D6)));
+    float Inv = rcp(VA + VB + VC);
+    return A + AB * (VB * Inv) + AC * (VC * Inv);
+}
+
+float VineNodeDistanceSq(uint Node, float3 P)
+{
+    float3 Lo = VineSurfaceBVH[Node * 2u].xyz;
+    float3 Hi = VineSurfaceBVH[Node * 2u + 1u].xyz;
+    if (any(Lo > Hi)) return 3.402823e38f;
+    float3 D = max(max(Lo - P, P - Hi), 0.0f);
+    return dot(D, D);
+}
+
+bool FindNearestVineTriangle(float3 Query, out float3 Target, out float3 Normal)
+{
+    Target = Query;
+    Normal = float3(0.0f, 0.0f, 1.0f);
+    float Best = VineSurfaceMaxDistance * VineSurfaceMaxDistance;
+    uint BestTriangle = 0xffffffffu;
+    // Karras keys have 30 Morton bits + 32 index bits, so a 64-entry DFS stack suffices.
+    uint Stack[64];
+    uint Size = 1u;
+    Stack[0] = 0u;
+    [loop] while (Size > 0u)
+    {
+        uint Node = Stack[--Size];
+        if (VineNodeDistanceSq(Node, Query) > Best) continue;
+        float4 Lo = VineSurfaceBVH[Node * 2u];
+        float4 Hi = VineSurfaceBVH[Node * 2u + 1u];
+        if (asint(Hi.w) == -1)
+        {
+            uint T = asuint(Lo.w);
+            float3 A = VineSurfaceTriangles[T * 3u].xyz;
+            float3 B = VineSurfaceTriangles[T * 3u + 1u].xyz;
+            float3 C = VineSurfaceTriangles[T * 3u + 2u].xyz;
+            float3 N = cross(B - A, C - A);
+            float N2 = dot(N, N);
+            if (N2 <= 1.0e-16f) continue;
+            float3 Q = VineClosestTrianglePoint(Query, A, B, C);
+            float Dist = dot(Query - Q, Query - Q);
+            if (Dist < Best || (Dist == Best && T < BestTriangle))
+            {
+                Best = Dist;
+                BestTriangle = T;
+                Target = Q;
+                Normal = N * rsqrt(N2);
+            }
+        }
+        else
+        {
+            uint Left = asuint(Lo.w), Right = asuint(Hi.w);
+            float DL = VineNodeDistanceSq(Left, Query), DR = VineNodeDistanceSq(Right, Query);
+            uint Near = DL <= DR ? Left : Right;
+            uint Far = DL <= DR ? Right : Left;
+            if (max(DL, DR) <= Best) Stack[Size++] = Far;
+            if (min(DL, DR) <= Best) Stack[Size++] = Near;
+        }
+    }
+    return BestTriangle != 0xffffffffu;
+}

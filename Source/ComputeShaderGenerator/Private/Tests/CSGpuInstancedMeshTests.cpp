@@ -15,6 +15,7 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "MaterialDomain.h"                  // MD_Surface（5.1 起不再由 Material.h 带进来）
 #include "Materials/Material.h"
 #include "Tests/AutomationEditorCommon.h"
 #include "UObject/Package.h"
@@ -238,28 +239,57 @@ bool FCSGpuInstancedMeshStreamsAutomationTest::RunTest(const FString& Parameters
 			VertexFactory.SupportsPositionOnlyStream());
 		TestFalse(TEXT("...nor a position-and-normal-only stream (same two-sided contract, shadow depth)"),
 			VertexFactory.SupportsPositionAndNormalOnlyStream());
+
+		// 「可见源行号」版的工厂是另一个注册类型（另一份着色器文件），同一条契约要各守各的：
+		// 它继承上面那个只为复用 InitRHI，注册宏里的 flag 是照抄的 —— 抄漏一个，症状与上面一模一样。
+		FCSGpuInstancedIndexedVertexFactory IndexedVertexFactory(ERHIFeatureLevel::SM5, "StreamsTestIndexed");
+		TestTrue(TEXT("The indexed factory is registered as its own type"), IndexedVertexFactory.GetType() != VertexFactory.GetType());
+		TestFalse(TEXT("The indexed factory type does not declare SupportsPositionOnly either"),
+			IndexedVertexFactory.GetType()->SupportsPositionOnly());
+		TestFalse(TEXT("...and advertises no position-only stream"), IndexedVertexFactory.SupportsPositionOnlyStream());
+		TestFalse(TEXT("...nor a position-and-normal-only stream"), IndexedVertexFactory.SupportsPositionAndNormalOnlyStream());
+		// 手取实例要求类型不带 primitive-id 流（带了就改走 GPU-Scene，见工厂的 InitRHI）。
+		TestFalse(TEXT("Neither factory type supports the primitive-id stream"),
+			VertexFactory.GetType()->SupportsPrimitiveIdStream() || IndexedVertexFactory.GetType()->SupportsPrimitiveIdStream());
 	}
 
+	// 两种可见缓冲布局（FCSGpuInstancedGpuLayout::bVisibleSourceIndex）各声明各的流，下面整段两种都过一遍。
+	for (const bool bVisibleSourceIndex : { false, true })
+	{
 	FCSGpuInstancedGpuLayout Layout;
 	Layout.NumLODs = 3;
 	Layout.InstanceCapacity = 128;
 	Layout.NumSourceInstances = 100;
 	Layout.ClusterSize = 8;
 	Layout.NumClusters = 13;
+	Layout.bVisibleSourceIndex = bVisibleSourceIndex;
 
 	// 本叶子声明的全部 aux 槽位，与 ECSGpuInstancedAuxSlot 一一对应。数量断言从这张表取、不另写魔数；
 	// 加新流时在这里补一行，下面的"能解析到 / 避开 0 号槽"就自动覆盖它。
-	const ECSGpuInstancedAuxSlot Slots[] = {
-		ECSGpuInstancedAuxSlot::SourceInstances,
-		ECSGpuInstancedAuxSlot::ClusterBounds,
-		ECSGpuInstancedAuxSlot::ClusterVisible,
-		ECSGpuInstancedAuxSlot::VisibleTransforms,
-		ECSGpuInstancedAuxSlot::VisibleOrigins,
-		ECSGpuInstancedAuxSlot::VisibleLightmap,
-		ECSGpuInstancedAuxSlot::LodCounters,
-		ECSGpuInstancedAuxSlot::VisibleCustomData,
-	};
-	const int32 NumLeafSlots = int32(UE_ARRAY_COUNT(Slots));
+	const TArray<ECSGpuInstancedAuxSlot> Slots = bVisibleSourceIndex
+		? TArray<ECSGpuInstancedAuxSlot>{
+			ECSGpuInstancedAuxSlot::SourceInstances,
+			ECSGpuInstancedAuxSlot::ClusterBounds,
+			ECSGpuInstancedAuxSlot::ClusterVisible,
+			ECSGpuInstancedAuxSlot::VisibleSourceIndices,
+			ECSGpuInstancedAuxSlot::CustomDataFallback,
+			ECSGpuInstancedAuxSlot::LodCounters,
+		}
+		: TArray<ECSGpuInstancedAuxSlot>{
+			ECSGpuInstancedAuxSlot::SourceInstances,
+			ECSGpuInstancedAuxSlot::ClusterBounds,
+			ECSGpuInstancedAuxSlot::ClusterVisible,
+			ECSGpuInstancedAuxSlot::VisibleTransforms,
+			ECSGpuInstancedAuxSlot::VisibleOrigins,
+			ECSGpuInstancedAuxSlot::VisibleLightmap,
+			ECSGpuInstancedAuxSlot::LodCounters,
+			ECSGpuInstancedAuxSlot::VisibleCustomData,
+		};
+	const int32 NumLeafSlots = Slots.Num();
+	// 另一种布局的可见缓冲：这种布局下一条都不许声明（声明了就是白占显存，新布局省的就是这几条）。
+	const TArray<ECSGpuInstancedAuxSlot> ForeignSlots = bVisibleSourceIndex
+		? TArray<ECSGpuInstancedAuxSlot>{ ECSGpuInstancedAuxSlot::VisibleTransforms, ECSGpuInstancedAuxSlot::VisibleOrigins, ECSGpuInstancedAuxSlot::VisibleLightmap, ECSGpuInstancedAuxSlot::VisibleCustomData }
+		: TArray<ECSGpuInstancedAuxSlot>{ ECSGpuInstancedAuxSlot::VisibleSourceIndices, ECSGpuInstancedAuxSlot::CustomDataFallback };
 
 	TArray<FCSGpuStreamDesc> AuxStreams;
 	CSGpuInstancedBuildAuxStreamDescs(AuxStreams, Layout, /*bExternalPackedSource*/ false);
@@ -306,6 +336,31 @@ bool FCSGpuInstancedMeshStreamsAutomationTest::RunTest(const FString& Parameters
 		const FCSMeshResident::FStream* Stream = Resident->FindStream(ECSGpuStreamRole::AuxVertex, uint8(Slot));
 		return Stream ? int32(Stream->Desc.ElementsPerUnit) : 0;
 	};
+	for (ECSGpuInstancedAuxSlot Slot : ForeignSlots)
+	{
+		TestNull(FString::Printf(TEXT("Aux slot %u belongs to the other visible-buffer layout and is not declared in this one"), uint32(Slot)),
+			Resident->FindStream(ECSGpuStreamRole::AuxVertex, uint8(Slot)));
+	}
+	if (bVisibleSourceIndex)
+	{
+		// 每个可见槽一个 uint 的源行号，分区与旧布局相同（每级 LOD 一整份容量）。着色器按 Buffer<uint> 取。
+		TestEqual(TEXT("Visible source indices cover every LOD region"), AuxElementCount(ECSGpuInstancedAuxSlot::VisibleSourceIndices), VisibleSlots);
+		if (const FCSMeshResident::FStream* Indices = Resident->FindStream(ECSGpuStreamRole::AuxVertex, uint8(ECSGpuInstancedAuxSlot::VisibleSourceIndices)))
+		{
+			TestEqual(TEXT("Visible source indices are viewed as Buffer<uint> (PF_R32_UINT)"), int32(Indices->Desc.SrvFormat), int32(PF_R32_UINT));
+			TestEqual(TEXT("Visible source indices are four bytes per slot"), int32(Indices->Desc.BytesPerElement), int32(sizeof(uint32)));
+		}
+		// 生产者没给 custom data 时材质读的那一行零：恰好一行（下标被钉成 0），大小与实例数无关；
+		// 格式与真的 custom data 相同（引擎按 Buffer<float> 取）。
+		TestEqual(TEXT("The custom-data fallback is exactly one row of floats"),
+			AuxElementCount(ECSGpuInstancedAuxSlot::CustomDataFallback), int32(CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS));
+		if (const FCSMeshResident::FStream* Fallback = Resident->FindStream(ECSGpuStreamRole::AuxVertex, uint8(ECSGpuInstancedAuxSlot::CustomDataFallback)))
+		{
+			TestEqual(TEXT("The custom-data fallback is viewed as Buffer<float> (PF_R32_FLOAT)"), int32(Fallback->Desc.SrvFormat), int32(PF_R32_FLOAT));
+		}
+	}
+	else
+	{
 	TestEqual(TEXT("Visible origins cover every LOD region"), AuxElementCount(ECSGpuInstancedAuxSlot::VisibleOrigins), VisibleSlots);
 	TestEqual(TEXT("Visible lightmap covers every LOD region"), AuxElementCount(ECSGpuInstancedAuxSlot::VisibleLightmap), VisibleSlots);
 	TestEqual(TEXT("Visible transforms are three float4 per slot"), AuxElementCount(ECSGpuInstancedAuxSlot::VisibleTransforms), VisibleSlots * 3);
@@ -318,6 +373,7 @@ bool FCSGpuInstancedMeshStreamsAutomationTest::RunTest(const FString& Parameters
 	{
 		TestEqual(TEXT("Visible custom data is viewed as Buffer<float> (PF_R32_FLOAT)"), int32(CustomData->Desc.SrvFormat), int32(PF_R32_FLOAT));
 		TestEqual(TEXT("Visible custom data is one float per element"), int32(CustomData->Desc.BytesPerElement), int32(sizeof(float)));
+	}
 	}
 	// The source rows are CS_GPU_INSTANCED_ROW_FLOAT4S float4 per instance, over the capacity rather
 	// than the live count — the buffer ratchets, so the cull's MaxSourceInstances is the capacity.
@@ -343,6 +399,39 @@ bool FCSGpuInstancedMeshStreamsAutomationTest::RunTest(const FString& Parameters
 	{
 		TestTrue(TEXT("Every aux stream allocates something"), Desc.BytesPerElement > 0 && Desc.ElementsPerUnit > 0);
 	}
+	} // for bVisibleSourceIndex
+
+	// 新布局存在的理由：同样的容量与 LOD 数，可见缓冲从每槽 88 字节降到 4 字节。把这个数钉住 ——
+	// 以后谁往新布局里加一条逐可见槽的流，这里会要求他先看一眼这笔账。
+	{
+		auto VisibleBytes = [](bool bVisibleSourceIndex)
+		{
+			FCSGpuInstancedGpuLayout Layout;
+			Layout.NumLODs = 3;
+			Layout.InstanceCapacity = 128;
+			Layout.NumSourceInstances = 100;
+			Layout.ClusterSize = 8;
+			Layout.NumClusters = 13;
+			Layout.bVisibleSourceIndex = bVisibleSourceIndex;
+			TArray<FCSGpuStreamDesc> Streams;
+			CSGpuInstancedBuildAuxStreamDescs(Streams, Layout, /*bExternalPackedSource*/ false);
+			uint64 Bytes = 0;
+			for (const FCSGpuStreamDesc& Desc : Streams)
+			{
+				const uint8 Slot = Desc.TexCoordIndex;
+				const bool bPerVisibleSlot = Slot == uint8(ECSGpuInstancedAuxSlot::VisibleTransforms) || Slot == uint8(ECSGpuInstancedAuxSlot::VisibleOrigins)
+					|| Slot == uint8(ECSGpuInstancedAuxSlot::VisibleLightmap) || Slot == uint8(ECSGpuInstancedAuxSlot::VisibleCustomData)
+					|| Slot == uint8(ECSGpuInstancedAuxSlot::VisibleSourceIndices);
+				if (bPerVisibleSlot) Bytes += uint64(Desc.BytesPerElement) * Desc.ElementsPerUnit;
+			}
+			return Bytes;
+		};
+		const uint64 VisibleSlotCount = 128ull * 3ull;
+		// 旧布局每槽：3 个 float4 的变换行 + 1 个原点 + 1 个 lightmap + custom data。
+		const uint64 LegacyBytesPerSlot = uint64(3 + 1 + 1) * sizeof(FVector4f) + uint64(CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS) * sizeof(float);
+		TestEqual(TEXT("Legacy layout: 5 float4 + custom data per visible slot"), VisibleBytes(false), VisibleSlotCount * LegacyBytesPerSlot);
+		TestEqual(TEXT("Visible-source-index layout: 4 bytes per visible slot"), VisibleBytes(true), VisibleSlotCount * uint64(sizeof(uint32)));
+	}
 
 	return true;
 }
@@ -365,12 +454,19 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 // render commands), the same reason the Streams suite above needs no GPU.
 bool FCSGpuInstancedMeshStreamResizeAutomationTest::RunTest(const FString& Parameters)
 {
+	// 两种可见缓冲布局各有各的逐可见槽流（旧：变换 / 原点 / lightmap / custom data；新：源行号），整段两种都过一遍。
+	for (const bool bVisibleSourceIndex : { false, true })
+	{
+	// 这种布局下"跟着容量走的那条可见缓冲"的代表，以及它每槽几个元素。
+	const ECSGpuInstancedAuxSlot VisibleSlot = bVisibleSourceIndex ? ECSGpuInstancedAuxSlot::VisibleSourceIndices : ECSGpuInstancedAuxSlot::VisibleOrigins;
+
 	FCSGpuInstancedGpuLayout Layout;
 	Layout.NumLODs = 3;
 	Layout.InstanceCapacity = 128;
 	Layout.NumSourceInstances = 100;
 	Layout.ClusterSize = 8;
 	Layout.NumClusters = 13;
+	Layout.bVisibleSourceIndex = bVisibleSourceIndex;
 
 	UCSMesh* Mesh = NewObject<UCSMesh>(GetTransientPackage());
 	if (!TestNotNull(TEXT("Mesh"), Mesh)) return false;
@@ -427,8 +523,17 @@ bool FCSGpuInstancedMeshStreamResizeAutomationTest::RunTest(const FString& Param
 		const FCSMeshResident::FStream* Stream = Resident->FindStream(ECSGpuStreamRole::AuxVertex, uint8(Slot));
 		return Stream ? int32(Stream->Desc.ElementsPerUnit) : 0;
 	};
-	TestEqual(TEXT("Visible origins grew with the capacity"), AuxElementCount(ECSGpuInstancedAuxSlot::VisibleOrigins), GrownVisibleSlots);
-	TestEqual(TEXT("Visible transforms grew with the capacity"), AuxElementCount(ECSGpuInstancedAuxSlot::VisibleTransforms), GrownVisibleSlots * 3);
+	TestEqual(TEXT("The per-visible-slot stream grew with the capacity"), AuxElementCount(VisibleSlot), GrownVisibleSlots);
+	if (bVisibleSourceIndex)
+	{
+		// 那一行零与实例数无关，容量怎么变它都是一行。
+		TestEqual(TEXT("The custom-data fallback does not follow the instance capacity"),
+			AuxElementCount(ECSGpuInstancedAuxSlot::CustomDataFallback), int32(CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS));
+	}
+	else
+	{
+		TestEqual(TEXT("Visible transforms grew with the capacity"), AuxElementCount(ECSGpuInstancedAuxSlot::VisibleTransforms), GrownVisibleSlots * 3);
+	}
 	TestEqual(TEXT("Source rows grew with the capacity"), AuxElementCount(ECSGpuInstancedAuxSlot::SourceInstances),
 		int32(Grown.InstanceCapacity) * int32(CS_GPU_INSTANCED_ROW_FLOAT4S));
 	// Fixed at CS_GPU_INSTANCED_MAX_LODS on purpose, so it never appears in a resize at all.
@@ -459,18 +564,18 @@ bool FCSGpuInstancedMeshStreamResizeAutomationTest::RunTest(const FString& Param
 	TestTrue(TEXT("Declaring the layout the resize arrived at is accepted"), Mesh->SetStreamLayoutSync(GrownLayout));
 	TestEqual(TEXT("...and changes nothing about the stream set"), Resident->Streams.Num(), StreamCountBefore);
 	TestEqual(TEXT("...nor about the sizes the resize established"),
-		AuxElementCount(ECSGpuInstancedAuxSlot::VisibleOrigins), GrownVisibleSlots);
+		AuxElementCount(VisibleSlot), GrownVisibleSlots);
 
 	// Shrinking back is the same call: hysteresis is ResolveInstanceCapacity's job, not the mesh's.
 	TArray<FCSMeshStreamResize> Shrink;
 	FCSMeshStreamResize& ShrinkOrigins = Shrink.AddDefaulted_GetRef();
 	ShrinkOrigins.Role = ECSGpuStreamRole::AuxVertex;
-	ShrinkOrigins.SlotIndex = uint8(ECSGpuInstancedAuxSlot::VisibleOrigins);
+	ShrinkOrigins.SlotIndex = uint8(VisibleSlot);
 	ShrinkOrigins.ElementCount = uint32(Layout.InstanceCapacity * Layout.NumLODs);
 	if (TestTrue(TEXT("Shrinking a stream back uses the same entry point"), Mesh->ResizeStreamsSync(Shrink)))
 	{
 		TestEqual(TEXT("A shrink is exact, not rounded up"),
-			AuxElementCount(ECSGpuInstancedAuxSlot::VisibleOrigins), int32(Layout.InstanceCapacity * Layout.NumLODs));
+			AuxElementCount(VisibleSlot), int32(Layout.InstanceCapacity * Layout.NumLODs));
 	}
 
 	// The standard stream this leaf's slot numbering exists to protect. It is per-triangle, so its
@@ -480,6 +585,7 @@ bool FCSGpuInstancedMeshStreamResizeAutomationTest::RunTest(const FString& Param
 	TestFalse(TEXT("Neither can the per-LOD indirect args"),
 		Mesh->ResizeStreamSync(ECSGpuStreamRole::IndirectArgs, 0, 5 * 4));
 	TestEqual(TEXT("A refused resize leaves the draw layout alone"), Mesh->GetIndirectDrawCount(), int32(Layout.NumLODs));
+	} // for bVisibleSourceIndex
 	return true;
 }
 
@@ -675,6 +781,453 @@ bool FCSGpuInstancedMeshBakeAutomationTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("烘焙件里的逐实例随机与 GPU 上那一份逐个对得上"), bRandomsMatchGpu);
 
 	UEditorAssetLibrary::DeleteAsset(BakePath);
+	return true;
+}
+
+namespace
+{
+	/** StableIdentity 用例里盯着的一个实例：句柄 + 它应该在的位置 + 它第一次被看到时的逐实例随机数。 */
+	struct FCSIdentityTest_Tracked
+	{
+		FCSGpuInstanceHandle Handle;
+		FVector Location = FVector::ZeroVector;
+		float Random = -1.0f;
+	};
+
+	/** 句柄指的实例此刻在 packed 行（Morton 序）里的原点与随机数。实例不在 / 行表里找不到它 = false。 */
+	bool CSIdentityTest_ReadRow(const UCSGpuInstancedMeshComponent* Component, const FCSGpuInstanceHandle& Handle, FVector3f& OutOrigin, float& OutRandom)
+	{
+		if (!Component->IsInstanceHandleValid(Handle)) return false;
+		const int32 Row = Component->GetPackedInstanceSlots().Find(Handle.Slot);
+		if (Row == INDEX_NONE) return false;
+		const FVector4f Origin = Component->GetPackedInstances()[Row * CS_GPU_INSTANCED_ROW_FLOAT4S + 3];
+		OutOrigin = FVector3f(Origin.X, Origin.Y, Origin.Z);
+		OutRandom = Origin.W;
+		return true;
+	}
+
+	/** 把一个 UPROPERTY 数组清空 —— 用来伪造"2026-10-02 以前存的、没有身份表的资产"。 */
+	bool CSIdentityTest_EmptyArrayProperty(UObject* Object, const TCHAR* PropertyName)
+	{
+		const FArrayProperty* Property = FindFProperty<FArrayProperty>(Object->GetClass(), PropertyName);
+		if (!Property) return false;
+		FScriptArrayHelper Helper(Property, Property->ContainerPtrToValuePtr<void>(Object));
+		Helper.EmptyValues();
+		return true;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCSGpuInstancedMeshStableIdentityAutomationTest,
+	"PCGPlugins.ComputeShaderGenerator.GpuInstancedMesh.StableIdentity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+// 实例身份契约（InstanceCullingOptimization.md §3、§4.2 的验收）：
+//   追加、中间删除、尾部删除、槽复用、Morton 重排、成批增长、复制、整套重置之后，
+//   同一个存活实例保住句柄、句柄 → 下标的映射与逐实例随机数；删掉的句柄访问不到后来占了同一个槽的新实例。
+//
+// 为什么非守不可：这条路上所有"跟着实例走"的状态以前都隐式挂在数组下标上，而 RemoveInstance 是把末尾实例
+// 换进空位 —— 被换的那个实例下标变了，随机数（按下标取的）跟着变，画面上是"删掉一块砖，远处另一块砖换了个色"。
+// 没有任何断言会响：实例数对、变换对、每个随机数都在 [0,1) 里。
+bool FCSGpuInstancedMeshStableIdentityAutomationTest::RunTest(const FString& Parameters)
+{
+	UCSGpuInstancedMeshComponent* Component = MakeComponent(/*InstancesPerCluster*/ 4);
+	if (!TestNotNull(TEXT("Component"), Component)) return false;
+
+	TArray<FCSIdentityTest_Tracked> Alive;
+
+	// 活着的每一个：句柄有效、句柄查到的下标上就是它（位置对）、packed 行里找得到它、行里的原点与随机数都是它自己的。
+	auto ExpectAlive = [this, Component, &Alive](const TCHAR* Stage)
+	{
+		for (const FCSIdentityTest_Tracked& Tracked : Alive)
+		{
+			const int32 Index = Component->GetInstanceIndexFromHandle(Tracked.Handle);
+			if (!TestTrue(FString::Printf(TEXT("[%s] 槽 %d 的句柄仍然有效"), Stage, Tracked.Handle.Slot), Index != INDEX_NONE)) continue;
+
+			FTransform Transform;
+			TestTrue(FString::Printf(TEXT("[%s] 槽 %d 按句柄取得到变换"), Stage, Tracked.Handle.Slot), Component->GetInstanceTransformByHandle(Tracked.Handle, Transform));
+			TestTrue(FString::Printf(TEXT("[%s] 槽 %d 句柄查到的就是原来那个实例（位置没换人）"), Stage, Tracked.Handle.Slot), Transform.GetLocation().Equals(Tracked.Location, 0.01));
+			TestTrue(FString::Printf(TEXT("[%s] 槽 %d 下标 → 句柄 → 下标 走得回来"), Stage, Tracked.Handle.Slot), Component->GetInstanceHandle(Index) == Tracked.Handle);
+
+			FVector3f RowOrigin;
+			float RowRandom = -1.0f;
+			if (!TestTrue(FString::Printf(TEXT("[%s] 槽 %d 在 packed 行表里"), Stage, Tracked.Handle.Slot), CSIdentityTest_ReadRow(Component, Tracked.Handle, RowOrigin, RowRandom))) continue;
+			TestTrue(FString::Printf(TEXT("[%s] 槽 %d 的行里是它自己的原点（行 ↔ 槽没有错位）"), Stage, Tracked.Handle.Slot), RowOrigin.Equals(FVector3f(Tracked.Location), 0.01f));
+			TestEqual(FString::Printf(TEXT("[%s] 槽 %d 的逐实例随机数没变"), Stage, Tracked.Handle.Slot), RowRandom, Tracked.Random);
+		}
+		TestEqual(FString::Printf(TEXT("[%s] 行表与实例一样多"), Stage), Component->GetPackedInstanceSlots().Num(), Component->GetInstanceCount());
+	};
+
+	// 删掉的句柄：查不到下标、取不到变换、改不动、删不掉，而且这几次失败的调用一个实例都不碰。
+	auto ExpectDead = [this, Component](const TCHAR* Stage, const FCSGpuInstanceHandle& Handle)
+	{
+		const int32 CountBefore = Component->GetInstanceCount();
+		FTransform Transform;
+		TestFalse(FString::Printf(TEXT("[%s] 旧句柄（槽 %d 代 %d）已失效"), Stage, Handle.Slot, Handle.Generation), Component->IsInstanceHandleValid(Handle));
+		TestEqual(FString::Printf(TEXT("[%s] 旧句柄查不到下标"), Stage), Component->GetInstanceIndexFromHandle(Handle), int32(INDEX_NONE));
+		TestFalse(FString::Printf(TEXT("[%s] 旧句柄取不到变换"), Stage), Component->GetInstanceTransformByHandle(Handle, Transform));
+		TestFalse(FString::Printf(TEXT("[%s] 旧句柄改不动任何实例"), Stage), Component->UpdateInstanceTransformByHandle(Handle, FTransform(FVector(-9999.0, -9999.0, 0.0))));
+		TestFalse(FString::Printf(TEXT("[%s] 旧句柄删不掉任何实例"), Stage), Component->RemoveInstanceByHandle(Handle));
+		TestEqual(FString::Printf(TEXT("[%s] 失败的按句柄调用没有动实例数"), Stage), Component->GetInstanceCount(), CountBefore);
+	};
+
+	auto Track = [this, Component, &Alive](int32 Index, const FVector& Location)
+	{
+		FCSIdentityTest_Tracked Tracked;
+		Tracked.Handle = Component->GetInstanceHandle(Index);
+		Tracked.Location = Location;
+		FVector3f RowOrigin;
+		TestTrue(FString::Printf(TEXT("下标 %d 的新实例在 packed 行表里"), Index), CSIdentityTest_ReadRow(Component, Tracked.Handle, RowOrigin, Tracked.Random));
+		Alive.Add(Tracked);
+		return Tracked.Handle;
+	};
+
+	// ---------------------------------------------------------------------------
+	// 起点：4 × 3 的格子，一次 SetInstances。只增不删的内容槽号 == 下标（随机数因此与改动前逐位相同）。
+	// ---------------------------------------------------------------------------
+	TArray<FTransform> Sources;
+	for (int32 Y = 0; Y < 3; ++Y)
+	{
+		for (int32 X = 0; X < 4; ++X) Sources.Add(FTransform(FVector(X * 200.0, Y * 200.0, 0.0)));
+	}
+	Component->SetInstances(Sources);
+
+	TArray<float> InitialRandoms;
+	TSet<float> DistinctRandoms;
+	for (int32 Index = 0; Index < Sources.Num(); ++Index)
+	{
+		const FCSGpuInstanceHandle Handle = Track(Index, Sources[Index].GetLocation());
+		TestEqual(FString::Printf(TEXT("[起点] 下标 %d 的槽号就是下标"), Index), Handle.Slot, Index);
+		TestEqual(FString::Printf(TEXT("[起点] 下标 %d 是第 0 代"), Index), Handle.Generation, 0);
+		InitialRandoms.Add(Alive.Last().Random);
+		DistinctRandoms.Add(Alive.Last().Random);
+		TestTrue(TEXT("[起点] 逐实例随机数在 [0,1) 里"), Alive.Last().Random >= 0.0f && Alive.Last().Random < 1.0f);
+	}
+	TestTrue(FString::Printf(TEXT("[起点] 逐实例随机数不止一种取值（%d 种）"), DistinctRandoms.Num()), DistinctRandoms.Num() > 1);
+	TestFalse(TEXT("[起点] 越界下标拿不到句柄"), Component->GetInstanceHandle(Sources.Num()).IsSet());
+	ExpectAlive(TEXT("起点"));
+
+	// ---------------------------------------------------------------------------
+	// 追加一个很远的实例：包围盒在 Y 上拉长几百倍，Morton 编码的归一化范围跟着变 ⇒ packed 行整体重排。
+	// ---------------------------------------------------------------------------
+	const TArray<int32> RowsBeforeAppend = Component->GetPackedInstanceSlots();
+	const FVector FarLocation(100.0, 200000.0, 0.0);
+	const int32 FarIndex = Component->AddInstance(FTransform(FarLocation));
+	TestEqual(TEXT("[追加] 新实例在数组末尾"), FarIndex, Sources.Num());
+	const FCSGpuInstanceHandle FarHandle = Track(FarIndex, FarLocation);
+	TestEqual(TEXT("[追加] 没有空闲槽 ⇒ 新开的槽号 == 下标"), FarHandle.Slot, FarIndex);
+	{
+		TArray<int32> RowsAfterAppend = Component->GetPackedInstanceSlots();
+		RowsAfterAppend.Remove(FarHandle.Slot);
+		// 判据要有内容：如果行序没变，下面"重排后随机数不变"就什么都没证明。
+		TestTrue(TEXT("[追加] 既有实例的行序确实被重排了"), RowsAfterAppend != RowsBeforeAppend);
+	}
+	ExpectAlive(TEXT("追加 + Morton 重排"));
+
+	// ---------------------------------------------------------------------------
+	// 中间删除：末尾实例（刚加的那个）被换进空位 —— 它的下标变了，句柄与随机数不许变。
+	// ---------------------------------------------------------------------------
+	const FCSGpuInstanceHandle RemovedMiddle = Alive[3].Handle;
+	Alive.RemoveAt(3);
+	TestTrue(TEXT("[中间删除] 删掉下标 3"), Component->RemoveInstance(3));
+	TestEqual(TEXT("[中间删除] 末尾实例被换进了下标 3"), Component->GetInstanceIndexFromHandle(FarHandle), 3);
+	ExpectDead(TEXT("中间删除"), RemovedMiddle);
+	ExpectAlive(TEXT("中间删除"));
+
+	// ---------------------------------------------------------------------------
+	// 尾部删除：没有实例被搬动。
+	// ---------------------------------------------------------------------------
+	const int32 TailIndex = Component->GetInstanceCount() - 1;
+	const FCSGpuInstanceHandle RemovedTail = Component->GetInstanceHandle(TailIndex);
+	Alive.RemoveAll([&RemovedTail](const FCSIdentityTest_Tracked& Tracked) { return Tracked.Handle == RemovedTail; });
+	TestTrue(TEXT("[尾部删除] 删掉末尾"), Component->RemoveInstance(TailIndex));
+	ExpectDead(TEXT("尾部删除"), RemovedTail);
+	ExpectAlive(TEXT("尾部删除"));
+
+	// ---------------------------------------------------------------------------
+	// 槽复用：新实例拿最小的空闲槽（3），但那是另一个实例 —— 代数不同，旧句柄仍然访问不到它。
+	// ---------------------------------------------------------------------------
+	const FVector ReuseLocation(-400.0, -400.0, 0.0);
+	const FCSGpuInstanceHandle Reused = Track(Component->AddInstance(FTransform(ReuseLocation)), ReuseLocation);
+	TestEqual(TEXT("[槽复用] 新实例拿到的是最小的空闲槽"), Reused.Slot, RemovedMiddle.Slot);
+	TestTrue(TEXT("[槽复用] 同一个槽，新的一代"), Reused.Generation > RemovedMiddle.Generation);
+	TestTrue(TEXT("[槽复用] 新旧句柄不相等"), Reused != RemovedMiddle);
+	ExpectDead(TEXT("槽复用"), RemovedMiddle);
+	ExpectAlive(TEXT("槽复用"));
+
+	// ---------------------------------------------------------------------------
+	// 按句柄改 / 删。
+	// ---------------------------------------------------------------------------
+	{
+		FCSIdentityTest_Tracked& Moved = Alive[5];
+		Moved.Location = FVector(123.0, 456.0, 78.0);
+		TestTrue(TEXT("[按句柄] 改变换"), Component->UpdateInstanceTransformByHandle(Moved.Handle, FTransform(Moved.Location)));
+		ExpectAlive(TEXT("按句柄改变换"));
+
+		const FCSGpuInstanceHandle RemovedByHandle = Alive[1].Handle;
+		Alive.RemoveAt(1);
+		TestTrue(TEXT("[按句柄] 删"), Component->RemoveInstanceByHandle(RemovedByHandle));
+		ExpectDead(TEXT("按句柄删"), RemovedByHandle);
+		ExpectAlive(TEXT("按句柄删"));
+	}
+
+	// ---------------------------------------------------------------------------
+	// 成批增长：一次加 200 个（越过最小容量与好几个簇）。先用回收的槽，再开新的；此前活着的一个都不许动。
+	// ---------------------------------------------------------------------------
+	{
+		TArray<FTransform> Batch;
+		for (int32 Index = 0; Index < 200; ++Index) Batch.Add(FTransform(FVector(3000.0 + Index * 37.0, (Index % 7) * 150.0, 0.0)));
+		const TArray<int32> Indices = Component->AddInstances(Batch);
+		TestEqual(TEXT("[成批增长] 每个新实例都有下标"), Indices.Num(), Batch.Num());
+		TSet<int32> Slots;
+		for (int32 Index = 0; Index < Component->GetInstanceCount(); ++Index) Slots.Add(Component->GetInstanceHandle(Index).Slot);
+		TestEqual(TEXT("[成批增长] 活着的实例槽号互不重复"), Slots.Num(), Component->GetInstanceCount());
+		ExpectAlive(TEXT("成批增长"));
+	}
+
+	// ---------------------------------------------------------------------------
+	// 复制（PIE / 复制 actor 走的就是这条）：两张身份表跟着拷过去，缓存不跟 —— 副本要自己按真值表重建，
+	// 而且重建出来的发槽结果必须与一路增删过来的原件相同（空闲槽是最小堆，不看历史）。
+	// ---------------------------------------------------------------------------
+	{
+		UCSGpuInstancedMeshComponent* Copy = DuplicateObject<UCSGpuInstancedMeshComponent>(Component, GetTransientPackage());
+		if (TestNotNull(TEXT("[复制] 副本"), Copy))
+		{
+			for (const FCSIdentityTest_Tracked& Tracked : Alive)
+			{
+				TestEqual(FString::Printf(TEXT("[复制] 槽 %d 的句柄在副本里指向同一个下标"), Tracked.Handle.Slot),
+					Copy->GetInstanceIndexFromHandle(Tracked.Handle), Component->GetInstanceIndexFromHandle(Tracked.Handle));
+			}
+			TestFalse(TEXT("[复制] 原件里已失效的句柄在副本里同样失效"), Copy->IsInstanceHandleValid(RemovedTail));
+
+			// 原件再删一个、两边各加一个：副本的缓存是刚重建的，原件的是一路维护过来的。
+			const FCSGpuInstanceHandle Victim = Alive[2].Handle;
+			Alive.RemoveAt(2);
+			TestTrue(TEXT("[复制] 原件按句柄删"), Component->RemoveInstanceByHandle(Victim));
+			TestTrue(TEXT("[复制] 副本按同一个句柄删"), Copy->RemoveInstanceByHandle(Victim));
+			const FCSGpuInstanceHandle FromOriginal = Component->GetInstanceHandle(Component->AddInstance(FTransform(FVector(-800.0, 0.0, 0.0))));
+			const FCSGpuInstanceHandle FromCopy = Copy->GetInstanceHandle(Copy->AddInstance(FTransform(FVector(-800.0, 0.0, 0.0))));
+			TestTrue(FString::Printf(TEXT("[复制] 同样的操作在两边发出同一个句柄（原件 槽 %d 代 %d，副本 槽 %d 代 %d）"),
+				FromOriginal.Slot, FromOriginal.Generation, FromCopy.Slot, FromCopy.Generation), FromOriginal == FromCopy);
+			ExpectAlive(TEXT("复制之后的原件"));
+
+			// 老资产：没有身份表。按下标补发槽、第 0 代 —— 与"从没删过实例"的新内容同一个结果，随机数因此不变。
+			TestTrue(TEXT("[老资产] 清掉槽表"), CSIdentityTest_EmptyArrayProperty(Copy, TEXT("PerInstanceSlots")));
+			TestTrue(TEXT("[老资产] 清掉代数表"), CSIdentityTest_EmptyArrayProperty(Copy, TEXT("SlotGenerations")));
+			bool bLegacyIdentity = true;
+			for (int32 Index = 0; Index < Copy->GetInstanceCount(); ++Index)
+			{
+				const FCSGpuInstanceHandle Handle = Copy->GetInstanceHandle(Index);
+				bLegacyIdentity &= Handle.Slot == Index && Handle.Generation == 0 && Copy->GetInstanceIndexFromHandle(Handle) == Index;
+			}
+			TestTrue(TEXT("[老资产] 没有身份表的实例数组按下标补发槽号"), bLegacyIdentity);
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// 整套重置：同一份输入再 SetInstances 一次 —— 此前的句柄全部失效，新实例仍占槽 0..N-1，
+	// 随机数与第一次逐位相同（生产者拖尺寸时每帧都这么调，随机数跟着跳就是一片闪烁）。
+	// ---------------------------------------------------------------------------
+	{
+		const TArray<FCSIdentityTest_Tracked> Previous = Alive;
+		Alive.Reset();
+		Component->SetInstances(Sources);
+		for (const FCSIdentityTest_Tracked& Tracked : Previous) TestFalse(FString::Printf(TEXT("[整套重置] 槽 %d 的旧句柄失效"), Tracked.Handle.Slot), Component->IsInstanceHandleValid(Tracked.Handle));
+		for (int32 Index = 0; Index < Sources.Num(); ++Index)
+		{
+			const FCSGpuInstanceHandle Handle = Track(Index, Sources[Index].GetLocation());
+			TestEqual(FString::Printf(TEXT("[整套重置] 下标 %d 的槽号又是下标"), Index), Handle.Slot, Index);
+			TestTrue(FString::Printf(TEXT("[整套重置] 下标 %d 是新的一代"), Index), Handle.Generation > 0);
+			TestEqual(FString::Printf(TEXT("[整套重置] 下标 %d 的随机数与第一次相同"), Index), Alive.Last().Random, InitialRandoms[Index]);
+		}
+		ExpectAlive(TEXT("整套重置"));
+	}
+
+	// ---------------------------------------------------------------------------
+	// 清空。
+	// ---------------------------------------------------------------------------
+	{
+		const TArray<FCSIdentityTest_Tracked> Previous = Alive;
+		Alive.Reset();
+		Component->ClearInstances();
+		for (const FCSIdentityTest_Tracked& Tracked : Previous) TestFalse(FString::Printf(TEXT("[清空] 槽 %d 的旧句柄失效"), Tracked.Handle.Slot), Component->IsInstanceHandleValid(Tracked.Handle));
+		TestEqual(TEXT("[清空] 行表也空了"), Component->GetPackedInstanceSlots().Num(), 0);
+		TestFalse(TEXT("[清空] 没有实例可以取句柄"), Component->GetInstanceHandle(0).IsSet());
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCSGpuInstancedMeshBatchUpdateAutomationTest,
+	"PCGPlugins.ComputeShaderGenerator.GpuInstancedMesh.BatchUpdate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+// 成批改实例（InstanceCullingOptimization.md §6.1）：BeginInstanceUpdate / EndInstanceUpdate 之间的增、删、改
+// 只动 CPU 侧的实例数组与身份表，最外层 End 时统一重排、打包、上传一次。
+//
+// 守两件事：
+//   ① 结果与逐个调用**逐位相同** —— packed 行、簇球、行表、句柄、随机数。合批只许省功夫，不许改答案；
+//      发槽的次序（最小空闲槽）不依赖打包发生在什么时候，这里把它钉住。
+//   ② 真的只做了一次 —— 打包次数（GetInstancePackSerial）与阻塞刷新次数（UCSMesh::GetBlockingFlushCount）。
+//      "攒着传"以前只攒了上传那一半，排序照样每个改动一次（基线：10 万个实例连改 8 个 82 ms），而画面、
+//      实例数、每个数值都对 —— 没有任何断言会响，只是慢。
+bool FCSGpuInstancedMeshBatchUpdateAutomationTest::RunTest(const FString& Parameters)
+{
+	// 同一串操作：加一批、改两个、删两个（一个中间一个末尾）、再加两个（复用空槽）、按句柄改一个。
+	// 返回按句柄改的那个实例的句柄，调用方拿它对两边。
+	auto RunOps = [](UCSGpuInstancedMeshComponent* Component) -> FCSGpuInstanceHandle
+	{
+		TArray<FTransform> Batch;
+		for (int32 Index = 0; Index < 40; ++Index) Batch.Add(FTransform(FVector((Index % 8) * 300.0, (Index / 8) * 300.0, 0.0)));
+		Component->AddInstances(Batch);
+		Component->UpdateInstanceTransform(3, FTransform(FVector(-500.0, 100.0, 20.0)));
+		Component->UpdateInstanceTransform(17, FTransform(FRotator(0.0, 30.0, 0.0), FVector(900.0, -700.0, 0.0), FVector(2.0)));
+		Component->RemoveInstance(10);
+		Component->RemoveInstance(Component->GetInstanceCount() - 1);
+		Component->AddInstance(FTransform(FVector(5000.0, 5000.0, 0.0)));
+		const int32 Last = Component->AddInstance(FTransform(FVector(-5000.0, 0.0, 100.0)));
+		const FCSGpuInstanceHandle Handle = Component->GetInstanceHandle(Last);
+		Component->UpdateInstanceTransformByHandle(Handle, FTransform(FVector(-6000.0, 0.0, 100.0)));
+		return Handle;
+	};
+
+	UCSGpuInstancedMeshComponent* OneByOne = MakeComponent(/*InstancesPerCluster*/ 4);
+	UCSGpuInstancedMeshComponent* Batched = MakeComponent(/*InstancesPerCluster*/ 4);
+	if (!TestNotNull(TEXT("Component"), OneByOne) || !TestNotNull(TEXT("Component"), Batched)) return false;
+
+	const int32 OneByOnePacksBefore = OneByOne->GetInstancePackSerial();
+	const FCSGpuInstanceHandle OneByOneHandle = RunOps(OneByOne);
+	const int32 OneByOnePacks = OneByOne->GetInstancePackSerial() - OneByOnePacksBefore;
+
+	const int32 BatchedPacksBefore = Batched->GetInstancePackSerial();
+	FCSGpuInstanceHandle BatchedHandle;
+	{
+		FCSGpuInstancedUpdateScope Scope(Batched);
+		TestTrue(TEXT("[区间内] IsInInstanceUpdate"), Batched->IsInInstanceUpdate());
+		{
+			// 嵌套：内层 End 什么都不落。
+			FCSGpuInstancedUpdateScope Inner(Batched);
+			BatchedHandle = RunOps(Batched);
+		}
+		TestTrue(TEXT("[区间内] 内层 End 之后仍在区间里"), Batched->IsInInstanceUpdate());
+		TestEqual(TEXT("[区间内] 一次都没打包"), Batched->GetInstancePackSerial() - BatchedPacksBefore, 0);
+		// 实例数、下标、句柄当场有效。
+		TestEqual(TEXT("[区间内] 实例数当场反映改动"), Batched->GetInstanceCount(), OneByOne->GetInstanceCount());
+		TestTrue(TEXT("[区间内] 新加的实例当场拿得到句柄"), Batched->IsInstanceHandleValid(BatchedHandle));
+		FTransform Moved;
+		TestTrue(TEXT("[区间内] 按句柄读得到刚改的变换"), Batched->GetInstanceTransformByHandle(BatchedHandle, Moved) && Moved.GetLocation().Equals(FVector(-6000.0, 0.0, 100.0), 0.01));
+	}
+	TestFalse(TEXT("[区间后] 最外层 End 之后不在区间里"), Batched->IsInInstanceUpdate());
+	const int32 BatchedPacks = Batched->GetInstancePackSerial() - BatchedPacksBefore;
+
+	AddInfo(FString::Printf(TEXT("同一串操作：逐个调用打包 %d 次，成批 %d 次"), OneByOnePacks, BatchedPacks));
+	TestEqual(TEXT("成批：整串操作只打包一次"), BatchedPacks, 1);
+	TestTrue(TEXT("逐个调用：每个改动各打包一次（对照组，判据有内容）"), OneByOnePacks >= 7);
+
+	// ① 结果逐位相同。
+	TestTrue(TEXT("句柄相同（发槽次序不依赖打包时机）"), OneByOneHandle == BatchedHandle);
+	TestEqual(TEXT("实例数相同"), Batched->GetInstanceCount(), OneByOne->GetInstanceCount());
+	TestTrue(TEXT("packed 行逐位相同"), Batched->GetPackedInstances() == OneByOne->GetPackedInstances());
+	TestTrue(TEXT("簇球逐位相同"), Batched->GetClusterBounds() == OneByOne->GetClusterBounds());
+	TestTrue(TEXT("行 → 稳定槽的表相同"), Batched->GetPackedInstanceSlots() == OneByOne->GetPackedInstanceSlots());
+	for (int32 Index = 0; Index < OneByOne->GetInstanceCount(); ++Index)
+	{
+		if (!(Batched->GetInstanceHandle(Index) == OneByOne->GetInstanceHandle(Index)))
+		{
+			AddError(FString::Printf(TEXT("下标 %d 的句柄两边不同"), Index));
+			break;
+		}
+	}
+
+	// 区间里读 packed 行：当场补一次打包，读到的是此刻的实例数组；之后没有新改动的话 End 不再重打。
+	{
+		const int32 PacksBefore = Batched->GetInstancePackSerial();
+		Batched->BeginInstanceUpdate();
+		const int32 Added = Batched->AddInstance(FTransform(FVector(123.0, 456.0, 0.0)));
+		TestEqual(TEXT("[区间内读] 行数当场跟上"), Batched->GetPackedInstances().Num(), Batched->GetInstanceCount() * CS_GPU_INSTANCED_ROW_FLOAT4S);
+		TestTrue(TEXT("[区间内读] 行表里有新实例的槽"), Batched->GetPackedInstanceSlots().Contains(Batched->GetInstanceHandle(Added).Slot));
+		TestEqual(TEXT("[区间内读] 读触发了一次打包"), Batched->GetInstancePackSerial() - PacksBefore, 1);
+		Batched->EndInstanceUpdate();
+		TestEqual(TEXT("[区间内读] End 没有再打一遍"), Batched->GetInstancePackSerial() - PacksBefore, 1);
+	}
+
+	// bMarkRenderStateDirty=false：一串改动只在最后那次打包。
+	{
+		const int32 PacksBefore = Batched->GetInstancePackSerial();
+		for (int32 Index = 0; Index < 8; ++Index)
+		{
+			Batched->UpdateInstanceTransform(Index, FTransform(FVector(Index * 50.0, -2000.0, 0.0)), /*bWorldSpace*/ false, /*bMarkRenderStateDirty*/ Index == 7);
+		}
+		TestEqual(TEXT("[攒着改] 8 个 UpdateInstanceTransform 只打包一次"), Batched->GetInstancePackSerial() - PacksBefore, 1);
+		FVector3f Origin;
+		float Random = 0.0f;
+		TestTrue(TEXT("[攒着改] 第一个改动（没让更新的那些）也进了 packed 行"),
+			CSIdentityTest_ReadRow(Batched, Batched->GetInstanceHandle(0), Origin, Random) && Origin.Equals(FVector3f(0.0f, -2000.0f, 0.0f), 0.01f));
+	}
+
+	// RemoveInstances：下标是调用那一刻的；重复、越界的跳过；一次打包。
+	{
+		const int32 CountBefore = Batched->GetInstanceCount();
+		TArray<FCSGpuInstanceHandle> Doomed = { Batched->GetInstanceHandle(2), Batched->GetInstanceHandle(5), Batched->GetInstanceHandle(CountBefore - 1) };
+		TArray<FCSGpuInstanceHandle> Survivors;
+		for (int32 Index = 0; Index < CountBefore; ++Index)
+		{
+			if (Index != 2 && Index != 5 && Index != CountBefore - 1) Survivors.Add(Batched->GetInstanceHandle(Index));
+		}
+		const int32 PacksBefore = Batched->GetInstancePackSerial();
+		const int32 Removed = Batched->RemoveInstances({ 2, CountBefore - 1, 5, 5, CountBefore + 100, -1 });
+		TestEqual(TEXT("[成批删] 删掉三个（重复的、越界的不算）"), Removed, 3);
+		TestEqual(TEXT("[成批删] 实例数少了三个"), Batched->GetInstanceCount(), CountBefore - 3);
+		TestEqual(TEXT("[成批删] 一次打包"), Batched->GetInstancePackSerial() - PacksBefore, 1);
+		for (const FCSGpuInstanceHandle& Handle : Doomed) TestFalse(TEXT("[成批删] 被删的句柄失效"), Batched->IsInstanceHandleValid(Handle));
+		bool bSurvivorsAlive = true;
+		for (const FCSGpuInstanceHandle& Handle : Survivors) bSurvivorsAlive &= Batched->IsInstanceHandleValid(Handle);
+		TestTrue(TEXT("[成批删] 其余实例一个都没被误删"), bSurvivorsAlive);
+	}
+
+	// ② 注册在世界里（真的有 GPU 那一半）：区间内零次阻塞刷新、GPU 布局不动；End 之后一次到位。
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("Editor test world"), World)) return false;
+	FActorSpawnParameters SpawnParameters;
+	SpawnParameters.ObjectFlags = RF_Transient;
+	AActor* Host = World->SpawnActor<AActor>(AActor::StaticClass(), FTransform::Identity, SpawnParameters);
+	if (!TestNotNull(TEXT("Host actor"), Host)) return false;
+	USceneComponent* Root = NewObject<USceneComponent>(Host, TEXT("Root"));
+	Host->SetRootComponent(Root);
+	Root->RegisterComponent();
+
+	UCSGpuInstancedMeshComponent* Live = NewObject<UCSGpuInstancedMeshComponent>(Host, NAME_None, RF_Transient);
+	Live->SetupAttachment(Root);
+	Live->RegisterComponent();
+	Live->InstanceMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+	Live->SetBaseMeshFromGpuData(MakeUnitTriangle());
+	{
+		TArray<FTransform> Initial;
+		for (int32 Index = 0; Index < 100; ++Index) Initial.Add(FTransform(FVector(Index * 150.0, 0.0, 0.0)));
+		Live->SetInstances(Initial);
+	}
+	if (!TestEqual(TEXT("[GPU] 起点：布局里 100 个源实例"), int32(Live->GetGpuLayout().NumSourceInstances), 100)) return false;
+
+	// 一个改动的阻塞刷新次数（对照）。
+	const int64 FlushesBeforeSingle = UCSMesh::GetBlockingFlushCount();
+	Live->AddInstance(FTransform(FVector(-300.0, 0.0, 0.0)));
+	const int64 FlushesPerSingle = UCSMesh::GetBlockingFlushCount() - FlushesBeforeSingle;
+
+	const int64 FlushesBeforeBatch = UCSMesh::GetBlockingFlushCount();
+	Live->BeginInstanceUpdate();
+	for (int32 Index = 0; Index < 16; ++Index) Live->AddInstance(FTransform(FVector(Index * 150.0, 400.0, 0.0)));
+	Live->RemoveInstance(0);
+	Live->UpdateInstanceTransform(1, FTransform(FVector(0.0, -400.0, 0.0)));
+	TestEqual(TEXT("[GPU] 区间内一次阻塞刷新都没有"), int32(UCSMesh::GetBlockingFlushCount() - FlushesBeforeBatch), 0);
+	TestEqual(TEXT("[GPU] 区间内 GPU 布局停在区间之前"), int32(Live->GetGpuLayout().NumSourceInstances), 101);
+	Live->EndInstanceUpdate();
+	const int64 FlushesPerBatch = UCSMesh::GetBlockingFlushCount() - FlushesBeforeBatch;
+	AddInfo(FString::Printf(TEXT("[GPU] 单个 AddInstance %lld 次阻塞刷新；18 个改动成批 %lld 次"), FlushesPerSingle, FlushesPerBatch));
+	TestTrue(TEXT("[GPU] 成批的阻塞刷新不比单个改动多"), FlushesPerBatch <= FlushesPerSingle);
+	TestEqual(TEXT("[GPU] End 之后布局跟上了（101 + 16 − 1）"), int32(Live->GetGpuLayout().NumSourceInstances), 116);
+
+	Host->Destroy();
 	return true;
 }
 

@@ -4,10 +4,22 @@
 #include "CSGpuMeshSceneProxy.h"
 #include "CSGpuInstancedMeshComponent.h"
 #include "CSMesh.h" // FCSMeshResidentRef: the buffer set this proxy borrows
+#include "ProfilingDebugging/CsvProfiler.h"
 
 class FRDGBuilder;
 class FSceneView;
 class UCSGpuInstancedMeshComponent;
+
+/**
+ * 实例路的 CSV 统计分类（定义在 CSGpuInstancedMeshSceneProxy.cpp）。只在 `CsvProfile` 采集期间有开销，
+ * 是 InstanceCullingOptimization.md §4.1 那份基线的 CPU 侧口径：
+ *   CullSetupMs       渲染线程给全部经典代理建剔除图花的毫秒（每个 view family 累加）
+ *   CullProxies       这一帧参加剔除的经典代理数（累加）
+ *   CullDispatchRows  InstanceCull 派发覆盖的源行数之和（= 各代理的容量，不是活跃数）
+ *   NaniteWrites / NaniteWriteSlots  这一帧派发的 GPU-Scene 写入 pass 数与它们覆盖的槽数
+ * GPU 侧的分段耗时走 `DECLARE_GPU_STAT`（`r.GPUCsvStatsEnabled 1` 时进同一张 CSV 的 GPU/ 分类）。
+ */
+CSV_DECLARE_CATEGORY_EXTERN(CSGpuInstanced);
 
 /**
  * Which extra buffer an AuxVertex stream is. A stream is addressed by (Role, TexCoordIndex) —
@@ -45,9 +57,22 @@ enum class ECSGpuInstancedAuxSlot : uint8
 	 * float4 视图会读出错位数据，而画面上只是"数值不对"，不报错。
 	 */
 	VisibleCustomData = 23,
+
+	// ---- 「可见源行号」布局（FCSGpuInstancedGpuLayout::bVisibleSourceIndex）才声明下面两条，
+	//      同时**不**声明上面的 VisibleTransforms / VisibleOrigins / VisibleLightmap / VisibleCustomData ----
+
+	/** Buffer<uint>, 1 per visible slot：InstanceCullCS 压出来的源行号 -> CSVisibleSourceIndices。 */
+	VisibleSourceIndices = 24,
+	/**
+	 * Buffer<float>, CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS 个，恒零（常驻流分配出来就是零，没有人写它）。
+	 * 生产者没给 custom data 时顶在 InstanceVF.InstanceCustomDataBuffer 上：材质读到 0，与旧布局"可见槽写零"同一口径。
+	 * 格式同样必须 PF_R32_FLOAT。
+	 */
+	CustomDataFallback = 25,
 };
 
-/** Appends this leaf's seven aux stream descriptors to OutStreams, sized from Layout.
+/** Appends this leaf's aux stream descriptors to OutStreams, sized from Layout — the visible-attribute
+ *  set, or (Layout.bVisibleSourceIndex) the visible-source-index set.
  *  bExternalPackedSource means a producer supplies the packed rows in its own buffer, so the mesh
  *  only needs a placeholder for that slot. Lives with the enum because the slot assignment and the
  *  slot numbering must never be edited apart. */
@@ -55,6 +80,25 @@ void CSGpuInstancedBuildAuxStreamDescs(
 	TArray<FCSGpuStreamDesc>& OutStreams,
 	const FCSGpuInstancedGpuLayout& Layout,
 	bool bExternalPackedSource);
+
+/**
+ * 把**生产者自己的** buffer（packed 行 / custom data）注册进渲染器的图，供一个 pass 读。
+ *
+ * 与直接 `RegisterExternalBuffer` 的区别只有一步：先把它从外部访问状态拿回来。同一张图里可能已经有人把它交出去了 ——
+ * 经典路的剔除、Nanite 路的 GPU-Scene 写入、另一个 view family 的剔除都读同一块 buffer —— 而外部访问状态下的资源
+ * 不许再进 pass。对还在内部状态的资源这是空操作。
+ */
+FRDGBufferRef CSGpuInstancedRegisterProducerBuffer(FRDGBuilder& GraphBuilder, const TRefCountPtr<FRDGPooledBuffer>& Pooled);
+
+/**
+ * 读完之后把生产者的 buffer 交到外部访问状态（SRVMask），本图余下的部分 RDG 不再管它。
+ *
+ * 为什么要交：「可见源行号」布局下，本帧后面的绘制经裸 SRV **直接读生产者的 buffer**（顶点着色器读行，
+ * 材质的顶点 / 像素着色器读 custom data），RDG 不知道那些读者；不交的话 buffer 停在上一个 compute pass 留下的
+ * 访问状态上，像素着色器那一侧读的就是一个没为它转过状态的资源。图结束时它留在 SRVMask，正是生产者约定的常态。
+ * 空指针忽略。
+ */
+void CSGpuInstancedHandOffProducerBuffer(FRDGBuilder& GraphBuilder, FRDGBufferRef Buffer);
 
 /**
  * 点云源 -> packed 实例行（CSGpuInstancedMesh.usf 的 PackPointInstancesCS）。
@@ -119,6 +163,9 @@ public:
 	virtual void DestroyRenderThreadResources() override;
 	virtual void GetDynamicMeshElements(const TArray<const FSceneView*>& Views, const FSceneViewFamily& ViewFamily,
 		uint32 VisibilityMap, FMeshElementCollector& Collector) const override;
+	/** 只投影的副本（组件的 bClassicShadowOnNanitePath，主通道由 Nanite 替身画）在这里把主通道 / 深度 / 自定义深度 /
+	 *  速度相关性全部关掉，只留阴影。基类那几面旗子（bRenderInMainPass 等）是私有的，只能在相关性这一层改。 */
+	virtual FPrimitiveViewRelevance GetViewRelevance(const FSceneView* View) const override;
 
 	/** Adds this frame's cull + LOD + indirect-args passes to the renderer's graph, through the
 	 *  mesh's own FCSMeshRenderThreadEdit so the resident streams end the frame in the access states
@@ -156,6 +203,10 @@ private:
 	 *  cull costs the frame or two before the replacement proxy arrives. */
 	uint32 AdoptedAllocationGeneration = 0;
 
+	/** 剔除要用的那几条常驻流（Resident->Streams 的下标位图）：间接参数 + 本叶子的 aux 流。基础网格的
+	 *  位置 / 切线 / UV / 索引等剔除从不碰，精简建图下就不登记它们（FCSMeshRenderThreadEdit 的掩码）。OnStreamsAllocated 里算。 */
+	uint64 CullStreamMask = ~0ull;
+
 	// Game-thread snapshot; the proxy is recreated whenever any of it changes. Deliberately not the
 	// whole FCSGpuInstancedBaseMesh or the packed instance array any more — those live in the mesh
 	// object, and copying them per proxy is exactly the cost retention removes.
@@ -177,12 +228,22 @@ private:
 	float LodScreenSizeScale = 1.0f;
 	bool bFrustumCull = true;
 	bool bLodSelect = true;
+	/** 本代理只是 Nanite 替身的影子副本：只进阴影（见 GetViewRelevance）。 */
+	bool bShadowOnly = false;
 
 	/** Copied from the component, never re-derived — see FCSGpuInstancedGpuLayout. */
 	FCSGpuInstancedGpuLayout Layout;
 
 	// Constant across frames; built once so GetDynamicMeshElements stays allocation-free.
 	FUniformBufferRHIRef InstancedLooseUniformBuffer;
+
+	/**
+	 * 「可见源行号」布局 + packed GPU 源：顶点着色器直接读生产者那块行 buffer（与可选的 custom data），
+	 * 它们不在常驻流里，SRV 得自己建。生命周期跟着本代理（GpuSource 攥着 buffer 的引用）。
+	 * 其余情形（CPU 源 / 点云源）读的是常驻流 SourceInstances，用基座的 GetStreamSRV，这两条为空。
+	 */
+	FShaderResourceViewRHIRef ProducerRowsSRV;
+	FShaderResourceViewRHIRef ProducerCustomDataSRV;
 
 	bool bRegisteredForCulling = false;
 

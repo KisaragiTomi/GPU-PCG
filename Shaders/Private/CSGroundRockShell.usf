@@ -1,27 +1,36 @@
-// 披挂岩壳：一线程一三角，把 Tiny Glade 那张**平的**碎裂图案披到解析高度场上
-// （计划 D9「侧面碎石：Tiny Glade 式披挂岩壳」的链 B，照 TG 的 displace_rocky_terrain.cs）。
+// 披挂岩壳（计划 D9「侧面碎石：Tiny Glade 式披挂岩壳」的链 B，照 TG 的 displace_rocky_terrain.cs）。
+// 2026-09-30 起是**稀疏程序化**版本（设计与证据：Docs/TinyGlade/RockShell_Sparse.md）：
 //
-// 图案是 2D 静态资产（裁决一）：TG 原件 `rocky_terrain_shell.glb` 导成的 StaticMesh
-// （49,598 三角 / 609 胞腔 / 5.53 m 间距 / tile 136.5 m），逐顶点胞腔数据打在多 UV 通道里，
-// 由 CPU 侧按索引缓冲展回三角汤后进 aux 流。实测口径见 Docs/TinyGlade/CSRockShellPattern.md。
-// 静止姿态的**厚度轴在这里被整个丢弃** —— 三维形态 100% 由本 kernel 每趟重新披挂出来。
-// 这里不跑 Voronoi、不挤出、不减面。
+//   · 图案不再是 TG 那一张不能平铺的原件，而是**世界锚定的抖动网格 Voronoi**（可选低频扭曲 /
+//     功率权重）—— 任意 XY 都能求值，没有覆盖上限、不重复。
+//   · 每个胞腔一个**定长槽位**：固定拓扑模板 5M 个三角（M = 边界点数）。CPU 按塑形物的 SDF
+//     判出「可能长石头」的胞腔、分配槽位、上传作业表；这里的每一趟都是「作业 × 模板」的
+//     线程重映射（tid → 作业 = tid / 每作业线程数，局部 = tid % 每作业线程数）。
+//   · 趟序（同一张 RDG 图）：
+//       ① BuildRockShellCellsCS     新增槽：半平面裁剪出多边形 → 边界采样 → 内缩唇 → 写槽的胞腔几何
+//       ② WriteRockShellStaticCS    新增槽：逐顶点写烘死的属性（UV0 世界平铺、顶点色）
+//       ③ KillRockShellSlotsCS      失效槽：第 0 个顶点写 NaN
+//       ④ 第零趟（CSGroundRoadField） 路场模糊
+//       ⑤ DisplaceRockShellCS       待披挂槽：一线程一三角，披挂数学（TG 口径）
+//       ⑥ AverageRockShellNormalsCS 可选：按模板的重合组平均法线
+//       ⑦ RockShellBevelPayloadCS   假倒角 v3 载荷（UV1..UV6）
+//
+// 静止姿态只有 XY 有意义 —— 三维形态 100% 由 ⑤ 每趟重新披挂出来（裁决一的前半句，不变）。
 //
 // 高度直接调共享头的 `GroundShaperHeightAtXY`（裁决三），与地面位移 pass 用**同一份**
 // `GroundShaperParams` ⇒ 壳与地面的一致性是**构造保证**的，不是靠两条路算出同一个数。
-// 该头 2026-08-30 加的裙边噪声，壳会自动吃到，不用在这里另做。
 //
-// ⚠️ **裙边高度这里一行都没算**（裁决四）。底圈在烘焙时就沿径向朝外错开了 19.5 cm
-// （实测；`CSGroundShaper.md` 与计划正文写的 21.4 cm 已被推翻）；两圈各自采**自己 XY**
-// 的高度 ⇒ 裙边竖直高度 = 局部坡度 × 19.5 cm。平地自动塌成零高度，陡坡自动拉成岩壁。
-// 如果你在这里写"这里的岩壁该多高"，就是做错了。
+// ⚠️ **裙边高度这里一行都没算**（裁决四）。底圈就是 Voronoi 边、顶圈（盖边界）内缩 Lip
+// （TG 实测 19.5 cm，按胞腔尺寸等比缩）；两圈各自采**自己 XY** 的高度 ⇒ 裙边竖直高度 =
+// 局部坡度 × Lip。平地自动塌成零高度，陡坡自动拉成岩壁。
 //
 // ⚠️ **路上的壳是"沉下去"，不是"隐藏"**（裁决五）。显隐判据里**没有 road** —— TG 实测
-// `displace_rocky_terrain.cs:202-206` 只有 rocky/water。用 NaN 关掉的话画路时三角会一个一个
-// 啪地消失（popping）；连续沉降的观感才是"石头慢慢埋进土里"。
+// `displace_rocky_terrain.cs:202-206` 只有 rocky/water。
 //
-// ⚠️ **壳读的不是色流本身，是模糊过的路足迹**（用户裁决 2026-09-11：路对壳的下压太激烈）。
-// 见文件末尾的「第零趟」—— 两趟可分离高斯先把 `saturate(R × RoadFade)` 糊开，披挂只采那张场。
+// ⚠️ **壳读的不是色流本身，是模糊过的路足迹**（用户裁决 2026-09-11），见 `CSGroundRoadField.usf`。
+//
+// ⚠️ 每一趟 C++ 侧的参数结构只放本趟 kernel 真读的东西：`FComputeShaderUtils::AddPass` 会调
+// `ClearUnusedGraphResources` 把没读的绑定置空、连带抹掉 RDG 依赖边（藤蔓 SC pass 就是这么挂过 GPU 的）。
 
 #include "/Engine/Public/Platform.ush"
 #include "/Plugin/PCGPlugins/Shaders/Private/CSGroundShaperField.ush"
@@ -30,113 +39,463 @@
 #define THREADGROUPSIZE_X 64
 #endif
 
-// --- 烘焙图案（aux 流，槽 32/33/34，布局见 Docs/TinyGlade/CSRockShellPattern.md「接进 aux 流」）---
-Buffer<float4> RockShellRestDir;      // RestXY.xy + DirToCentroid.xy
-Buffer<uint>   RockShellCellFlags;    // CellId | bIsTopRim<<24 | bIsCorner<<25 | bIsCapTri<<26
-Buffer<float2> RockShellCentroids;    // 逐胞腔质心 XY（图案空间），只用于 CellJitter 的半径淡入
+// 邻域半径：7×7 个格（R = 3）。离线实测（Scripts/PrototypeRockShellSparse.py）：扭曲 + 功率权重一起开时
+// R = 2 在 2500 个胞腔里会漏 1~2 个，R = 3 对 R = 5 零不一致。改它要连同 CPU 孪生（CSRockShell::CellPolygon）一起改。
+#define ROCKSHELL_NEIGHBOUR_RADIUS 3
+// 裁剪中间结果的顶点上限（凸多边形每刀最多多一个点；实测胞腔最多 11 个角点）
+#define ROCKSHELL_MAX_POLY 32
+// 边界点数 M 的上限（CPU 侧 CSRockShell::MaxBoundaryPoints 同值）
+#define ROCKSHELL_MAX_M 24
+// 内环在质心与顶圈之间的位置（CPU 侧 CSRockShell::RingFraction 同值）
+#define ROCKSHELL_RING_FRACTION 0.5f
 
-Buffer<float>  RockShellRoadField;    // 模糊后的路足迹 ∈ [0,1]，1 / 地面格点，V = Y * VertsX + X（第零趟写）
+// =============================================================================
+// 程序化图案（CPU 孪生：CSGroundRockShell.cpp 的 CSRockShell::SeedLocal / SeedWeight / CellPolygon）
+// =============================================================================
 
-RWBuffer<float> RW_RockShellPositions; // 3 / 顶点
-RWBuffer<uint>  RW_RockShellTangents;  // 2 / 顶点（packed 8888：[0]=TangentX，[1]=TangentZ）
+float  RockShellCellSize;           // 种子格距 cm
+float  RockShellSeedJitter;         // 格内抖动 0..1
+float  RockShellClusterWarp;        // 成片疏密：扭曲幅度（格）
+float  RockShellClusterWavelength;  // 成片疏密：扭曲波长（格）
+float  RockShellSizeVariance;       // 功率权重半径 / 格距
+uint   RockShellPatternSeed;
+uint   RockShellBoundaryPoints;     // M：每胞腔 5M 个三角
+float2 RockShellGridOrigin;         // 格 (0,0) 左下角的世界 XY（= 地面 actor 位置 ⇒ 地面平移时图案跟着走）
+float  RockShellLipCm;              // 盖边界相对 Voronoi 边的内缩（世界 cm）
 
-uint   RockShellTriangleCount;
-float2 RockShellPatternCentre;     // 图案 RestXY 包围盒的中心
-float2 RockShellWorldCentre;       // 地面矩形中心
-float  RockShellScale;             // 图案 → 世界的**各向同性**缩放；1.0 = 原生 ×65（5.53 m 胞腔）
-float  RockShellCellRadiusCm;      // 标称胞腔半径（图案空间），CellJitter 的半径淡入用
-float2 RockShellDomainMin;         // 允许出现壳的世界 XY 矩形（= 地面矩形），矩形外直接写 NaN
-float2 RockShellDomainMax;
-float  RockShellWindingSign;       // +1 / −1，由 CPU 侧**实测**盖三角的绕序得出（见下面第 4 步）
+/** 槽的胞腔几何（float4 × (2 + M) / 槽），全部世界 XY：
+ *    [0]     = (质心.xy, asfloat(格 I), asfloat(格 J))
+ *    [1]     = (asfloat(角点掩码), 实际唇宽, asfloat(角点数 N), 活着 ? 1 : 0)
+ *    [2 + k] = (底圈 B[k].xy, 顶圈 T[k].xy) */
+uint RockShellGeomStride;
 
-float2 RockShellGroundOriginXY;    // 地面镜像格点 (0,0) 的世界 XY —— 只用于取道路权重
-float  RockShellGroundCellSize;
-uint2  RockShellGroundVerts;       // 第零趟与披挂共用：两边的格点身份必须是同一张网格
-float  RockShellGroundBaseZ;       // 地面 actor 的世界 Z（高度场是相对它的）
-
-float  RockShellSlopeLo;           // mask = smoothstep(Lo, Hi, |∇h|)，与 TG 同口径 0.75 / 1.25
-float  RockShellSlopeHi;
-float  RockShellRoadSink;          // road 满值时沿地形法线的下沉量 cm（TG 合计约 1.6 m）
-float  RockShellCellJitter;        // 逐胞腔沿 DirToCentroid 的随机胀缩幅度 cm（图案空间）
-float  RockShellCellRelief;        // 壳沿地形法线的**厚度** cm —— 见 3) 的 cell_bby 一段
-float  RockShellReliefFloor;       // 厚度所乘 mask 的下限（0 = 照旧全乘 Rock，1 = 完全不衰减）
-
-// —— 「石头隆起」那一组（用户规格 2026-08-31）。全部由 ACSGroundActor 的同名属性喂进来。——
-float  RockShellCellExpand;        // ② ⑤ 每片沿 −DirToCentroid（**朝外**）扩张的距离 cm，用来闭合片间缝
-float  RockShellSkirtTilt;         // 裙圈倾斜：**只有底圈**再朝外推的距离（图案空间 cm），把竖直裙墙变外撇斜壁
-float  RockShellRiseMultiplier;    // ③ 石头隆起 = 地形隆起 × 本值（1 = 贴地，>1 = 高出地面）
-float  RockShellRiseNoiseAmp;      // ④ 隆起时叠加的噪波幅度 cm
-float  RockShellRiseNoiseFreq;     // ④ = 1 / 波长
-float  RockShellRiseExtend;        // ⑥ 台顶外扩距离 cm —— 隆起的衰减比地面**晚**这么远才开始
-float  RockShellEdgeCeiling;       // ⑧ 末端边缘处，隆起相对该点地面高度的上限比例（必须 < 1）
-float  RockShellPeakHeight;        // ⑧ 的参考：全部塑形物的台顶峰值 cm（= ACSGroundActor::MaxAbsHeight）
-
-// —— TG `displace_rocky_terrain.cs:563` 的整体基准偏移（沿世界 Z；TG 是世界 Y）——
-float  RockShellBaseLift;          // mask 满时壳整体浮起 cm（TG 的 +0.2 m）
-float  RockShellBaseSink;          // mask 空 / 路上时整体沉下 cm（TG 的 −0.4 m）
-
-float  RockShellNoiseAmp;          // 表面起伏在**坡度 = 1** 时的满幅 cm（TG `:721` 的 0.3 m）
-float  RockShellNoiseFreq;         // = 1 / 波长
-float  RockShellChipAmount;        // 边缘磕碰：第二条**高频**带的幅度 cm（恒幅，不随坡度）
-float  RockShellChipFreq;          // = 1 / 磕碰波长
-uint   RockShellSeed;
-
-/** 与 CSGpuInstancedMesh.usf / CSGroundStairs.usf 同一份哈希的收尾段（uint → [0,1)）。 */
-float CSRockShell_Hash01(uint H)
+float CSRockShell_KeyHash01(int2 C, uint Seed)
 {
-	H = ((H >> ((H >> 28) + 4u)) ^ H) * 277803737u;
-	return float((H >> 22 ^ H) & 0xFFFFFFu) / float(0x1000000u);
+	return CSGSF_Hash01(uint2(asuint(C.x), asuint(C.y)), Seed);
 }
 
-/** 逐胞腔随机。`CellId` 存的是**序号**不是随机数，随机在这里现哈希 —— 同 TG 的 rand(cell_id)。 */
-float CSRockShell_CellRandom(uint CellId, uint Salt)
+/** 格 C 的种子相对本格左下角的偏移（单位 = 格）。扭曲场在**未扭曲**的种子处求值。 */
+float2 CSRockShell_SeedLocal(int2 C)
 {
-	return CSRockShell_Hash01(CellId * 0x9E3779B1u ^ Salt * 0x85EBCA77u ^ RockShellSeed * 0xC2B2AE3Du);
+	const float U = CSRockShell_KeyHash01(C, RockShellPatternSeed * 3u + 1u);
+	const float V = CSRockShell_KeyHash01(C, RockShellPatternSeed * 3u + 2u);
+	float2 P = float2(0.5f + RockShellSeedJitter * (U - 0.5f), 0.5f + RockShellSeedJitter * (V - 0.5f));
+	if (RockShellClusterWarp > 0.0f)
+	{
+		const float Inv = 1.0f / max(RockShellClusterWavelength, 1e-3f);
+		const float Gx = (float(C.x) + P.x) * Inv;
+		const float Gy = (float(C.y) + P.y) * Inv;
+		const float Wx = CSGSF_ValueNoise(float2(Gx, Gy), RockShellPatternSeed * 7u + 101u);
+		const float Wy = CSGSF_ValueNoise(float2(Gx + 17.31f, Gy - 9.77f), RockShellPatternSeed * 7u + 103u);
+		P.x += Wx * RockShellClusterWarp;
+		P.y += Wy * RockShellClusterWarp;
+	}
+	return P;
 }
+
+/** 功率图的权重 cm²（V = 0 ⇒ 普通 Voronoi）。 */
+float CSRockShell_SeedWeight(int2 C)
+{
+	const float R = RockShellSizeVariance * RockShellCellSize * CSRockShell_KeyHash01(C, RockShellPatternSeed * 3u + 3u);
+	return R * R;
+}
+
+// =============================================================================
+// 固定拓扑模板（CPU 孪生：CSRockShell::FTemplate::CornerVertex）
+//
+// 模板顶点号：0 = 质心 C；1+i = 内环 Rg[i]；1+M+i = 顶圈 T[i]；1+2M+i = 底圈 B[i]。
+// 每个边界点 k（n = k+1 mod M）五个三角，**俯视顺时针** ⇒ cross(P2−P0, P1−P0) 朝上，
+// 与引擎正面（cross(C−A, B−A) = +Z，地面网格同口径）和 TG 的 cross(v2−v0, v1−v0) 同号：
+//   r=0 (C,     Rg[n], Rg[k])   盖 · 中心扇
+//   r=1 (Rg[k], T[n],  T[k])    盖 · 内环带
+//   r=2 (Rg[k], Rg[n], T[n])    盖 · 内环带
+//   r=3 (T[k],  B[n],  B[k])    裙
+//   r=4 (T[k],  T[n],  B[n])    裙
+// =============================================================================
+
+uint CSRockShell_CornerVertex(uint LocalTri, uint Corner)
+{
+	const uint M = RockShellBoundaryPoints;
+	const uint K = LocalTri / 5u;
+	const uint R = LocalTri - K * 5u;
+	const uint N = (K + 1u >= M) ? 0u : K + 1u;
+	const uint Rg = 1u;
+	const uint Tt = 1u + M;
+	const uint Bb = 1u + 2u * M;
+	if (R == 0u) return Corner == 0u ? 0u      : (Corner == 1u ? Rg + N : Rg + K);
+	if (R == 1u) return Corner == 0u ? Rg + K  : (Corner == 1u ? Tt + N : Tt + K);
+	if (R == 2u) return Corner == 0u ? Rg + K  : (Corner == 1u ? Rg + N : Tt + N);
+	if (R == 3u) return Corner == 0u ? Tt + K  : (Corner == 1u ? Bb + N : Bb + K);
+	return              Corner == 0u ? Tt + K  : (Corner == 1u ? Tt + N : Bb + N);
+}
+
+bool CSRockShell_IsCapTri(uint LocalTri)
+{
+	return (LocalTri - (LocalTri / 5u) * 5u) < 3u;
+}
+
+// =============================================================================
+// ① 胞腔几何：一线程一个新胞腔
+// =============================================================================
+
+StructuredBuffer<uint4> RockShellNewCells;   // (槽, asuint(I), asuint(J), 0)
+uint                    RockShellNewCellCount;
+RWBuffer<float4>        RW_RockShellCellGeom;
+
+float CSRockShell_Cross2(float2 A, float2 B) { return A.x * B.y - A.y * B.x; }
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void BuildRockShellCellsCS(uint3 Id : SV_DispatchThreadID)
+{
+	if (Id.x >= RockShellNewCellCount) return;
+	const uint4 Job = RockShellNewCells[Id.x];
+	const uint Slot = Job.x;
+	const int2 Cell = int2(asint(Job.y), asint(Job.z));
+	const uint M = min(RockShellBoundaryPoints, uint(ROCKSHELL_MAX_M));
+	const uint GeomBase = Slot * RockShellGeomStride;
+	const float S = RockShellCellSize;
+
+	// --- 半平面裁剪（局部坐标：相对本种子 cm；d = q − p 由整数格差 + 局部偏移差算，世界坐标再大也不丢精度）---
+	const float2 Pp = CSRockShell_SeedLocal(Cell);
+	const float Wp = CSRockShell_SeedWeight(Cell);
+	float2 A[ROCKSHELL_MAX_POLY];
+	float2 B[ROCKSHELL_MAX_POLY];
+	uint NA = 4u;
+	A[0] = float2(-3.0f * S, -3.0f * S);
+	A[1] = float2( 3.0f * S, -3.0f * S);
+	A[2] = float2( 3.0f * S,  3.0f * S);
+	A[3] = float2(-3.0f * S,  3.0f * S);
+	bool bOk = true;
+	for (int Dj = -ROCKSHELL_NEIGHBOUR_RADIUS; Dj <= ROCKSHELL_NEIGHBOUR_RADIUS; ++Dj)
+	{
+		for (int Di = -ROCKSHELL_NEIGHBOUR_RADIUS; Di <= ROCKSHELL_NEIGHBOUR_RADIUS; ++Di)
+		{
+			if (!bOk || (Di == 0 && Dj == 0)) continue;
+			const int2 Q = Cell + int2(Di, Dj);
+			const float2 D = (float2(float(Di), float(Dj)) + CSRockShell_SeedLocal(Q) - Pp) * S;
+			// 功率图的半平面：2 x·d <= |d|² + w_p − w_q
+			const float2 Nrm = 2.0f * D;
+			const float Cst = dot(D, D) + Wp - CSRockShell_SeedWeight(Q);
+			uint NB = 0u;
+			for (uint KClip = 0u; KClip < NA; ++KClip)
+			{
+				const float2 Pa = A[KClip];
+				const float2 Pb = A[(KClip + 1u == NA) ? 0u : KClip + 1u];
+				const float Da = dot(Nrm, Pa) - Cst;
+				const float Db = dot(Nrm, Pb) - Cst;
+				if (Da <= 0.0f && NB < ROCKSHELL_MAX_POLY) B[NB++] = Pa;
+				if ((Da <= 0.0f) != (Db <= 0.0f) && NB < ROCKSHELL_MAX_POLY)
+				{
+					const float TCut = Da / (Da - Db);
+					B[NB++] = Pa + TCut * (Pb - Pa);
+				}
+			}
+			NA = NB;
+			for (uint KCopy = 0u; KCopy < NB; ++KCopy) A[KCopy] = B[KCopy];
+			if (NA < 3u) bOk = false;
+		}
+	}
+
+	// --- 合掉重合顶点（裁剪恰好过角点时会留下），再把角点数收到 M 以内（合最短边）---
+	uint N = 0u;
+	if (bOk)
+	{
+		for (uint KDedupe = 0u; KDedupe < NA; ++KDedupe)
+		{
+			if (N == 0u || length(A[KDedupe] - B[N - 1u]) > 0.01f) B[N++] = A[KDedupe];
+		}
+		if (N > 1u && length(B[0] - B[N - 1u]) <= 0.01f) --N;
+		while (N > M && N > 3u)
+		{
+			uint Shortest = 0u;
+			float Best = 1e30f;
+			for (uint KSearch = 0u; KSearch < N; ++KSearch)
+			{
+				const float EdgeL = length(B[(KSearch + 1u == N) ? 0u : KSearch + 1u] - B[KSearch]);
+				if (EdgeL < Best) { Best = EdgeL; Shortest = KSearch; }
+			}
+			// 最短边的两端并成中点：前一个端点挪到中点、删掉后一个端点（后面的整体左移一位）。
+			// Next == 0（最短边是收尾那条）时同一个左移把第 0 个删掉，挪过的 Shortest 随之落到 N − 2。
+			const uint Next = (Shortest + 1u == N) ? 0u : Shortest + 1u;
+			B[Shortest] = 0.5f * (B[Shortest] + B[Next]);
+			for (uint KShift = Next; KShift + 1u < N; ++KShift) B[KShift] = B[KShift + 1u];
+			--N;
+		}
+		if (N < 3u) bOk = false;
+	}
+
+	// --- 质心、内切半径、唇宽 ---
+	float2 Centroid = float2(0.0f, 0.0f);
+	float Lip = 0.0f;
+	if (bOk)
+	{
+		float Area2 = 0.0f;
+		float2 Acc = float2(0.0f, 0.0f);
+		for (uint KArea = 0u; KArea < N; ++KArea)
+		{
+			const float2 P0 = B[KArea];
+			const float2 P1 = B[(KArea + 1u == N) ? 0u : KArea + 1u];
+			const float F = CSRockShell_Cross2(P0, P1);
+			Area2 += F;
+			Acc += (P0 + P1) * F;
+		}
+		if (!(Area2 > 1e-3f)) bOk = false;
+		else
+		{
+			Centroid = Acc / (3.0f * Area2);
+			float Inradius = 1e30f;
+			for (uint KIn = 0u; KIn < N; ++KIn)
+			{
+				const float2 P0 = B[KIn];
+				const float2 E = B[(KIn + 1u == N) ? 0u : KIn + 1u] - P0;
+				Inradius = min(Inradius, abs(CSRockShell_Cross2(E, Centroid - P0)) / max(length(E), 1e-6f));
+			}
+			// 小胞腔（功率权重开时才会碰到）：唇宽夹到内切半径的 0.4 倍，内缩不许翻过质心
+			Lip = min(RockShellLipCm, 0.4f * Inradius);
+		}
+	}
+
+	const float2 SeedWorld = RockShellGridOrigin + (float2(float(Cell.x), float(Cell.y)) + Pp) * S;
+	if (!bOk)
+	{
+		RW_RockShellCellGeom[GeomBase + 0u] = float4(SeedWorld, asfloat(Cell.x), asfloat(Cell.y));
+		RW_RockShellCellGeom[GeomBase + 1u] = float4(asfloat(0u), 0.0f, asfloat(0u), 0.0f);
+		return;
+	}
+
+	// --- 边界采样：N 个角点必在其中，其余 M − N 个按边长最大余数法分到各边 ---
+	float EdgeLen[ROCKSHELL_MAX_M];
+	uint EdgeCount[ROCKSHELL_MAX_M];
+	float EdgeFrac[ROCKSHELL_MAX_M];
+	float Perimeter = 0.0f;
+	for (uint KLen = 0u; KLen < N; ++KLen)
+	{
+		EdgeLen[KLen] = length(B[(KLen + 1u == N) ? 0u : KLen + 1u] - B[KLen]);
+		Perimeter += EdgeLen[KLen];
+	}
+	const uint Extra = M - N;
+	uint Assigned = 0u;
+	for (uint KRaw = 0u; KRaw < N; ++KRaw)
+	{
+		const float Raw = float(Extra) * EdgeLen[KRaw] / max(Perimeter, 1e-6f);
+		EdgeCount[KRaw] = uint(floor(Raw));
+		EdgeFrac[KRaw] = Raw - float(EdgeCount[KRaw]);
+		Assigned += EdgeCount[KRaw];
+	}
+	for (uint Rem = Assigned; Rem < Extra; ++Rem)
+	{
+		uint Pick = 0u;
+		float BestFrac = -1.0f;
+		for (uint KPick = 0u; KPick < N; ++KPick) { if (EdgeFrac[KPick] > BestFrac) { BestFrac = EdgeFrac[KPick]; Pick = KPick; } }
+		++EdgeCount[Pick];
+		EdgeFrac[Pick] = -1.0f;
+	}
+
+	RW_RockShellCellGeom[GeomBase + 0u] = float4(SeedWorld + Centroid, asfloat(Cell.x), asfloat(Cell.y));
+	uint CornerMask = 0u;
+	uint Out = 0u;
+	for (uint K = 0u; K < N; ++K)
+	{
+		const uint KPrev = (K == 0u) ? N - 1u : K - 1u;
+		const uint KNext = (K + 1u == N) ? 0u : K + 1u;
+		const float2 P0 = B[K];
+		const float2 E = B[KNext] - P0;
+		const float2 In = float2(-E.y, E.x) / max(length(E), 1e-6f);        // 逆时针多边形的内法线
+		const float2 EPrev = P0 - B[KPrev];
+		const float2 InPrev = float2(-EPrev.y, EPrev.x) / max(length(EPrev), 1e-6f);
+
+		// 角点的顶圈 = 相邻两条内缩边线的交点（几乎共线时退回沿本边内法线平移）
+		const float2 L1 = B[KPrev] + InPrev * Lip;
+		const float2 L2 = P0 + In * Lip;
+		const float Den = CSRockShell_Cross2(EPrev, E);
+		float2 TCorner = L2;
+		if (abs(Den) > 1e-6f * max(length(EPrev) * length(E), 1e-6f))
+		{
+			const float T = CSRockShell_Cross2(L2 - L1, E) / Den;
+			TCorner = L1 + EPrev * T;
+		}
+		if (Out < M)
+		{
+			CornerMask |= (1u << Out);
+			RW_RockShellCellGeom[GeomBase + 2u + Out] = float4(SeedWorld + P0, SeedWorld + TCorner);
+			++Out;
+		}
+		for (uint Sub = 1u; Sub <= EdgeCount[K]; ++Sub)
+		{
+			if (Out >= M) break;
+			const float T = float(Sub) / float(EdgeCount[K] + 1u);
+			const float2 Pb = P0 + E * T;
+			RW_RockShellCellGeom[GeomBase + 2u + Out] = float4(SeedWorld + Pb, SeedWorld + Pb + In * Lip);
+			++Out;
+		}
+	}
+	RW_RockShellCellGeom[GeomBase + 1u] = float4(asfloat(CornerMask), Lip, asfloat(N), 1.0f);
+}
+
+// =============================================================================
+// 读槽的胞腔几何 + 模板 → 一个顶点的静止姿态
+// =============================================================================
+
+Buffer<float4> RockShellCellGeom;
 
 struct FRockShellVertex
 {
-	float2 RestXY;          // 图案空间
-	/**
-	 * 水平单位向量，**指向质心**（实测 dot(TEXCOORD_0, normalize(质心−P)) 中位 +0.9996、
-	 * 100% 为正）。⚠️ 计划契约与 `CSGroundShaper.md` 都写 `normalize(@P − v@center)`（朝外），
-	 * **符号是反的**：正的径向位移是**收缩**不是胀大。
-	 */
+	float2 RestXY;          // 世界 XY
+	/** 水平单位向量，**指向质心**（与 TG 原件的 dir_to_centroid 同号：正的径向位移是收缩）。质心自己为 0。 */
 	float2 DirToCentroid;
-	uint   CellId;
-	bool   bIsTopRim;       // 顶圈（cap）/ 底圈（skirt）；实测 TG 的 cell_bby 就是这一位
-	bool   bIsCorner;       // Voronoi 角点，= @intersectionpt
-	/**
-	 * 逐三角的盖 / 裙标记。**位移一行不读**（同 TG：`is_top` 从没进过位移着色器）。
-	 * ❗ 材质那一份**不从这里读** —— aux 流是 `VET_None`，既进不了顶点工厂也进不了
-	 * `SaveToStaticMesh`；盖/裙另外由 CPU 写进**顶点色 R**，通道字典在 CSGroundRockShell.h。
-	 * 它在 kernel 里只承担一件事：让位布局与主机侧逐位对得上。
-	 */
-	bool   bIsCapTri;
+	float2 Centroid;
+	int2   Cell;            // 格键，逐胞腔随机的种子（替代原件的 cell_id 序号）
+	bool   bIsTopRim;       // 顶圈 / 盖（TG 的 cell_bby）；底圈 = 0
+	bool   bIsCorner;       // Voronoi 角点：角点不加起伏，钉死缝宽
+	bool   bAlive;          // 胞腔有多边形（功率图可以有空胞腔）
 };
 
-FRockShellVertex CSRockShell_LoadVertex(uint V)
+FRockShellVertex CSRockShell_LoadVertex(uint Slot, uint VertexId)
 {
-	const float4 RestDir = RockShellRestDir[V];
-	const uint   Word    = RockShellCellFlags[V];
+	const uint Base = Slot * RockShellGeomStride;
+	const float4 G0 = RockShellCellGeom[Base + 0u];
+	const float4 G1 = RockShellCellGeom[Base + 1u];
+	const uint M = RockShellBoundaryPoints;
+	const uint Mask = asuint(G1.x);
 
 	FRockShellVertex Out;
-	Out.RestXY        = RestDir.xy;
-	Out.DirToCentroid = RestDir.zw;
-	Out.CellId        =  Word & 0x00FFFFFFu;
-	Out.bIsTopRim     = (Word & (1u << 24)) != 0u;
-	Out.bIsCorner     = (Word & (1u << 25)) != 0u;
-	Out.bIsCapTri     = (Word & (1u << 26)) != 0u;
+	Out.Centroid = G0.xy;
+	Out.Cell = int2(asint(G0.z), asint(G0.w));
+	Out.bAlive = G1.w > 0.5f;
+	Out.bIsTopRim = true;
+	Out.bIsCorner = false;
+	if (VertexId == 0u)
+	{
+		Out.RestXY = G0.xy;
+	}
+	else if (VertexId <= M)
+	{
+		const float2 T = RockShellCellGeom[Base + 2u + (VertexId - 1u)].zw;
+		Out.RestXY = G0.xy + ROCKSHELL_RING_FRACTION * (T - G0.xy);
+	}
+	else if (VertexId <= 2u * M)
+	{
+		const uint I = VertexId - 1u - M;
+		Out.RestXY = RockShellCellGeom[Base + 2u + I].zw;
+		Out.bIsCorner = ((Mask >> I) & 1u) != 0u;
+	}
+	else
+	{
+		const uint I = VertexId - 1u - 2u * M;
+		Out.RestXY = RockShellCellGeom[Base + 2u + I].xy;
+		Out.bIsCorner = ((Mask >> I) & 1u) != 0u;
+		Out.bIsTopRim = false;
+	}
+	const float2 ToC = Out.Centroid - Out.RestXY;
+	const float L = length(ToC);
+	Out.DirToCentroid = L > 1e-3f ? ToC / L : float2(0.0f, 0.0f);
 	return Out;
 }
 
-/** 图案空间 → 世界 XY。各向同性缩放：DirToCentroid 是单位向量，非均匀缩放会把它拉歪。 */
-float2 CSRockShell_ToWorld(float2 PatternXY)
+// =============================================================================
+// ② 烘死的逐顶点属性：UV0（世界平铺）+ 顶点色（字典 v2：R 盖/裙、G 中性 1、B 逐石头相位、A 中性 1）
+// =============================================================================
+
+RWBuffer<uint>  RW_RockShellColors;
+RWBuffer<float> RW_RockShellTexCoords;    // RockShellTexCoordStride / 顶点（交错，每组 2 个 float）
+uint            RockShellTexCoordStride;  // = TexCoord::NumSets * 2
+float           RockShellInvUVWorldPeriod;
+
+/** 与 CSMeshOps.usf 的 PackColorBGRA 逐字相同（B=0..7, G=8..15, R=16..23, A=24..31）。 */
+uint CSRockShell_PackColorBGRA(float4 RGBA)
 {
-	return RockShellWorldCentre + (PatternXY - RockShellPatternCentre) * RockShellScale;
+	const uint4 I = uint4(round(saturate(RGBA) * 255.0f));
+	return (I.z & 0xFFu) | ((I.y & 0xFFu) << 8u) | ((I.x & 0xFFu) << 16u) | ((I.w & 0xFFu) << 24u);
 }
 
-/** 第零趟写好的模糊足迹。与色流同一张格：V = Y * VertsX + X。 */
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void WriteRockShellStaticCS(uint3 Id : SV_DispatchThreadID)
+{
+	const uint VertsPerCell = RockShellBoundaryPoints * 15u;
+	const uint Job = Id.x / VertsPerCell;
+	if (Job >= RockShellNewCellCount) return;
+	const uint LocalV = Id.x - Job * VertsPerCell;
+	const uint Slot = RockShellNewCells[Job].x;
+	const uint LocalTri = LocalV / 3u;
+	const uint Corner = LocalV - LocalTri * 3u;
+
+	const FRockShellVertex Vert = CSRockShell_LoadVertex(Slot, CSRockShell_CornerVertex(LocalTri, Corner));
+	const uint V = Slot * VertsPerCell + LocalV;
+	const uint Base = V * RockShellTexCoordStride;
+	RW_RockShellTexCoords[Base + 0u] = Vert.RestXY.x * RockShellInvUVWorldPeriod;
+	RW_RockShellTexCoords[Base + 1u] = Vert.RestXY.y * RockShellInvUVWorldPeriod;
+	const float Phase = CSRockShell_KeyHash01(Vert.Cell, RockShellPatternSeed * 3u + 4u);
+	RW_RockShellColors[V] = CSRockShell_PackColorBGRA(float4(CSRockShell_IsCapTri(LocalTri) ? 1.0f : 0.0f, 1.0f, Phase, 1.0f));
+}
+
+// =============================================================================
+// ③ 失效槽：只写第 0 个顶点的 x —— 一个 NaN 就够让整个三角在裁剪阶段出局（TG 的做法）
+// =============================================================================
+
+StructuredBuffer<uint> RockShellJobs;         // 槽号
+uint                   RockShellJobCount;
+RWBuffer<float>        RW_RockShellPositions; // 3 / 顶点
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void KillRockShellSlotsCS(uint3 Id : SV_DispatchThreadID)
+{
+	const uint TrisPerCell = RockShellBoundaryPoints * 5u;
+	const uint Job = Id.x / TrisPerCell;
+	if (Job >= RockShellJobCount) return;
+	const uint Tri = RockShellJobs[Job] * TrisPerCell + (Id.x - Job * TrisPerCell);
+	RW_RockShellPositions[(Tri * 3u) * 3u + 0u] = asfloat(0x7fbfffffu);
+}
+
+// =============================================================================
+// ⑤ 披挂：一线程一三角
+// =============================================================================
+
+Buffer<float>  RockShellRoadField;    // 模糊后的路足迹 ∈ [0,1]，1 / 地面格点，V = Y * VertsX + X（第零趟 = CSGroundRoadField.usf 两趟写）
+RWBuffer<uint> RW_RockShellTangents;  // 2 / 顶点（packed 8888：[0]=TangentX，[1]=TangentZ）
+
+float2 RockShellDomainMin;         // 允许出现壳的世界 XY 矩形（= 地面矩形），矩形外直接写 NaN
+float2 RockShellDomainMax;
+float  RockShellCellRadiusCm;      // 标称胞腔半径（世界 cm），CellJitter / CellExpand 的半径淡入用
+
+float2 RockShellGroundOriginXY;    // 地面镜像格点 (0,0) 的世界 XY —— 只用于取道路权重
+float  RockShellGroundCellSize;
+uint2  RockShellGroundVerts;       // 第零趟（路场）与披挂共用：两边的格点身份必须是同一张网格
+float  RockShellGroundBaseZ;       // 地面 actor 的世界 Z（高度场是相对它的）
+
+float  RockShellSlopeLo;           // Rock = smoothstep(Lo, Hi, |∇h|)，与 TG 的 rocky_terrain.x 同口径 0.75 / 1.25
+float  RockShellSlopeHi;
+float  RockShellRoadSink;          // road 满值时沿地形法线的下沉量 cm（世界 cm，不随胞腔缩放）
+
+// —— 下面这组全是世界 cm（主机侧已换算）。**平面**的几项 = TG 原生长度 × PatternScale（跟多边形尺寸配套）；
+// **竖向**的厚度 / 基准偏移 / 起伏不缩（2026-09-30 一度也缩，石头露出太少，用户看图否掉）。——
+float  RockShellCellJitter;        // 平面 · 逐胞腔沿 DirToCentroid 的随机胀缩幅度
+float  RockShellCellRelief;        // 竖向 · 壳沿地形法线的**厚度**：顶圈浮 0..本值（逐胞腔随机），底圈沉本值
+float  RockShellReliefFloor;       // 厚度所乘 mask 的下限（0 = TG 口径）
+float  RockShellCellExpand;        // 平面 · ② ⑤ 每片沿 −DirToCentroid（**朝外**）扩张，闭合片间缝
+float  RockShellSkirtTilt;         // 平面 · 裙圈倾斜：**只有底圈**再朝外推，竖直裙墙变外撇斜壁
+float  RockShellBaseLift;          // 竖向 · TG `:563` 的 +0.2 m：mask 满时壳整体浮起
+float  RockShellBaseSink;          // 竖向 · TG `:563` 的 −0.4 m：mask 空 / 路上时整体沉下
+float  RockShellNoiseAmp;          // 竖向 · TG `:721` 的 0.3 m：表面起伏在**坡度 = 1** 时的满幅
+float  RockShellNoiseFreq;         // 平面 · TG `:618` 的底频（世界 1/cm）：rest.xz × 0.5 / 65 m，再按胞腔缩放
+
+// —— 「石头隆起」那一组（用户规格 2026-08-31；世界 cm，不随胞腔缩放）——
+float  RockShellRiseMultiplier;    // ③ 石头隆起 = 地形隆起 × 本值（1 = 贴地）
+float  RockShellRiseNoiseAmp;      // ④ 隆起时叠加的噪波幅度 cm
+float  RockShellRiseNoiseFreq;     // ④ = 1 / 波长
+float  RockShellRiseExtend;        // ⑥ 台顶外扩距离 cm
+float  RockShellEdgeCeiling;       // ⑧ 末端边缘处，隆起相对该点地面高度的上限比例（必须 < 1）
+float  RockShellPeakHeight;        // ⑧ 的参考：全部塑形物的台顶峰值 cm
+
+float  RockShellChipAmount;        // 可选的加性磕碰幅度 cm（TG 没有这一项；默认 0）
+float  RockShellChipFreq;
+uint   RockShellSeed;
+
+/** 逐胞腔随机（格键现哈希 —— 同 TG 的 rand(cell_id)）。 */
+float CSRockShell_CellRandom(int2 Cell, uint Salt)
+{
+	return CSRockShell_KeyHash01(Cell, Salt * 0x85EBCA77u ^ RockShellSeed * 0xC2B2AE3Du);
+}
+
 float CSRockShell_ReadRoadField(uint X, uint Y)
 {
 	return RockShellRoadField[Y * RockShellGroundVerts.x + X];
@@ -144,13 +503,8 @@ float CSRockShell_ReadRoadField(uint X, uint Y)
 
 /**
  * 与 `ACSGroundActor::SampleRoadWeight` / `CSStairs_SampleRoad` 同一口径的双线性采样，出界为 0。
- *
  * 采的是第零趟的**模糊足迹**：已经乘过 `RoadFade`、截到 [0,1]，拿到的就是沉降权重。
- * ❗ 调用方不许再乘一次增益 —— 再乘会把刚糊开的缓坡重新压成一刀（第零趟的注释有账）。
- *
- * 足迹是在**同一张 RDG 图里**从 GPU 色流现糊出来的，不是 CPU 上传的一份：色流就是笔刷双写
- * 出来的那一份权威投影，"画面上看到的路"与"壳沉下去的判据"因此构造上同源。
- * 第三条路迟早与另外两条错开一帧。
+ * ❗ 调用方不许再乘一次增益 —— 再乘会把刚糊开的缓坡重新压成一刀。
  */
 float CSRockShell_SampleRoad(float2 P)
 {
@@ -171,11 +525,8 @@ float CSRockShell_SampleRoad(float2 P)
 }
 
 /**
- * 水平梯度 ∇h，指向**上坡**。
- *
- * **中心差分而不是解析导数**（裁决三的第二半）：高度场是"全部塑形物重叠取 max"，接缝处不可导，
- * 解析导数在那里会给出错误的陡峭度 —— 而接缝正是裁决六说"照常披挂"的地方。差分跨距取地面格距，
- * 与 `DisplaceGroundShapersCS` / `CSStairs_GradientXY` 同形，坡度判据与画面上的坡度才是同一个。
+ * 水平梯度 ∇h，指向**上坡**。中心差分而不是解析导数（裁决三的第二半）：高度场是"全部塑形物
+ * 重叠取 max"，接缝处不可导。差分跨距取地面格距，与 `DisplaceGroundShapersCS` 同形。
  */
 float2 CSRockShell_GradientXY(float2 P)
 {
@@ -185,10 +536,24 @@ float2 CSRockShell_GradientXY(float2 P)
 	return float2(Dx, Dy) / (2.0f * D);
 }
 
-/** 岩石 mask：坡度过阈才有壳。TG 的 rocky_terrain.x（_terrain_derivative.cs:104）逐字同形。 */
+/** 坡度 mask：TG 的 rocky_terrain.x（_terrain_derivative.cs:104）逐字同形。 */
 float CSRockShell_RockMask(float2 Grad)
 {
 	return smoothstep(RockShellSlopeLo, RockShellSlopeHi, length(Grad));
+}
+
+/**
+ * **壳的 mask**：TG 的 `_440 = clamp(smoothstep(0.1, 0.2, rocky.x + rocky.y) + smoothstep(0, 0.2, water.y))`
+ * （`displace_rocky_terrain.cs:203` / `:382`）。本项目没有 rocky.y（笔画台缘岩带）与水 ⇒ 只剩
+ * `smoothstep(0.1, 0.2, Rock)`。
+ *
+ * ⚠️ **2026-09-30 修「缝如沟壑」的主因**：之前基准偏移与厚度乘的是 `Rock` 本身。演示土台上大半条带的
+ * Rock 只有 0.1~0.5 ⇒ 基准偏移停在 −22 cm 附近、厚度只剩几成 ⇒ 整片壳沉在地面以下，缝里露出地面，
+ * 读成一道道沟。TG 的 `_440` 在 Rock = 0.2 就饱和 ⇒ 壳几乎全程以满厚度、+BaseLift 浮在地面上，缝只是两片裙之间的一道 V。
+ */
+float CSRockShell_ShellMask(float Rock)
+{
+	return smoothstep(0.1f, 0.2f, Rock);
 }
 
 float3 CSRockShell_SafeNormal(float3 N)
@@ -206,104 +571,79 @@ uint CSRockShell_PackSnorm8888(float4 V)
 }
 
 /**
- * 表面起伏，沿地形法线。**照 TG `displace_rocky_terrain.cs:721` 的口径**：
+ * 表面起伏，沿地形法线。**逐字照 TG `displace_rocky_terrain.cs:618` + `:721`**：
  *
  * ```glsl
- * N * mix(-0.2, 1 - smoothstep(4, 7, S), n01) * smoothstep(0, 0.3, rocky.x) * S * 0.3
+ * n01 = clamp((noise1(rest.xz * 0.5 + rocky.x * 20) - 0.5 + 1) * 0.5)          // ∈ [0.25, 0.75]
+ * N * mix(-0.2, 1 - smoothstep(4, 7, S_disp), n01) * smoothstep(0, 0.3, rocky.x) * S_rest * 0.3
  * ```
  *
- * 与旧写法（常幅对称的 `Turbulence × Amp`）差三处，三处都是承重的：
+ * ⚠️ **2026-09-30 修正**：之前的 n01 取 3 倍频 fbm（波长 150 cm），另加一条加性「磕碰」噪声 ——
+ * 两者都不是 TG。TG 的 n01 是**单倍频、底波长 ~130 m 的 value noise，靠 mask 域扭曲（×20）变化**：
+ * mask 饱和的带内噪声局部恒定 ⇒ 整块石头**均匀**地鼓（角点钉住 ⇒ 读成饱满的凸块）；只在带边缘
+ * mask 爬坡处相邻顶点互不相关。3 倍频 fbm 在 2 m 的石头上起伏不断，缝两侧的盖沿各拿到不同的鼓量，
+ * 缝被啃得坑坑洼洼。n01 ∈ [0.25, 0.75] ⇒ 因子 ∈ [0.1, 0.7]，**恒为正**：石头只鼓不瘪。
  *
- * - **幅度 ∝ 坡度 `S`**。缓处几乎不鼓、陡坡上才鼓出来 —— 这是 TG「包边有体积」的两个来源
- *   之一（另一个是 `:563` 的基准偏移）。常幅写法在缓坡上把噪声均摊到整片壳，读起来是
- *   "毯子上起毛刺"而不是"石头鼓出来"。
- * - **映射偏正**。`n01 ∈ [0,1]` 过 `mix(-0.2, Upper, ·)` 之后值域是
- *   `[-0.2·Amp·S, +Upper·Amp·S]` —— 凸出为主，凹陷最多两成。对称噪声挖掉的和鼓出来的一样多，
- *   净体积为零，这正是"看着没有体积"的直接原因。
- * - **`1 − smoothstep(4, 7, S)`**：极陡崖面（>76°）反而把突起收回去。本项目现在最陡才 1.31，
- *   这一项恒等于 1；照抄是为了真做出崖面时不长蘑菇，代价是零。
- *
- * `smoothstep(0, 0.3, Rock)` 是 TG 自己那道门：mask 刚起步的那一圈不给起伏，免得壳的边缘
- * 在坡度阈附近抖。
- *
- * 噪声本体仍用共享头的 `CSGSF_Turbulence`（gain 0.55 / lacunarity 1.9 / 每层旋转
- * [0.8,−0.6;0.6,0.8]，就是照同一份 TG 实测写的），只是把它的 ≈[−1,1] 映射成 TG 要的 `n01`。
- *
- * ⚠️ **角点不加**（TG `displace:579` 的 `is_corner == 0` 才进分支）。理由与文档原来写的
- * 不同、结论一样：实测**相邻胞腔一个顶点都不共享**（盖是内缩孤岛占 86.60%、裙精确填缝占
- * 13.40%，合计 100.0000%），所以不存在"共享角裂开"这回事；`is_corner` 钉死的是**缝宽** ——
- * 角点被起伏推动会让两侧的裙错开，缝就张开（漏出下面的地面）或叠上（Z-fighting）。
+ * ⚠️ **角点不加**（TG `:579` 的 `is_corner == 0`）—— 角点被推动会让两侧的裙错开，缝张开或叠上。
+ * TG 那边路上是**硬门**（`:581` 的 `path_mask == 0`），这里保留连续淡出（裁决五同一条理由），由调用方乘 (1 − Road)。
  */
-float CSRockShell_SurfaceBulge(float2 WorldXY, float Slope, float Rock, bool bIsCorner)
+float CSRockShell_SurfaceBulge(float2 RestXY, float SlopeRest, float SlopeDisp, float RockRest, bool bIsCorner)
 {
 	if (bIsCorner) return 0.0f;
-	const float Gate = smoothstep(0.0f, 0.3f, Rock);
-
 	float Out = 0.0f;
 	if (RockShellNoiseAmp > 0.0f)
 	{
-		const float N01 = saturate(CSGSF_Turbulence(WorldXY * RockShellNoiseFreq, RockShellSeed) * 0.5f + 0.5f);
-		const float Upper = 1.0f - smoothstep(4.0f, 7.0f, Slope);
-		Out += lerp(-0.2f, Upper, N01) * Slope * RockShellNoiseAmp;
+		const float2 Q = RestXY * RockShellNoiseFreq + RockRest * 20.0f;
+		const float Vn01 = CSGSF_ValueNoise(Q, RockShellSeed + 17u) * 0.5f + 0.5f;
+		const float N01 = saturate(0.25f + 0.5f * Vn01);
+		const float Upper = 1.0f - smoothstep(4.0f, 7.0f, SlopeDisp);
+		Out += lerp(-0.2f, Upper, N01) * smoothstep(0.0f, 0.3f, RockRest) * SlopeRest * RockShellNoiseAmp;
 	}
-
-	// 边缘磕碰（用户诉求 2026-08-31；2026-09-01 换成 TG 正版机制）。
-	//
-	// TG `displace:618` 实测：`noise((rest.xz × 0.5) + 20 × rockMask)`，**单倍频** value noise ——
-	// 空间底波长 ~130 m（近似常数），全部变化来自 **mask 域扭曲**：mask 饱和的带内偏移恒为 20
-	// ⇒ 噪声局部常数 ⇒ 石头面干净；带边缘 mask 从 0 爬到 1 的那一两米里域坐标扫过 ~14 格
-	// ⇒ 相邻顶点互不相关 ⇒ **磕碰自动集中在岩石边缘**。沿边缘方向的锯齿来自 mask 自身的
-	// 微起伏（我们这边由裙边噪声提供，TG 是逐笔 FBM 侵蚀）。
-	//
-	// 这正是"只碎边缘、不撕缝"的两全解：mask 是 XY 的**连续场**，盖边缘与裙顶圈的同 XY
-	// 双胞胎拿到同一个偏移 —— 边缘集中靠场的梯度，不靠顶点旗标（旗标门会把双胞胎推开撕缝，
-	// 第一版差点走那条路）。空间底保留一条低频项（ChipFreq，默认 1/300 cm）兜住
-	// "mask 恰好平坦"的走廊。角点照旧钉死。
+	// 可选的加性磕碰（2026-08-31 用户诉求那一版；TG 没有这一项，默认 0）。
 	if (RockShellChipAmount > 0.0f)
 	{
-		const float2 Q = WorldXY * RockShellChipFreq + Rock * 20.0f;
-		Out += CSGSF_ValueNoise(Q, RockShellSeed + 131u) * RockShellChipAmount;
+		const float2 Q = RestXY * RockShellChipFreq + RockRest * 20.0f;
+		Out += CSGSF_ValueNoise(Q, RockShellSeed + 131u) * RockShellChipAmount * smoothstep(0.0f, 0.3f, RockRest);
 	}
-	return Out * Gate;
+	return Out;
 }
 
 [numthreads(THREADGROUPSIZE_X, 1, 1)]
 void DisplaceRockShellCS(uint3 Id : SV_DispatchThreadID)
 {
-	const uint Tri = Id.x;
-	if (Tri >= RockShellTriangleCount) return;
+	const uint TrisPerCell = RockShellBoundaryPoints * 5u;
+	const uint Job = Id.x / TrisPerCell;
+	if (Job >= RockShellJobCount) return;
+	const uint LocalTri = Id.x - Job * TrisPerCell;
+	const uint Slot = RockShellJobs[Job];
+	const uint Tri = Slot * TrisPerCell + LocalTri;
 
 	FRockShellVertex Vert[3];
-	float2 WorldXY[3];
-	float2 Grad[3];
+	float2 Grad0[3];
 	[unroll] for (uint k = 0u; k < 3u; ++k)
 	{
-		Vert[k] = CSRockShell_LoadVertex(Tri * 3u + k);
-		WorldXY[k] = CSRockShell_ToWorld(Vert[k].RestXY);
-		Grad[k] = CSRockShell_GradientXY(WorldXY[k]);
+		Vert[k] = CSRockShell_LoadVertex(Slot, CSRockShell_CornerVertex(LocalTri, k));
+		Grad0[k] = CSRockShell_GradientXY(Vert[k].RestXY);
 	}
 
-	// 1) 显隐：**只看坡度**，road 不参与（road 走 3) 的连续下沉，见文件头的裁决五）。
-	//    三个顶点任一过阈就保留整个三角（同 TG）—— 三个都不过才关掉，否则壳的边缘会缺一圈。
-	bool bAlive = false;
-	[unroll] for (uint m = 0u; m < 3u; ++m) bAlive = bAlive || (length(Grad[m]) > RockShellSlopeLo);
+	// 1) 显隐：**只看坡度**，road 不参与（裁决五）。三个顶点任一过阈就保留整个三角（同 TG）。
+	//    阈值是 TG 的 `smoothstep(0.1, 0.2, rocky.x) > 0` ⇔ Rock > 0.1（`:203`），不是 Rock > 0 ——
+	//    否则条带外缘那一圈 mask 只有百分之几的三角也会被留下，而它们的基准偏移停在 −BaseSink，
+	//    整片埋在地里、只有起伏把零星尖角顶出来。
+	bool bAnyRock = false;
+	[unroll] for (uint m = 0u; m < 3u; ++m) bAnyRock = bAnyRock || (CSRockShell_RockMask(Grad0[m]) > 0.1f);
+	const bool bAlive = Vert[0].bAlive && bAnyRock;
 
-	// 域外一律关掉。原件 tile 是 136.5 m 而地面 128 m，边上那圈三角本来就落在地面外；
-	// 塑形物摆在地面边缘时它的裙边会伸出地面矩形，那圈三角于是**真的**过坡度阈 —— 而
-	// WorldBounds 是按地面矩形写死的，超出去的几何会被剔除逻辑随机砍掉（症状：转视角时
-	// 地面边缘的石头一闪一闪）。整个三角都在域外才关，跨边界的照常画。
+	// 域外一律关掉（WorldBounds 按地面矩形写死，超出去的几何会被剔除逻辑随机砍掉）。整个三角都在域外才关。
 	bool bInDomain = false;
 	[unroll] for (uint d = 0u; d < 3u; ++d)
 	{
-		bInDomain = bInDomain || all(WorldXY[d] >= RockShellDomainMin) && all(WorldXY[d] <= RockShellDomainMax);
+		bInDomain = bInDomain || all(Vert[d].RestXY >= RockShellDomainMin) && all(Vert[d].RestXY <= RockShellDomainMax);
 	}
 
 	if (!bAlive || !bInDomain)
 	{
-		// 只写第 0 个顶点的 x：一个 NaN 就够让整个三角在裁剪阶段出局，写入量省掉 8/9（TG 的做法）。
-		// ⚠️ 它成立的前提是**逐三角展开**（顶点不共享）—— 原件 44.2% 的顶点槽逐字节相同，
-		// UE 会焊掉它们，所以 CPU 侧必须按索引缓冲展回 Tri*3+k（Docs 的「已实测的导入风险」）。
-		// ⚠️ 代价是 NaN 会污染包围盒 —— 所以 `Resident.WorldBounds` 由宿主按地面矩形写死。
+		// ⚠️ 成立的前提是**逐三角展开**（顶点不共享）；NaN 会污染包围盒 ⇒ WorldBounds 由宿主写死。
 		RW_RockShellPositions[(Tri * 3u) * 3u + 0u] = asfloat(0x7fbfffffu);
 		return;
 	}
@@ -312,137 +652,71 @@ void DisplaceRockShellCS(uint3 Id : SV_DispatchThreadID)
 	float3 P[3];
 	[unroll] for (uint i = 0u; i < 3u; ++i)
 	{
-		float2 PatternXY = Vert[i].RestXY;
+		float2 XY = Vert[i].RestXY;
+		const float Fade = saturate(length(XY - Vert[i].Centroid) / max(RockShellCellRadiusCm, 1e-3f));
 
-		// 逐胞腔沿径向的随机胀缩（TG ④ 的 `rest + dir * 0.001 * mix(-3, 8, rand)`）。
-		// ⚠️ `DirToCentroid` **指向质心**，所以正的位移是收缩 —— 这里用对称随机，幅度与
-		// 符号无关。⚠️ 它还是**定长**位移：顶盖内部点离质心只有一两米，几十厘米的定长径向
-		// 位移足以把点推过质心、翻转周围三角（Docs 的坑 1）。所以乘一个到质心的半径淡入。
+		// TG :262 / :577 共用同一随机数：盖越高越收缩。Jitter = 52 cm 时范围是 -19.5..52 cm。
+		// 保留程序化小胞腔的半径淡入，并限制最大内收，防止内部顶点越过质心。
+		const float ShapeRandom = CSRockShell_CellRandom(Vert[i].Cell, 2u);
 		if (RockShellCellJitter > 0.0f)
 		{
-			const float2 Centroid = RockShellCentroids[Vert[i].CellId];
-			const float Fade = saturate(length(PatternXY - Centroid) / max(RockShellCellRadiusCm, 1e-3f));
-			const float Amount = RockShellCellJitter * (CSRockShell_CellRandom(Vert[i].CellId, 1u) * 2.0f - 1.0f);
-			PatternXY += Vert[i].DirToCentroid * Amount * Fade;
+			const float Amount = RockShellCellJitter * lerp(-0.375f, 1.0f, ShapeRandom) * Fade;
+			const float MaxInward = 0.75f * length(XY - Vert[i].Centroid);
+			XY += Vert[i].DirToCentroid * min(Amount, MaxInward);
 		}
+		// TG 的 rest（`_337`）= 静止 + 胀缩：起伏的噪声域、坡度与 mask 都在这里取（`:618/:721` 读的是 `_350`）。
+		const float2 RestXY = XY;
+		const float2 GRest = CSRockShell_GradientXY(RestXY);
+		const float SlopeRest = length(GRest);
+		const float RockRest = CSRockShell_RockMask(GRest);
 
-		// ② ⑤ 每片**朝外**扩张：闭合相邻片之间的缝。`DirToCentroid` 指向质心（实测，与契约
-		// 写的符号相反），所以朝外要用**减号** —— 写成加号的症状是每片反而缩小、缝更大，
-		// 而三角数、位置断言、剔除盒全都正常。
-		// 半径淡入与 CellJitter 同一个理由：定长径向位移会把顶盖内部点推过质心、翻转周围三角。
+		// ② ⑤ 每片**朝外**扩张：闭合相邻片之间的缝（朝外 = 减号，DirToCentroid 指向质心）。
 		if (RockShellCellExpand > 0.0f)
 		{
-			const float2 Centroid = RockShellCentroids[Vert[i].CellId];
-			const float Fade = saturate(length(PatternXY - Centroid) / max(RockShellCellRadiusCm, 1e-3f));
-			PatternXY -= Vert[i].DirToCentroid * RockShellCellExpand * Fade;
+			XY -= Vert[i].DirToCentroid * RockShellCellExpand * Fade;
 		}
-
-		// 裙圈倾斜（用户方案 2026-08-31）：**只推底圈**，顶圈与盖一动不动 ⇒ 盖的形状、缝的
-		// 顶宽都不变，改的只是裙墙的倾角 —— 竖直裸墙变外撇斜壁。相邻胞腔的底圈各自越过
-		// Voronoi 边界钻到对方裙下，两片斜壁在 V 槽中段**互相交叉**，缝隙从机制上封死
-		// （原来的黑槽 = 相邻盖浮高不同时暴露的竖直墙间隙，斜壁交叉后没有任何视线能进到槽底）。
-		// 不乘半径淡入：底圈天然在胞腔边界上（|P − 质心| ≈ 胞腔半径），不存在
-		// CellJitter/CellExpand 那种"内部点被推过质心翻转三角"的风险。
+		// 裙圈倾斜：**只推底圈** ⇒ 竖直裸墙变外撇斜壁，相邻两片在 V 槽中段交叉，缝从机制上封死。
 		if (!Vert[i].bIsTopRim && RockShellSkirtTilt > 0.0f)
 		{
-			PatternXY -= Vert[i].DirToCentroid * RockShellSkirtTilt;
+			XY -= Vert[i].DirToCentroid * RockShellSkirtTilt;
 		}
 
-		const float2 XY = CSRockShell_ToWorld(PatternXY);
 		const float2 G = CSRockShell_GradientXY(XY);
-
-		// 坡度 / 岩石 mask / 道路权重 / 地形法线在这里**一次算齐**：⑧ 的末端门、基准偏移、
-		// 厚度的 mask、表面起伏的幅度四处都要用同一份，各算各的迟早分叉（而分叉不会报错，
-		// 只会让边缘那一圈在两个判据之间抖）。
 		const float  Slope = length(G);
 		const float  Rock  = CSRockShell_RockMask(G);
+		const float  Mask  = CSRockShell_ShellMask(Rock);
 		const float  Road  = CSRockShell_SampleRoad(XY);   // 已含 RoadFade 与模糊，见第零趟
-		const float3 N     = CSRockShell_SafeNormal(float3(-G.x, -G.y, 1.0f));
+		// TG :574：单位切向量的叉积不再归一化。保留斜向陡坡对厚度、起伏和下沉的幅度衰减。
+		const float3 N     = float3(-G.x, -G.y, 1.0f) * rsqrt((1.0f + G.x * G.x) * (1.0f + G.y * G.y));
 
-		// ---------------------------------------------------------------------
-		// 「石头隆起」（用户规格 2026-08-31 的 ③④⑥⑧）
-		//
-		// 顺序是承重的：先把台顶外扩（⑥）拿到 RiseH，再乘倍数（③）、再叠噪波（④），
-		// 最后才用**真地面高度**做末端约束（⑧）。把 ⑧ 提前会让噪波在边缘重新把石头顶出去。
-		// ---------------------------------------------------------------------
-		const float GroundH = GroundShaperHeightAtXY(XY);                              // 真地面，⑧ 的尺子
-		const float RiseH = GroundShaperHeightAtXYExpanded(XY, RockShellRiseExtend);    // ⑥ 衰减更晚
-
-		float Rise = RiseH * RockShellRiseMultiplier;                                  // ③ 倍数
-
-		// ④ 噪波按隆起淡入：平地（RiseH ≈ 0）一点不加，否则整片地面都会起毛刺。
-		//    淡入用 RiseH 自己而不是 mask —— mask 在缓坡上本来就压得很低（见 ReliefFloor 那条），
-		//    拿它当权重会让噪波在最需要的地方消失。
+		// 「石头隆起」（用户规格 2026-08-31 的 ③④⑥⑧）——顺序承重：外扩 → 倍数 → 噪波 → 末端约束。
+		const float GroundH = GroundShaperHeightAtXY(XY);
+		// 高度可以为负（坑，2026-09-30）：坑里的壳不跟着隆起倍数往下沉 ⇒ 隆起只取正的部分。
+		const float RiseH = max(GroundShaperHeightAtXYExpanded(XY, RockShellRiseExtend), 0.0f);
+		float Rise = RiseH * RockShellRiseMultiplier;
 		if (RockShellRiseNoiseAmp > 0.0f)
 		{
-			const float Fade = saturate(RiseH / max(RockShellRiseExtend + 1.0f, 1.0f));
-			Rise += CSGSF_Turbulence(XY * RockShellRiseNoiseFreq, RockShellSeed + 7919u)
-				* RockShellRiseNoiseAmp * Fade;
+			const float RiseFade = saturate(RiseH / max(RockShellRiseExtend + 1.0f, 1.0f));
+			Rise += CSGSF_Turbulence(XY * RockShellRiseNoiseFreq, RockShellSeed + 7919u) * RockShellRiseNoiseAmp * RiseFade;
 		}
-
-		// ⑧ **末端边缘的隆起一定小于该点可采样的地面高度** —— 石头必须扎回地里，不许悬空。
-		//
-		// ⚠️ **权重不能取 (1 − RockMask)**（第一版就是这么写的，实测报红）：坡度 mask 在 band 的
-		// **两端**都掉到 0，而内侧那一端是台子的肩部 —— 那里地面还有六七百 cm 高，把石头压到
-		// 0.9 × 地面高等于**把它塞进台子里**，`RockShell.DrapesOnSlopes` 当场从 66 涨到 68.7 cm。
-		//
-		// ⚠️ **也不能取 `RiseH − GroundH`**（第二版，同样报红）：外扩把整条剖面往外推，
-		// 于是**整条裙边**上两者都差一大截，夹紧全程生效，把内圈压到地面以下 62 cm。
-		//
-		// 真正区分「内侧肩部」与「末端」的只有**绝对高度**：两端的坡度都掉到阈下，但内侧那端
-		// 地面还在台顶附近，外侧那端已经落回基底。所以门是两项相乘：
-		//   · `1 − RockMask`      —— band 正在终止（两端都成立）
-		//   · 地面高度已经落到峰值的一小截以下 —— 只有外侧那端成立
-		// 峰值取现成的 `MaxAbsHeight`（`CSGroundShaperField::PeakHeight` 的逐座最大值），
-		// 不为它新开调参量。
+		// ⑧ 末端边缘的隆起一定小于该点地面高度（石头扎回地里）：门 = 带正在终止 × 地面已落到峰值一小截以下。
 		const float LowGround = 1.0f - smoothstep(0.15f, 0.5f, GroundH / max(RockShellPeakHeight, 1.0f));
 		const float EdgeW = saturate(1.0f - Rock) * LowGround;
-		Rise = lerp(Rise, min(Rise, GroundH * RockShellEdgeCeiling), EdgeW);
+		Rise = lerp(Rise, min(Rise, max(GroundH, 0.0f) * RockShellEdgeCeiling), EdgeW);
 
-		// TG `displace_rocky_terrain.cs:563` 的**整体基准偏移**，沿世界 Z（TG 是世界 Y）：
-		//
-		//     mix(-0.4, 0.2, clamp((mask + rocky_terrain.z) - 10 * path, 0, 1))
-		//
-		// mask 满 ⇒ 整张壳离地浮起一截；mask 空、或路上 ⇒ 沉下去。**这是 TG「壳有体积」的
-		// 两个来源之一**，与 ③ 的隆起倍数正交：倍数是随台高线性长的无界量，本项是有界的常量
-		// 偏移，在平缓的小土台上照样给 —— 而缓坡正是倍数几乎给不出体积的地方。
-		//
-		// `rocky_terrain.z`（笔画自带的岩石度）本项目没有那条通道，其余逐项对应：我们的
-		// `Road` 已经乘过 `RoadFade`（= TG 的 10×，在第零趟模糊之前），所以 `Rock − Road`
-		// 就是那条 clamp 的对位物。
-		//
-		// ⚠️ **加在 ⑧ 之后**：⑧ 管的是"隆起不许把石头顶到地面以上"，而末端 `Rock → 0` 时本项
-		// 恰好是 −BaseSink（往地里扎），与 ⑧ 同向 —— 放在后面不会把刚夹好的末端又顶回去。
-		Rise += lerp(-RockShellBaseSink, RockShellBaseLift, saturate(Rock - Road));
+		// TG `:563` 的整体基准偏移（沿世界 Z）：mix(−0.4, 0.2, clamp(_440 + rocky.z − 10·path))。
+		// ⚠️ 权重是 **壳的 mask（_440）**，不是 Rock —— 见 CSRockShell_ShellMask 的注释。
+		Rise += lerp(-RockShellBaseSink, RockShellBaseLift, saturate(Mask - Road));
 
 		float3 Pos = float3(XY, RockShellGroundBaseZ + Rise);
 
-		// 3) 壳沿地形法线的**厚度**（TG ⑤ `displace:577`）+ 道路的连续下沉（不是隐藏）。
-		//
-		//    `cell_bby` **实测就是 `bIsTopRim`**（顶圈恒 1 / 底圈恒 0，零例外；按胞腔分组
-		//    只有 80/609 取值唯一 —— 它根本不是逐胞腔量）。`CSGroundShaper.md` 读作
-		//    「本胞腔沿法线凹还是凸」，被推翻。于是 TG 那行 `mix(-0.3, 0.1*mix(0,3,rand(cell)),
-		//    cell_bby)` 等于：**底圈沿法线沉一个 Relief，顶圈浮 0..Relief（逐胞腔随机）**
-		//    —— 给壳一个沿法线的厚度。这才是"块感"的来源，没有它披挂出来的只是一张
-		//    贴着地形的毯子；逐胞腔的随机浮高让相邻的盖互相错开，才读成一块块石头。
-		const float  Relief = Vert[i].bIsTopRim
-			? CSRockShell_CellRandom(Vert[i].CellId, 2u) * RockShellCellRelief
+		// 3) 厚度（TG `:577`）：mix(−0.3, 0.1·mix(0, 3, rand(cell)), cell_bby) × _440 × (1 − path) − N × path。
+		//    cell_bby 就是 bIsTopRim：底圈沉一个 Relief、顶圈浮 0..Relief（逐胞腔随机）—— 块感的来源。
+		const float Relief = Vert[i].bIsTopRim
+			? ShapeRandom * RockShellCellRelief
 			: -RockShellCellRelief;
-
-		// ⚠️ **厚度乘的是抬了下限的 mask，不是 Rock 本身**（2026-08-31 实测修正）。
-		// 原写法 `Relief * Rock` 在缓坡上几乎把厚度整个吃掉：Rock = smoothstep(0.75, 1.25, |∇h|)，
-		// 而演示土台最陡才 1.3125 ⇒ 只有极窄一圈能到 Rock≈1，大部分活胞腔 Rock 只有 0.1~0.5
-		// ⇒ 30 cm 的设定值实际只剩 3~15 cm，整张壳读成"开裂的平毯"而不是一块块石头。
-		// TG 那条 `displace:577` 是在真悬崖上跑的，那里 Rock 本来就≈1，所以照抄在缓坡上失真。
-		// 下限保成 lerp 而不是 max：max 会在 Rock == Floor 处留一个折角，缓坡上正好看得见。
-		const float ReliefMask = lerp(RockShellReliefFloor, 1.0f, Rock);
-
-		// 起伏、厚度都乘 (1 − Road) 连续淡出，整体再沿法线沉 RoadSink × Road。三件事合起来
-		// 就是 TG 的"石头慢慢埋进土里"；**判据里没有一处是把三角关掉**。
-		//
-		// ⚠️ TG 那边起伏是**硬门**（`displace:581` 的 `path_mask == 0.0` 才进分支），我们是连续
-		// 淡出。保连续是裁决五的同一条理由：硬门会让路边缘的三角一批批地突然变光滑。
-		const float Noise = CSRockShell_SurfaceBulge(XY, Slope, Rock, Vert[i].bIsCorner);
+		const float ReliefMask = lerp(RockShellReliefFloor, 1.0f, Mask);
+		const float Noise = CSRockShell_SurfaceBulge(RestXY, SlopeRest, Slope, RockRest, Vert[i].bIsCorner);
 		Pos += N * ((Relief * ReliefMask + Noise) * (1.0f - Road) - RockShellRoadSink * Road);
 
 		P[i] = Pos;
@@ -452,15 +726,9 @@ void DisplaceRockShellCS(uint3 Id : SV_DispatchThreadID)
 		RW_RockShellPositions[V * 3u + 2u] = Pos.z;
 	}
 
-	// 4) 面法线。⚠️ **2026-09-03 起它只是兜底**：第二趟 `AverageRockShellNormalsCS` 会按重合组
-	//    把它全平均掉（用户裁决，硬边整个交给材质逐像素画）。只有拓扑流缺席、或
-	//    `bRockShellSmoothNormals` 关掉时，留在切线流里的才是这一份硬边。
-	//    原型那步 `normal cuspangle=29.9` 与"按夹角阈值平均"的方案一起被放弃了。
-	//    绕序照 TG 的 `cross(v2−v0, v1−v0)`，但**符号由 CPU 侧实测**（`FPattern::bFlipWinding`）：
-	//    glTF 右手 Y-up → UE 左手 Z-up，导入器换轴时可能翻绕序，而 Docs 的「首次导入后必须
-	//    核对的四项」第 4 条明说这一项无法离线实测。猜错的症状是整张壳翻在里面（从上方完全
-	//    看不见），没有任何断言会红 —— 所以这里只翻**一处**，就是这个符号。
-	const float3 FaceN = CSRockShell_SafeNormal(cross(P[2] - P[0], P[1] - P[0])) * RockShellWindingSign;
+	// 4) 面法线（TG `:768` 的 cross(v2−v0, v1−v0)；模板俯视顺时针 ⇒ 朝外，不用翻号）。
+	//    `bRockShellSmoothNormals` 开时第二趟会把它按重合组平均掉。
+	const float3 FaceN = CSRockShell_SafeNormal(cross(P[2] - P[0], P[1] - P[0]));
 	const float3 Helper = (abs(FaceN.z) < 0.99f) ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f);
 	const float3 TanX = CSRockShell_SafeNormal(cross(Helper, FaceN));
 	const uint PackedTanX = CSRockShell_PackSnorm8888(float4(TanX, 0.0f));
@@ -474,24 +742,14 @@ void DisplaceRockShellCS(uint3 Id : SV_DispatchThreadID)
 }
 
 // =============================================================================
-// 第二趟：法线**全平均**（用户裁决 2026-09-03）。一线程一角。
-//
-// 第一趟写的是逐三角的面法线，盖面在缓坡上被地形弯出来的起伏于是全部读成刻面。这一趟按
-// **静止姿态的重合组**把入射三角的面法线加权平均掉，硬边整个交给材质逐像素去画
-// （Docs/TinyGlade/CSRockShellEdgeBevel.md 的假倒角）。
-//
-// ⚠️ 没有夹角阈值，这是裁决的一部分：有阈值就得烘逐边邻接再比较角度，而"哪些角重合"这一份
-// 逐角的组表已经够。组不跨胞腔（相邻胞腔实测一个顶点都不共享）⇒ 石头之间照旧硬边，白拿的。
-//
-// ⚠️ 必须跑在披挂之后：读的是第一趟刚写出来的位置。定序由 RDG 靠 Positions 的 UAV→SRV
-// 转换自己排，C++ 侧不插手工 barrier。
+// ⑥ 平均法线（可选，`bRockShellSmoothNormals`）：一线程一角，按模板的重合组面积加权平均。
+// 重合组 = 同一个模板顶点（槽内），所以石头与石头之间天然是硬边（没有跨胞腔的组）。
 // =============================================================================
 
-Buffer<float> RockShellPositionsRO;   // 第一趟写出来的位置，3 / 顶点
-Buffer<uint>  RockShellIncidentRange; // 2 / 顶点：本角重合组在下表里的 (偏移, 数量)
-Buffer<uint>  RockShellIncidentTris;  // 展平的入射三角序号，按组连续
-uint          RockShellVertexCount;
-
+Buffer<float>          RockShellPositionsRO;           // ⑤ 写出来的位置，3 / 顶点
+StructuredBuffer<uint> RockShellTemplateIncidentRange; // 2 / 模板角：(偏移, 数量)
+StructuredBuffer<uint> RockShellTemplateIncidentTris;  // 展平的局部三角号
+float                  RockShellSmoothCosThreshold;
 
 float3 CSRockShell_TriPos(uint Tri, uint Corner)
 {
@@ -499,66 +757,44 @@ float3 CSRockShell_TriPos(uint Tri, uint Corner)
 	return float3(RockShellPositionsRO[B + 0u], RockShellPositionsRO[B + 1u], RockShellPositionsRO[B + 2u]);
 }
 
-/** 绕序符号与第一/第二趟同一份实测值（FPattern::bFlipWinding），三处必须一致。 */
 float3 CSRockShell_TriFaceNormal(uint Tri)
 {
 	const float3 P0 = CSRockShell_TriPos(Tri, 0u);
 	const float3 P1 = CSRockShell_TriPos(Tri, 1u);
 	const float3 P2 = CSRockShell_TriPos(Tri, 2u);
-	return CSRockShell_SafeNormal(cross(P2 - P0, P1 - P0)) * RockShellWindingSign;
+	return CSRockShell_SafeNormal(cross(P2 - P0, P1 - P0));
 }
-
-/**
- * 平滑判据：`dot(邻接三角面法线, 本三角面法线) >= 这个值` 才参与平均。
- * = cos(夹角阈值)。1 ⇒ 只认自己（等价于面法线）；-1 ⇒ 全平均（2026-09-03 到 09-04 的行为）。
- */
-float         RockShellSmoothCosThreshold;
 
 [numthreads(THREADGROUPSIZE_X, 1, 1)]
 void AverageRockShellNormalsCS(uint3 Id : SV_DispatchThreadID)
 {
-	const uint V = Id.x;
-	if (V >= RockShellVertexCount) return;
+	const uint TrisPerCell = RockShellBoundaryPoints * 5u;
+	const uint VertsPerCell = TrisPerCell * 3u;
+	const uint Job = Id.x / VertsPerCell;
+	if (Job >= RockShellJobCount) return;
+	const uint LocalV = Id.x - Job * VertsPerCell;
+	const uint TriBase = RockShellJobs[Job] * TrisPerCell;
+	const uint V = TriBase * 3u + LocalV;
 
-	// 本角所属三角的面法线。⚠️ 比较**不加**绕序号：两边一起翻，点积不变。
+	const uint OwnTri = TriBase + LocalV / 3u;
 	const float3 NSelf = CSRockShell_SafeNormal(cross(
-		CSRockShell_TriPos(V / 3u, 2u) - CSRockShell_TriPos(V / 3u, 0u),
-		CSRockShell_TriPos(V / 3u, 1u) - CSRockShell_TriPos(V / 3u, 0u)));
+		CSRockShell_TriPos(OwnTri, 2u) - CSRockShell_TriPos(OwnTri, 0u),
+		CSRockShell_TriPos(OwnTri, 1u) - CSRockShell_TriPos(OwnTri, 0u)));
 
-	const uint Offset = RockShellIncidentRange[V * 2u + 0u];
-	const uint Count  = RockShellIncidentRange[V * 2u + 1u];
-
+	const uint Offset = RockShellTemplateIncidentRange[LocalV * 2u + 0u];
+	const uint Count  = RockShellTemplateIncidentRange[LocalV * 2u + 1u];
 	float3 Sum = float3(0.0f, 0.0f, 0.0f);
 	for (uint i = 0u; i < Count; ++i)
 	{
-		const uint Tri = RockShellIncidentTris[Offset + i];
-		const uint B = Tri * 9u;
-		const float3 P0 = float3(RockShellPositionsRO[B + 0u], RockShellPositionsRO[B + 1u], RockShellPositionsRO[B + 2u]);
-
-		// **死三角必须跳过**：被关掉的三角在第 0 个顶点的 x 上躺着一个 NaN，加进来会让整组
-		// 法线变 NaN，而 NaN 顺着切线流出去的症状是一片黑，跟"关掉三角"完全不像。
-		// 判据写成有限性比较而不是 isnan()：NaN 与任何数比较都返回 false，所以这条即使在
-		// 快速数学下也成立，而 isnan() 会被优化掉。
+		const uint T = TriBase + RockShellTemplateIncidentTris[Offset + i];
+		const float3 P0 = CSRockShell_TriPos(T, 0u);
+		// 死三角必须跳过：第 0 个顶点的 x 上躺着 NaN。有限性比较在快速数学下也成立，isnan() 会被优化掉。
 		if (!(abs(P0.x) < 1.0e30f)) continue;
-
-		const float3 P1 = float3(RockShellPositionsRO[B + 3u], RockShellPositionsRO[B + 4u], RockShellPositionsRO[B + 5u]);
-		const float3 P2 = float3(RockShellPositionsRO[B + 6u], RockShellPositionsRO[B + 7u], RockShellPositionsRO[B + 8u]);
-
-		const float3 C = cross(P2 - P0, P1 - P0);
-		// **夹角阈值**（2026-09-04 用户裁决，推翻 09-03 的「全平均」）：超过阈值的邻接面不参与，
-		// 于是折痕两侧各自成组、几何这一层重新表达硬边，而盖面内部被地形弯出的缓起伏照旧平滑。
-		// ⚠️ 当初否掉阈值的理由是「有阈值就得烘逐边邻接」—— 那条不成立：按**面法线夹角**判
-		// 只要逐角的重合组表，而这一趟本来就在读每个入射三角的位置。一行点积，零额外烘焙。
-		if (dot(CSRockShell_SafeNormal(C), NSelf) < RockShellSmoothCosThreshold) continue;
-
-		// **不归一化**：叉积的长度就是两倍面积 ⇒ 直接求和即面积加权平均。先归一再平均会让
-		// 密集的小三角与大三角说话一样响，盖面上那批细碎三角会把法线拽偏。
-		Sum += C;
+		const float3 C = cross(CSRockShell_TriPos(T, 2u) - P0, CSRockShell_TriPos(T, 1u) - P0);
+		if (dot(CSRockShell_SafeNormal(C), NSelf) < RockShellSmoothCosThreshold) continue;   // 夹角阈值（2026-09-04 裁决）
+		Sum += C;   // 不归一化：长度 = 两倍面积 ⇒ 面积加权
 	}
-
-	// 绕序符号与第一趟同一份实测值（FPattern::bFlipWinding），两处必须一致，
-	// 否则平均出来的法线整体翻向里面，表现是壳从上方看全黑。
-	const float3 N = CSRockShell_SafeNormal(Sum) * RockShellWindingSign;
+	const float3 N = CSRockShell_SafeNormal(Sum);
 	const float3 Helper = (abs(N.z) < 0.99f) ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f);
 	const float3 TanX = CSRockShell_SafeNormal(cross(Helper, N));
 	RW_RockShellTangents[V * 2u + 0u] = CSRockShell_PackSnorm8888(float4(TanX, 0.0f));
@@ -566,40 +802,21 @@ void AverageRockShellNormalsCS(uint3 Id : SV_DispatchThreadID)
 }
 
 // =============================================================================
-// 第三趟：假倒角 v3 的逐像素载荷。一线程一三角，写 UV1..UV5。
-// 通道字典在 CSGroundRockShell.h 的 namespace TexCoord，设计在
-// Docs/TinyGlade/CSRockShellEdgeBevel.md 的「v3 规划」。
-//
-// 装两样东西：
-//  ① 三条边的**垂距**，以 one-hot 的三角形高装（角 k 往槽 k 写 h[k]，另外两槽写 0）。
-//     到直线的距离是重心坐标的仿射函数 —— 它在对边两端点为 0、在角 k 处为 h[k]，所以插值
-//     出来的第 k 个分量恒等于 λ[k]·h[k]。光栅化插值是透视校正的 ⇒ 这是**世界口径的精确垂距**，
-//     不是近似。材质端一个 min 就选出最近边，且那个下标可以直接拿去查邻面法线。
-//     ⚠️ 给的是到**直线**的距离；TG 取的是线段距离（原版 ps_main:152 有 clamp(t,0,1)）。
-//     钝角三角形上垂足会落到线段外，差异只在距顶点一个 band 之内。
-//  ② 三个邻面的**面法线**（八面体编码；逐三角常量 ⇒ 三个角写同一份，插值出来逐位不变）。
-//     轮廓边（Neighbours = -1）写**自身**面法线 ⇒ 材质那次 lerp 退化成恒等。等价于 TG
-//     「混向零向量再归一 = 不变」的结果，但少一次归一化、也不依赖越界读返回 0
-//     （原版 `triangles[uint(-1)]` 是实打实的越界读，靠 robustBufferAccess 兜着）。
-//
-// ⚠️ **必须跑在披挂之后**：垂距与邻面法线都随每趟披挂变（盖裙夹角随坡度在 37°~51° 之间跑），
-//    烘死的那两样到运行时都是错的 —— v1 的 15°~25° 系统性误差正是栽在这。定序同第二趟，
-//    靠 Positions 的 UAV→SRV 转换由 RDG 自己排，C++ 侧不插手工 barrier。
+// ⑦ 假倒角 v3 的逐像素载荷（通道字典在 CSGroundRockShell.h 的 namespace TexCoord，设计在
+// Docs/TinyGlade/RockShell_EdgeBevel.md）。一线程一三角，写 UV1..UV6：
+//  ① 三条边的垂距，one-hot 的三角形高（插值出来第 k 个分量恒等于 λ[k]·h[k] = 到对边的精确垂距）；
+//  ② 三个邻面 + 自身的面法线（八面体编码，逐三角常量）。
+// 邻接查模板常量表：`B[k]–B[n]` 那条底边在石头外轮廓上 ⇒ −1 ⇒ 高顶到极大、邻面写自身（不倒角）。
 // =============================================================================
 
-Buffer<int>     RockShellNeighbours;      // 3 / 三角：越过「对着角 k 的边」的三角序号，-1 = 轮廓边
-RWBuffer<float> RW_RockShellTexCoords;    // RockShellTexCoordStride / 顶点（交错，每组 2 个 float）
-uint            RockShellTexCoordStride;  // = TexCoord::NumSets * 2，必须与流的 ElementsPerUnit 一致
-uint            RockShellPayloadTriCount;
+StructuredBuffer<int> RockShellTemplateNeighbours;   // 3 / 模板三角：越过「对着角 k 的边」的局部三角，−1 = 外轮廓
 
-/** 单位向量 → 八面体参数化的 [-1,1]^2。float32 下这一步的误差远小于观感阈值。 */
 float2 CSRockShell_OctEncode(float3 N)
 {
 	N /= max(abs(N.x) + abs(N.y) + abs(N.z), 1e-8f);
 	float2 E = N.xy;
 	if (N.z < 0.0f)
 	{
-		// 下半球折到外圈。符号逐分量取，写成 float2 三元式在部分编译器上会退化成标量。
 		const float2 S = float2(E.x >= 0.0f ? 1.0f : -1.0f, E.y >= 0.0f ? 1.0f : -1.0f);
 		E = (1.0f - abs(float2(E.y, E.x))) * S;
 	}
@@ -609,50 +826,41 @@ float2 CSRockShell_OctEncode(float3 N)
 [numthreads(THREADGROUPSIZE_X, 1, 1)]
 void RockShellBevelPayloadCS(uint3 Id : SV_DispatchThreadID)
 {
-	const uint T = Id.x;
-	if (T >= RockShellPayloadTriCount) return;
-	// 布局漂了就整趟不写：偏移 2..13 是按 TexCoord::NumSets = 7 写死的，stride 小于 14 时
-	// 继续写会踩进下一个顶点的槽位 —— 那种错位在出图上像「随机几块石头满脸倒角」，极难往回追。
+	const uint TrisPerCell = RockShellBoundaryPoints * 5u;
+	const uint Job = Id.x / TrisPerCell;
+	if (Job >= RockShellJobCount) return;
+	// 布局漂了就整趟不写：偏移 2..13 是按 TexCoord::NumSets = 7 写死的。
 	if (RockShellTexCoordStride < 14u) return;
+	const uint LocalTri = Id.x - Job * TrisPerCell;
+	const uint TriBase = RockShellJobs[Job] * TrisPerCell;
+	const uint T = TriBase + LocalTri;
 
 	float3 P[3];
 	[unroll] for (uint I = 0u; I < 3u; ++I) P[I] = CSRockShell_TriPos(T, I);
-
-	// 死三角（第一趟在角 0 的 x 上留了 NaN）：不参与绘制，写中性值即可 —— 但**不能不写**。
-	// 快照给的初值是全 0，而 0 在材质端读成「贴边」⇒ 一旦该三角复活就会满脸倒角。
-	// 判据写成有限性比较而非 isnan()：NaN 与任何数比较都是 false，快速数学下这条仍成立。
 	const bool bDead = !(abs(P[0].x) < 1.0e30f);
 
 	const float3 Cross2 = cross(P[2] - P[0], P[1] - P[0]);
-	const float  Area2 = length(Cross2);                       // 叉积长度 = 两倍面积
-	const float3 NSelf = CSRockShell_SafeNormal(Cross2) * RockShellWindingSign;
-
+	const float  Area2 = length(Cross2);
+	const float3 NSelf = CSRockShell_SafeNormal(Cross2);
 	const float2 NSelfOct = CSRockShell_OctEncode(NSelf);
 
 	float  H[3];
 	float2 Nbr[3];
 	[unroll] for (uint K = 0u; K < 3u; ++K)
 	{
-		// 对着角 K 的边 = (K+1, K+2)。h[K] = 2·面积 / |边|，与重心坐标配对给出精确垂距。
 		const float3 A = P[(K + 1u) % 3u];
 		const float3 B = P[(K + 2u) % 3u];
 		const float  L = length(B - A);
-		const int Nb = RockShellNeighbours[T * 3u + K];
-
-		// **轮廓边（Nb < 0）把「高」顶到极大**：d[K] = λ[K]·h[K] 于是几乎处处远大于 band，
-		// 材质那个 min 永远选不到它 —— 与 TG 用 d = -1 关掉这条边是同一个目的。
-		// 残留：正好落在该边上时 λ[K] = 0 ⇒ d = 0 仍会中选，但那是宽约 band/1e6 的亚像素细缝。
-		// 比 TG 干净的地方：TG 是**选完**最近边才发现没邻居、于是那一带整个不倒角，留下一道突兀
-		// 的接缝；这里最近边一开始就跳过轮廓边，倒角带在拐角处自然收口。
-		const bool bHasNbr = (Nb >= 0) && !bDead;
+		const int NbLocal = RockShellTemplateNeighbours[LocalTri * 3u + K];
+		const bool bHasNbr = (NbLocal >= 0) && !bDead;
 		H[K] = (bDead || L < 1e-6f) ? 0.0f : (bHasNbr ? (Area2 / L) : 1.0e6f);
-		Nbr[K] = CSRockShell_OctEncode(bHasNbr ? CSRockShell_TriFaceNormal(uint(Nb)) : NSelf);
+		Nbr[K] = CSRockShell_OctEncode(bHasNbr ? CSRockShell_TriFaceNormal(TriBase + uint(NbLocal)) : NSelf);
 	}
 
 	[unroll] for (uint C = 0u; C < 3u; ++C)
 	{
 		const uint Base = (T * 3u + C) * RockShellTexCoordStride;
-		// Base + 0/1 = UV0（世界 XY / UVWorldPeriod），CPU 在 BuildMesh 写死，这里不许碰。
+		// Base + 0/1 = UV0（世界 XY / UVWorldPeriod），由 ② 在分配槽时写死，这里不许碰。
 		RW_RockShellTexCoords[Base +  2u] = (C == 0u) ? H[0] : 0.0f;   // UV1.x = d0
 		RW_RockShellTexCoords[Base +  3u] = (C == 1u) ? H[1] : 0.0f;   // UV1.y = d1
 		RW_RockShellTexCoords[Base +  4u] = (C == 2u) ? H[2] : 0.0f;   // UV2.x = d2
@@ -663,92 +871,7 @@ void RockShellBevelPayloadCS(uint3 Id : SV_DispatchThreadID)
 		RW_RockShellTexCoords[Base +  9u] = Nbr[1].y;
 		RW_RockShellTexCoords[Base + 10u] = Nbr[2].x;                  // UV5 = oct(邻面 2)
 		RW_RockShellTexCoords[Base + 11u] = Nbr[2].y;
-		// UV6 = oct(**自身**面法线)。基础法线走全平均 ⇒ 材质拿到的是平滑法线，单靠它
-		// 画不出硬边；chamfer 小面的常数法线 = normalize(自身面法线 + 邻面法线)，必须有这一份。
-		RW_RockShellTexCoords[Base + 12u] = NSelfOct.x;
+		RW_RockShellTexCoords[Base + 12u] = NSelfOct.x;                // UV6 = oct(自身面法线)
 		RW_RockShellTexCoords[Base + 13u] = NSelfOct.y;
 	}
-}
-
-// =============================================================================
-// 第零趟：路足迹的可分离高斯（用户裁决 2026-09-11：路对壳的下压太激烈）。
-// 一线程一地面格点，X / Y 两趟，**跑在披挂之前**；披挂只采 Y 趟写出的 `RockShellRoadField`。
-//
-// 病根是增益放在了采样**之后**：旧写法 `saturate(双线性(R) × RoadFade)`，RoadFade = 10 ⇒ R 到 0.1
-// 壳就沉到底，而默认笔刷的边缘从 0 爬到 0.1 只要 ~30 cm —— RoadSink 加上基准偏移那 60 cm 的
-// 全部落差挤进不到一个三角里，出图就是一道道 V 形折痕。
-//
-// 修法是**先截足迹、再糊**：X 趟读色流 R、乘 RoadFade、截到 [0,1]，然后才模糊；披挂拿到结果
-// 直接用，不再乘任何增益。⚠️ 顺序是承重的 —— 反过来「先糊原始权重、再 ×10」的话，增益只取
-// 模糊场最底下那 10% 的尾巴，缓坡又被压回一刀（只是往路外挪了一截），半径几乎白给。
-// 现在的形状：足迹边缘处沉降权重 = 0.5，内外各按高斯累积分布走完，缓坡宽度由半径直接决定。
-//
-// TG 对照：path mask 也有一趟可分离高斯（`_gauss_blur_r16f.cs`：伸展 ceil(2σ)、逐抽头
-// exp(−k²/2σ²)），但岩壳是**糊完再** `smoothstep(0.1, 0.15)` 硬阈（`displace:425`）——
-// 路缘仍是一刀，只是往路外挪了约 1.2σ。这里有意反过来，理由即上一段。TG 的 σ 由 CPU 给，没查到值。
-//
-// 核：单侧 `RockShellBlurTaps` 格（= ceil(半径 / 格距)），σ = 半径 / 3，截在 3σ（边缘权重
-// exp(−4.5) ≈ 1.1%）。TG 截在 2σ（边缘 13.5%）：σ = 2 格时核够不着的地方会断出约 3% 的台阶，
-// 乘上米级的沉降就是一道 10 cm 的坎。
-// 出界的抽头**跳过并按剩下的权重归一**（同 TG `_gauss_blur_mask.cs`）：路一直画到地面边上时，
-// 边上那圈不会因为"界外当 0"被糊淡、让壳从路边冒出来。
-//
-// ⚠️ 两趟参数结构里的每一条都被 kernel 真读（`FComputeShaderUtils::AddPass` 会清掉没读的绑定、
-// 连带抹掉那条 RDG 依赖边，藤蔓 SC pass 就是这么挂过 GPU 的）。
-// =============================================================================
-
-Buffer<uint>    RockShellGroundColors;      // X 趟：地面常驻色流，packed BGRA / 顶点，V = Y * VertsX + X
-Buffer<float>   RockShellRoadBlurRO;        // Y 趟：X 趟的输出
-RWBuffer<float> RW_RockShellRoadBlur;       // 两趟各自的输出（绑的是两块不同的 buffer）
-float           RockShellRoadFade;          // X 趟：足迹增益（TG 的 10×），**在模糊之前**乘
-uint            RockShellBlurTaps;          // 单侧抽头数；0 = 不模糊（只截足迹）
-float           RockShellBlurInvTwoSigmaSq; // 1 / (2σ²)，σ 以**格**为单位；Taps = 0 时主机给 0
-
-#ifndef ROCKSHELL_BLUR_GROUP
-#define ROCKSHELL_BLUR_GROUP 8
-#endif
-
-/** 道路权重 = 色流的 R 通道（packed BGRA，同 CSMeshOps.usf 的 PackColorBGRA）。 */
-float CSRockShell_ReadRoad(uint X, uint Y)
-{
-	return float((RockShellGroundColors[Y * RockShellGroundVerts.x + X] >> 16u) & 0xFFu) / 255.0f;
-}
-
-[numthreads(ROCKSHELL_BLUR_GROUP, ROCKSHELL_BLUR_GROUP, 1)]
-void BlurRockShellRoadXCS(uint3 Id : SV_DispatchThreadID)
-{
-	if (Id.x >= RockShellGroundVerts.x || Id.y >= RockShellGroundVerts.y) return;
-
-	const int Taps = int(RockShellBlurTaps);
-	float Sum = 0.0f;
-	float WeightSum = 0.0f;
-	for (int K = -Taps; K <= Taps; ++K)
-	{
-		const int X = int(Id.x) + K;
-		if (X < 0 || X >= int(RockShellGroundVerts.x)) continue;
-		const float W = exp(-float(K * K) * RockShellBlurInvTwoSigmaSq);
-		Sum += saturate(CSRockShell_ReadRoad(uint(X), Id.y) * RockShellRoadFade) * W;
-		WeightSum += W;
-	}
-	// K = 0 永远在界内且权重为 1 ⇒ WeightSum ≥ 1，max 只是写给读代码的人看的。
-	RW_RockShellRoadBlur[Id.y * RockShellGroundVerts.x + Id.x] = Sum / max(WeightSum, 1e-6f);
-}
-
-[numthreads(ROCKSHELL_BLUR_GROUP, ROCKSHELL_BLUR_GROUP, 1)]
-void BlurRockShellRoadYCS(uint3 Id : SV_DispatchThreadID)
-{
-	if (Id.x >= RockShellGroundVerts.x || Id.y >= RockShellGroundVerts.y) return;
-
-	const int Taps = int(RockShellBlurTaps);
-	float Sum = 0.0f;
-	float WeightSum = 0.0f;
-	for (int K = -Taps; K <= Taps; ++K)
-	{
-		const int Y = int(Id.y) + K;
-		if (Y < 0 || Y >= int(RockShellGroundVerts.y)) continue;
-		const float W = exp(-float(K * K) * RockShellBlurInvTwoSigmaSq);
-		Sum += RockShellRoadBlurRO[uint(Y) * RockShellGroundVerts.x + Id.x] * W;
-		WeightSum += W;
-	}
-	RW_RockShellRoadBlur[Id.y * RockShellGroundVerts.x + Id.x] = Sum / max(WeightSum, 1e-6f);
 }

@@ -649,7 +649,7 @@ int64 FCSMeshResident::GetRequiredBytes(uint32 InVertexCapacity, uint32 InIndexC
 // FCSMeshEditContext
 // -----------------------------------------------------------------------------
 
-FCSMeshEditContext::FCSMeshEditContext(FRDGBuilder& InGraphBuilder, FCSMeshResident& InResident, EKind InKind)
+FCSMeshEditContext::FCSMeshEditContext(FRDGBuilder& InGraphBuilder, FCSMeshResident& InResident, EKind InKind, uint64 InStreamMask)
 	: GraphBuilder(InGraphBuilder)
 	, Resident(InResident)
 	, Kind(InKind)
@@ -661,9 +661,12 @@ FCSMeshEditContext::FCSMeshEditContext(FRDGBuilder& InGraphBuilder, FCSMeshResid
 	check(Kind != EKind::BorrowedGraph || IsInParallelRenderingThread());
 
 	StreamBuffers.Reserve(Resident.Streams.Num());
-	for (const FCSMeshResident::FStream& Stream : Resident.Streams)
+	for (int32 StreamIndex = 0; StreamIndex < Resident.Streams.Num(); ++StreamIndex)
 	{
-		StreamBuffers.Add(Stream.Pooled.IsValid()
+		const FCSMeshResident::FStream& Stream = Resident.Streams[StreamIndex];
+		// 掩码之外的流这次编辑不碰：不登记，留在它平时的访问状态上（见构造函数声明处的注释）。
+		const bool bWanted = StreamIndex >= 64 || (InStreamMask & (1ull << StreamIndex)) != 0;
+		StreamBuffers.Add(bWanted && Stream.Pooled.IsValid()
 			? GraphBuilder.RegisterExternalBuffer(Stream.Pooled, Stream.Desc.DebugName)
 			: nullptr);
 	}
@@ -796,8 +799,8 @@ void FCSMeshEditContext::KeepAliveResource(const FShaderResourceViewRHIRef& View
 // FCSMeshRenderThreadEdit
 // -----------------------------------------------------------------------------
 
-FCSMeshRenderThreadEdit::FCSMeshRenderThreadEdit(FRDGBuilder& InGraphBuilder, FCSMeshResident& InResident)
-	: Context(InGraphBuilder, InResident, FCSMeshEditContext::EKind::BorrowedGraph)
+FCSMeshRenderThreadEdit::FCSMeshRenderThreadEdit(FRDGBuilder& InGraphBuilder, FCSMeshResident& InResident, uint64 InStreamMask)
+	: Context(InGraphBuilder, InResident, FCSMeshEditContext::EKind::BorrowedGraph, InStreamMask)
 {
 }
 

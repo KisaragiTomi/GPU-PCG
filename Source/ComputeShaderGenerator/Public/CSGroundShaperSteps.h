@@ -272,6 +272,15 @@ struct FHandoverOptions
 	 * 某个"没变"的判据其实每次都在变，而那正是交互期掉帧的来源。
 	 */
 	const TCHAR* LogLabel = nullptr;
+	/**
+	 * 这一批源承诺"改了就通知"（FCSGpuInstanceSourceGPU::bNotifiesChanges）：交出去的源带上这面旗子，
+	 * 而判定"不用重新交接"的那些源在这里补一次 `NotifyInstanceSourceChanged()` —— 生产者每次重散 / 重打包之后
+	 * 都会走到这个函数，所以"调了交接 = 刚改过 buffer"。换来的是 Nanite 路不再每帧重写 GPU-Scene。
+	 *
+	 * ⚠️ 只有**每一条改写 buffer 的路径后面都跟着这个函数**的生产者才能开。有哪条路径改了 buffer 却不来这里，
+	 * Nanite 路的画面就停在上一次的样子，不报错。开之前把那一族所有写这批 buffer 的地方数一遍。
+	 */
+	bool bNotifiesChanges = false;
 };
 
 /**

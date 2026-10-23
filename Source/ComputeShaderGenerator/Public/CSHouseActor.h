@@ -25,6 +25,7 @@ class ACSHouseFeatureMarker;
 class ACSHouseHandleActor;
 class ACSHouseHeightHandleActor;
 class ACSHouseResizeHandleActor;
+class ACSHouseRidgeHandleActor;
 class UCSGpuInstancedMeshComponent;
 class UCSMesh;
 class UCSMeshRenderComponent;
@@ -73,14 +74,49 @@ struct FCSDoorRunMemory
 	UPROPERTY() float S1 = 0.0f;
 };
 
+/**
+ * 一面**山墙**：`EdgeIndex` 号边的墙在墙顶之上继续升上去的那一片（2026-10-02，脊长 = 房长时两端的墙）。
+ * `Profile` 的每个点是 (沿边弧长 S, 比墙顶高出多少 cm)，按 S 升序 —— 由屋面求值器沿墙线取
+ * （`CSHouseRoof_BuildGableProfile` × tan(pitch)），房体这边只管照着砌，不认识屋顶。
+ */
+struct FCSHouseGableWall
+{
+	int32 EdgeIndex = INDEX_NONE;
+	TArray<FVector2D> Profile;
+	/**
+	 * 灰泥墙板比 `Profile` 低多少 cm 就停。0 = 墙板一直做到 `Profile`。
+	 * 阶梯山墙的上沿那一圈由砖砌出来时（`ACSHouseActor::HasSteppedGableBricks`）是 `CSHouseRoof_SteppedGableRise`：
+	 * 墙板只做到屋面线，`Profile` 仍是砖与角石砌到的那条墙顶线（TG 的灰泥也只抹到「墙顶线 − 0.46 m」）。
+	 */
+	float PlasterDrop = 0.0f;
+};
+
+/** 矩形房子的屋脊在局部 XY 里的摆法（`ACSHouseActor::GetRoofRidgeFrame`）。脊长抓手、换向、报脊长都读这一份。 */
+struct FCSHouseRidgeFrame
+{
+	/** 脊平行于几号边（0 / 1），即 `CSHouseRoof_ApplyRidge` 的 `RidgeAxis`。 */
+	int32 Axis = 0;
+	/** 脊的方向（单位，局部 XY）= 那条边的走向。 */
+	FVector2D Direction = FVector2D(1.0, 0.0);
+	/** 脊的中点（局部 XY）= 矩形中心。 */
+	FVector2D Centre = FVector2D::ZeroVector;
+	/** 顺脊 / 垂直于脊的边长 cm。 */
+	double Along = 0.0;
+	double Across = 0.0;
+	/** 现在的脊长 cm（一个尖记 0）。 */
+	double Length = 0.0;
+};
+
 struct FCSHouseBodyDesc
 {
 	/** 底面轮廓（闭合折线，局部空间）。墙板数 = 边数，`CSHouse_BuildBodySoup` 不再假定 4。 */
 	FCSHouseFootprint Footprint = FCSHouseFootprint::MakeRect(FVector2D(600.0, 400.0));
 
 	float WallThickness = 24.0f;
-	/** 墙顶高。四坡屋顶下四面墙顶都平在这个高度上（= 屋面求值器的 EaveZ）。 */
+	/** 墙顶高（= 屋面求值器的 EaveZ）。有坡面的边墙顶都平在这个高度上；山墙边从这里继续往上，见 `Gables`。 */
 	float WallHeight = 300.0f;
+	/** 山墙（空 = 没有，四坡 / 露台都是空的）。 */
+	TArray<FCSHouseGableWall> Gables;
 	/** 相邻洞之间保留的墩宽 cm。 */
 	float PierWidth = 40.0f;
 
@@ -118,8 +154,9 @@ enum class ECSHousePart : uint8
 {
 	Wall = 0,
 	Roof = 1,
-	// 2 号空着：原为山墙，四坡屋顶没有这个构件（2026-08-31）。别顺手占用 ——
+	// 2 号空着：原为双坡时代的山墙棱柱（2026-08-31 随四坡删除）。别顺手占用 ——
 	// 这张表是 P2 冻结的字典，已烘进 StaticMesh 的旧网格里可能还留着 2。
+	// 2026-10-02 回来的山墙**是墙**（`Wall`，同一张墙材质、同一套 UV），不占这个号。
 	/** 门框砖：沿洞缘曲线铺的离散块，负责填满 clip 留下的厚度断口（不是扫掠面）。 */
 	Frame = 3,
 	Pillar = 4,
@@ -300,9 +337,37 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House")
 	bool bBottomFace = true;
 
-	/** 四坡屋顶坡度（度）；屋顶把手反算此值，低起伏自动切换为露台。 */
+	/** 屋顶主坡面（平行于脊的那两面）的坡度（度）；屋顶把手反算此值，低起伏自动切换为露台。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House", meta = (ClampMin = "0.0", ClampMax = "70.0"))
 	float RoofPitch = 35.0f;
+
+	/**
+	 * 脊长参数（TG `RoofShapeParams::ridge_length_01`，2026-10-02）：脊长 = 0.1 m + r·(顺脊边长 − 0.1 m)。
+	 *
+	 *  · **`< 0` = 自动**（默认，旧存档都是它）：等坡度四坡，脊长 = 长边 − 短边、脊沿长轴 —— 2026-08-31 以来的形态，一个 bit 都不变。
+	 *  · `0` = 四个坡面收成一个尖；`0..1` = 四坡，两端坡面的坡度随脊长变（比两侧陡或缓）。
+	 *  · **`1` = 脊与房子一样长 ⇒ 双坡**：两端的坡面消失，那两面墙升成三角形山墙（TG `Roof::is_gable`：参数恰好等于 1）。
+	 *
+	 * 只对矩形 footprint 生效（TG 同）；异形房子恒走自动。进拉尺寸模式拖脊端的箭头就是在改它（`PushRidgeLength`）。
+	 * 存的是比例不是厘米：拉房子尺寸时脊跟着房子等比伸缩，山墙拉长了还是山墙。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof", meta = (ClampMin = "-1.0", ClampMax = "1.0"))
+	float RoofRidgeLength01 = -1.0f;
+
+	/**
+	 * 脊向（TG `RoofRidgeDirection`）：脊平行于局部 X 还是 Y。**只在脊长不是自动时读** —— 自动时脊恒沿长轴。
+	 * 存下来是为了不翻轴：山墙房子拉过正方形时脊不许自己转 90°（TG 同，换向只走 `SwitchRoofRidgeDirection`）。
+	 * 第一次拖脊长抓手时钉成当时的长轴。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof", meta = (EditCondition = "RoofRidgeLength01 >= 0.0"))
+	ECSRoofRidgeAxis RoofRidgeAxis = ECSRoofRidgeAxis::X;
+
+	/**
+	 * 山墙的做法（TG `GableRoofStyle`）。只在双坡（脊长参数 = 1）时生效。
+	 * 默认 `Stepped` = TG 给砖石 / 灰泥墙的那一种（屋面缩在山墙里、山墙高出屋面 46 cm）；TG 只有半木构墙才是 `Overhang`。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Roof")
+	ECSGableRoofStyle GableRoofStyle = ECSGableRoofStyle::Stepped;
 
 	/** 屋脊相对檐口低于此高度（cm）时，瓦片替换成石铺露台。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Flat Roof", meta = (ClampMin = "0.0"))
@@ -1085,6 +1150,18 @@ public:
 	bool bTrimBase = true;
 
 	/**
+	 * 阶梯山墙上沿的**露砖**（2026-10-02）。只在双坡 + `GableRoofStyle == Stepped` 时有东西可出。
+	 *
+	 * TG 的砖石山墙：灰泥只抹到屋面线，墙顶线以下那 46 cm 是露着的砖，每层只存在于「墙顶线 ≥ 这层中线」的那一段
+	 * ⇒ 山墙的斜边读成一级一级的台阶（`trim_rows` 14123EEF0；灰泥的上界见 `CSHouseBrickWall::BuildGableCourses`）。
+	 *  · 开（默认）：灰泥墙板只做到屋面线，上面那一圈由砖砌出来。
+	 *  · 关，或没有砖可用（`bTrimEnabled` / `bFrameEnabled` 关着、没配 `FrameBrickMesh`）：墙板自己升到墙顶线，是一条直的斜边。
+	 * 开了砖层（`bBrickWallEnabled`）时整面山墙本来就是砖砌的，这里不重复出。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS House|Trim")
+	bool bTrimGable = true;
+
+	/**
 	 * 压顶石课程中心相对**墙顶**的偏移 cm。
 	 *
 	 * 0 = 骑在墙顶（一半埋进墙、一半探出去）—— 这是水平压顶的口径，也是 TG 那种
@@ -1634,6 +1711,42 @@ public:
 	UFUNCTION(BlueprintPure, Category = "CS House|Roof")
 	bool IsFlatRoof() const;
 
+	/**
+	 * 改脊长（2026-10-02；TG `ui_edit_roof_ridge_length` → `inverse_ridge_01_param`）：脊长 += `Offset` cm，
+	 * 折回 `RoofRidgeLength01`（钳在 [0, 1]）后立刻重求值。返回**实际**生效的脊长变化 cm（记账用它，不用请求值）。
+	 *
+	 * 脊居中，两头一起伸缩；拖到与房子一样长时参数钳成恰好的 1 ⇒ 双坡 + 山墙，再往回拖又是四坡。
+	 * 自动（`RoofRidgeLength01 < 0`）的房子从它现在的脊长起步，第一次真动了才把脊长与脊向钉成显式。
+	 * 只对矩形 footprint 的坡屋顶生效：异形房子与露台恒返回 0。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "CS House|Roof")
+	float PushRidgeLength(float Offset, bool bFinished = false);
+
+	/** 当前屋脊长度 cm。矩形：自动 = 长边 − 短边，显式 = TG 的 `RoofRidgeDims`（不超过 10 cm 记 0 = 一个尖）；异形：骨架最高那段脊。 */
+	UFUNCTION(BlueprintPure, Category = "CS House|Roof")
+	float GetRoofRidgeLength() const;
+
+	/** 双坡吗（脊与房子一样长、两端是山墙）。露台恒 false。 */
+	UFUNCTION(BlueprintPure, Category = "CS House|Roof")
+	bool IsGableRoof() const;
+
+	/**
+	 * 把脊转 90°（TG `ui_edit_roof_ridge_dir` / `SwitchRoofRidgeDirCmd`）。脊长参数是比例，原样沿用。
+	 * 自动的房子先钉成显式再换。只对矩形 footprint 生效。
+	 */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CS House|Roof")
+	void SwitchRoofRidgeDirection();
+
+	/**
+	 * 把脊长与脊向设成 TG 新建矩形房子时的默认值：脊沿长边，参数取 `ridge_length_01_from_rectangle_ratio`
+	 * （长边 ≥ 7.5 m 且长宽比 ≥ 1.5 的房子直接就是双坡）。要回到本项目原来的等坡度四坡，把 `RoofRidgeLength01` 填回 −1。
+	 */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CS House|Roof")
+	void ResetRoofRidgeToTinyGladeDefault();
+
+	/** 脊长抓手读的那几个量：脊沿哪个方向、中心在哪、现在多长。不是矩形 footprint 时没有。 */
+	bool GetRoofRidgeFrame(FCSHouseRidgeFrame& Out) const;
+
 	/** 楼梯只读露台诉求输入。避免查询时兑现房屋更新而重入彼此的重建。 */
 	FCSStairsTerraceSite GetStairsTerraceSite() const;
 	static FCSHouseTerraceChanged OnTerraceChanged;
@@ -1643,6 +1756,10 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "CS House|Resize")
 	ACSHouseHeightHandleActor* GetRoofHandle() const;
+
+	/** 脊端的那只箭头（`End` 0 = 脊的起点那头，1 = 终点那头）；不在拉尺寸模式里返回 nullptr。 */
+	UFUNCTION(BlueprintPure, Category = "CS House|Resize")
+	ACSHouseRidgeHandleActor* GetRidgeHandle(int32 End) const;
 
 	/**
 	 * 改房底（与 `PushHeight` 对称的第三个自由度，用户裁决 2026-09-14「底动顶不动」）：
@@ -1676,17 +1793,19 @@ public:
 	static FCSHouseResizeModeChanged OnResizeModeChanged;
 
 	/**
-	 * 生成 N + 3 个抓手 actor：footprint 的每条边一个**推墙箭头**（水平推拉那面墙；N = `GetFootprint()`
+	 * 生成 N + 5 个抓手 actor：footprint 的每条边一个**推墙箭头**（水平推拉那面墙；N = `GetFootprint()`
 	 * 的边数，也就是**取完凸包之后**的边数；观感是 TG 原版 `flat_arrow` + 描边，2026-09-22），外加墙顶、房底、
 	 * 屋顶三个高度**矩形框**（`ACSHouseHeightHandleActor`，画的是包围盒）：檐口那个上下拖改墙高、房底那个上下拖改房底
-	 * （`PushBase`，底动顶不动），屋顶小框改起伏（`PushRoofHeight`）。选中任一个用编辑器原生 gizmo 拖即可。
+	 * （`PushBase`，底动顶不动），屋顶小框改起伏（`PushRoofHeight`）；以及脊两端各一只**脊长箭头**
+	 * （`ACSHouseRidgeHandleActor`，2026-10-02）：顺脊拖改脊长（`PushRidgeLength`），拖到与房子一样长就是双坡 + 山墙。
+	 * 选中任一个用编辑器原生 gizmo 拖即可。
 	 *
 	 * 这就是"点一个蓝图函数，冒出几个能拖的把手"的那个函数：`CallInEditor` 让它直接出现在
 	 * 房子详情面板上，`BlueprintCallable` 让蓝图 / Python 也能调。**幂等** —— 已经在模式里
 	 * 再调一次只把锥子数对齐边数、把抓手摆回规范位置，不会生出第二组。
 	 *
 	 * 在模式里改了边数（改 `FootprintShape`、撤销等）时，锥子在下一次重求值里按新边数对齐
-	 * （`SyncEdgeHandlesToFootprint`），三个高度框不重建。
+	 * （`SyncEdgeHandlesToFootprint`），三个高度框与两只脊长箭头不重建（脊长箭头在异形房子 / 露台上自己藏起来）。
 	 *
 	 * 抓手是 `RF_Transient` 的，不存盘、不进 outliner 的保存路径；房子被删或调
 	 * `ExitResizeMode()` 即销毁。
@@ -1942,6 +2061,16 @@ public:
 	UFUNCTION(BlueprintPure, Category = "CS House|Trim")
 	int32 GetTrimBaseRunCount() const { FlushPendingReevaluate(); return CurrentTrimBaseRunCount; }
 
+	/** 阶梯山墙上沿露砖的块数（含在 `GetTrimBrickCount()` 里）。不是阶梯山墙、关了 `bTrimGable` 或开了砖层时为 0。 */
+	UFUNCTION(BlueprintPure, Category = "CS House|Trim")
+	int32 GetTrimGableBrickCount() const { FlushPendingReevaluate(); return CurrentTrimGableBrickCount; }
+
+	/**
+	 * 阶梯山墙上沿那 46 cm 这一轮是不是由砖砌出来（露砖带，或砖层）。是 ⇒ 灰泥墙板只做到屋面线。
+	 * 只看配置，不看这一刻是不是双坡。
+	 */
+	bool HasSteppedGableBricks() const;
+
 	/**
 	 * 接缝画得出来吗（**执行面**判据，不是数值判据）。
 	 *
@@ -2175,10 +2304,16 @@ public:
 	UCSMesh* GetPillarMesh() const { return PillarMesh; }
 
 	/**
-	 * 当前屋面描述（四坡）。瓦 / 梁 / 尖顶 / 雪、摆件的檐口与屋脊锚点、以及 D8「落屋顶 →
+	 * 当前屋面描述（四坡 / 双坡 / 露台）。瓦 / 梁 / 尖顶 / 雪、摆件的檐口与屋脊锚点、山墙的上沿、以及 D8「落屋顶 →
 	 * 不生成」谓词全部从这一份组装 —— 屋面方程只有 CSHouseRoof.h 一个真源。
 	 */
 	FCSRoofDesc GetRoofDesc() const;
+
+	/**
+	 * 不判露台的那一份：`GetRoofDesc` 与「起伏有多高」（`GetRoofRise` ⇒ `IsFlatRoof`）都从它出。
+	 * 脊长参数在这里落成逐边坡度倍率 / 山墙边（`CSHouseRoof_ApplyRidge`）。
+	 */
+	FCSRoofDesc MakePitchedRoofDesc() const;
 
 	// -------------------------------------------------------------------------
 	// 判定纯函数（无 GPU、无 world 依赖 —— 直接进 CSHouseLogicTests）
@@ -2239,6 +2374,9 @@ private:
 
 	/** 生成一个高度框（檐口 / 房底），同上。竖直抓手将来再加一种也只是再调一次它。 */
 	ACSHouseHeightHandleActor* SpawnHeightHandle(ECSHouseHeightHandleSide Side);
+
+	/** 生成脊端的一只箭头（`End` 0 / 1），同上。 */
+	ACSHouseRidgeHandleActor* SpawnRidgeHandle(int32 End);
 
 	/**
 	 * 在拉尺寸模式里时，把锥子数对齐到 `GetFootprint().NumEdges()`（用户裁决 2026-09-14：
@@ -2369,6 +2507,8 @@ private:
 	FTransform GetBuildTransform() const;
 
 	void RebuildBodyMesh();
+	/** 这一刻的山墙（双坡时两面，其余为空）：上沿从屋面求值器沿墙线取。`RebuildBodyMesh` 喂给房体三角汤。 */
+	void BuildGableWalls(TArray<FCSHouseGableWall>& Out) const;
 	void RebuildPillarMesh(const TArray<FVector>& Centers, const TArray<float>& Lengths);
 
 	/**
@@ -2655,6 +2795,7 @@ private:
 	int32 CurrentTrimTopRunCount = 0;
 	int32 CurrentTrimBaseRunCount = 0;
 	int32 CurrentTrimBrickCount = 0;
+	int32 CurrentTrimGableBrickCount = 0;
 	int32 CurrentBrickWallBrickCount = 0;
 	int32 CurrentBrickWallCourseCount = 0;
 

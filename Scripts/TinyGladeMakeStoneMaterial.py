@@ -11,7 +11,7 @@
      有天光之后它也只是"均匀的灰"，读不出石头。
 
 对位 TG：它的 AO 被硬夹在 `mix(0.6, 1.0, ao)`，**阴影区永远压不黑** —— 那种"柔和"有一大半
-来自这条，不是来自资产（见 `Docs/TinyGlade/TinyGlade_模块对照与进度.md（卷四）`）。SkyLight 是 UE 侧最接近的一手。
+来自这条，不是来自资产（见 `Docs/TinyGlade/Progress_ModuleComparison.md（卷四）`）。SkyLight 是 UE 侧最接近的一手。
 
 ⚠️ **TG 的 stone_floor 系列没有 albedo 贴图**（只有 normal / roughness / height / seed）：
 它的石头颜色来自调色板，细节来自法线与粗糙度。所以这里也是常数底色 + 法线/粗糙度贴图，

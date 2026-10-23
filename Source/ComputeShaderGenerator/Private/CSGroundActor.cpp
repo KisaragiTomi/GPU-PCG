@@ -3,6 +3,7 @@
 
 #include "CSGpuInstancedMeshComponent.h"
 #include "CSGpuMeshTypes.h"
+#include "CSGroundRoadField.h"   // 地面遮罩：色流 R → 平滑 + 延伸，写进 GroundMask
 #include "CSGroundRockShell.h"
 #include "CSGroundShaperActor.h"
 #include "CSGroundShaperField.h"
@@ -10,7 +11,9 @@
 #include "CSMesh.h"
 #include "CSMeshRenderComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/TextureRenderTarget2D.h"   // 地面遮罩贴图
 #include "EngineUtils.h"
+#include "TextureResource.h"                 // 地面遮罩的诊断回读（FTextureRenderTargetResource）
 #include "Materials/Material.h"          // bUsedWithInstancedStaticMeshes —— 三条"静默换材质"里的一条
 #include "Materials/MaterialInstanceDynamic.h"   // 岩壳绘制材质：RockShellMaterial 的子实例，带 RockShellPatternScale
 #include "Materials/MaterialInterface.h"
@@ -118,6 +121,10 @@ FVector2D ACSGroundActor::ResolveCoverViewXY() const
 void ACSGroundActor::SetGroundCoverViewOverride(FVector WorldLocation)
 {
 	CoverViewOverride = FVector2D(WorldLocation.X, WorldLocation.Y);
+	CoverViewOverrideLocation = WorldLocation;
+	// Nanite 路的距离带也按这个机位判（场景捕获不往世界的视点表里填，替身自己找不到相机）。
+	// 组件重建时 EnsureCoverComponents 会再推一次；这里先推给现有的，窗口哈希没变、不重撒时也生效。
+	for (UCSGpuInstancedMeshComponent* Component : CoverComponents) if (IsValid(Component)) Component->SetDistanceCullViewOverride(WorldLocation);
 #if WITH_EDITOR
 	RebuildGroundCover();
 #endif
@@ -127,6 +134,7 @@ void ACSGroundActor::ClearGroundCoverViewOverride()
 {
 	if (!CoverViewOverride.IsSet()) return;
 	CoverViewOverride.Reset();
+	for (UCSGpuInstancedMeshComponent* Component : CoverComponents) if (IsValid(Component)) Component->ClearDistanceCullViewOverride();
 #if WITH_EDITOR
 	RebuildGroundCover();
 #endif
@@ -345,6 +353,12 @@ void ACSGroundActor::RebuildGroundMesh()
 
 	const TArray<TObjectPtr<UMaterialInterface>> Materials = { GroundMaterial };
 	if (!UploadTinyGladeSnapshot(Snapshot, Materials)) return;
+	// 地面遮罩：常驻流整份换了（色流在里面），遮罩必须重算；格子尺寸 / UV 周期可能也变了，材质的动态实例
+	// 跟着重绑。排在下面所有派生链之前 —— 地被 / 灌木读的就是它。
+	EnsureGroundMaskTexture();
+	BindGroundMaterial();
+	GroundMaskBuiltHash = 0;
+	RebuildGroundMask();
 	MeshBuiltAtLocation = GetActorLocation();
 	bLastChangeCommitted = true;   // 全量重建永远算提交
 	// 碰撞重烘是异步 cook，要晚几帧才换上；在广播之前发起，好让它尽早开始。
@@ -377,6 +391,131 @@ FBox ACSGroundActor::ComputeGroundWorldBox() const
 	return FBox(
 		FVector(Rect.Min.X, Rect.Min.Y, GroundZ - MaxAbsHeight - 1.0),
 		FVector(Rect.Max.X, Rect.Max.Y, GroundZ + MaxAbsHeight + 1.0));
+}
+
+// -----------------------------------------------------------------------------
+// 地面遮罩（2026-09-29 用户："地形 mask 决定草；经过处理的地面 mask 作为地面 mesh 的遮罩控制贴图"）
+//
+// 笔刷画的路权重（顶点色 R）→ GPU 上糊开 + 向外延伸 → 一张贴图。地面材质按它混三层贴图，草 / 花 /
+// 灌木按它拒绝、压矮、弯曲。以前两边各读一遍原始顶点色，只要其中一边加了处理，土路边与草线就各走各的。
+// -----------------------------------------------------------------------------
+
+bool ACSGroundActor::EnsureGroundMaskTexture()
+{
+	const int32 Width = Mirror.NumVertsX;
+	const int32 Height = Mirror.NumVertsY;
+	if (Width < 2 || Height < 2) return false;
+	if (GroundMask && GroundMask->SizeX == Width && GroundMask->SizeY == Height && GroundMask->bCanCreateUAV
+		&& GroundMask->RenderTargetFormat == RTF_RG32f) return true;
+
+	// 尺寸变了就换一张新的，而不是改旧的尺寸：材质的动态实例靠贴图指针变了才重取资源。旧的那张等动态实例
+	// 换绑之后没人引用，交给 GC（它的资源由 BeginDestroy 在渲染线程上放，不在这里手动放 —— 本帧可能还在画它）。
+	GroundMask = NewObject<UTextureRenderTarget2D>(this,
+		MakeUniqueObjectName(this, UTextureRenderTarget2D::StaticClass(), TEXT("GroundMask")), RF_Transient);
+	// R = 成品（延伸 0 时要与顶点色逐位相同，半精度存不下 k/255 ⇒ 32 位），G = 只糊的场（浅土路的阈值读它）。
+	GroundMask->RenderTargetFormat = RTF_RG32f;
+	GroundMask->ClearColor = FLinearColor::Black;
+	GroundMask->bCanCreateUAV = true;
+	GroundMask->bAutoGenerateMips = false;
+	GroundMask->AddressX = TA_Clamp;
+	GroundMask->AddressY = TA_Clamp;
+	GroundMask->Filter = TF_Bilinear;
+	GroundMask->InitAutoFormat(Width, Height);
+	GroundMask->UpdateResourceImmediate(true);
+	GroundMaskBuiltHash = 0;
+	return true;
+}
+
+void ACSGroundActor::BindGroundMaterial()
+{
+	if (!TinyGladeMesh) return;
+
+	UMaterialInterface* DrawMaterial = GroundMaterial;
+	if (GroundMaterial)
+	{
+		if (!GroundMaterialInstance || GroundMaterialInstance->Parent != GroundMaterial)
+		{
+			GroundMaterialInstance = UMaterialInstanceDynamic::Create(GroundMaterial, this);
+		}
+		// 遮罩 UV：顶点 X 的 UV0.x = X·格距/周期（`BuildSnapshotFromMirror`），要落在 texel 中心 (X + 0.5)/宽
+		// ⇒ u = UV0.x × 周期 / (格距·宽) + 0.5 / 宽。y 同理。周期的下限与快照里的 SafeUVPeriod 同一个口径。
+		const float Period = FMath::Max(UVWorldPeriod, 1.0f);
+		const float Cell = FMath::Max(Mirror.CellSize, 1e-3f);
+		const float Width = float(FMath::Max(Mirror.NumVertsX, 1));
+		const float Height = float(FMath::Max(Mirror.NumVertsY, 1));
+		GroundMaterialInstance->SetTextureParameterValue(CSGroundMaskMaterial::TextureParameter, GroundMask);
+		GroundMaterialInstance->SetVectorParameterValue(CSGroundMaskMaterial::UVTransformParameter,
+			FLinearColor(Period / (Cell * Width), Period / (Cell * Height), 0.5f / Width, 0.5f / Height));
+		GroundMaterialInstance->SetScalarParameterValue(CSGroundMaskMaterial::EnabledParameter, GroundMask ? 1.0f : 0.0f);
+		// 土跟着草走：深土层用草的拒绝曲线（同 kernel 里 `smoothstep(MaskStart, MaskEnd)` 的两端，End 不许 ≤ Start
+		// 的钳位也同 CSGroundCover::Scatter）⇒ 草长满处不露土，土只铺到草开始变稀的地方。
+		GroundMaterialInstance->SetScalarParameterValue(CSGroundMaskMaterial::SoilStartParameter, Grass.MaskStart);
+		GroundMaterialInstance->SetScalarParameterValue(CSGroundMaskMaterial::SoilEndParameter, FMath::Max(Grass.MaskEnd, Grass.MaskStart + 1e-3f));
+		// 采样扰动：材质与地被 / 灌木按同一对参数挪采样点（`CSGroundMaskWarp.ush`），草线与土边一起抖。
+		// w = 周期：材质拿 UV0 × 周期还原地面局部坐标（cm），与散布那边的 P − 地面原点是同一个原点。
+		GroundMaterialInstance->SetVectorParameterValue(CSGroundMaskMaterial::WarpParameter,
+			FLinearColor(FMath::Max(GroundMaskWarpStrength, 0.0f), 1.0f / FMath::Max(GroundMaskWarpWavelength, 1.0f), Period, 0.0f));
+		DrawMaterial = GroundMaterialInstance;
+	}
+	else GroundMaterialInstance = nullptr;
+	// 组件画 MID，网格槽放资产本身（烘焙抓的是槽，transient 的 MID 不能进资产）—— 同岩壳。
+	BindMeshSlotMaterials(TinyGladeMeshComponent, TinyGladeMesh, { GroundMaterial }, DrawMaterial);
+}
+
+void ACSGroundActor::RebuildGroundMask()
+{
+	if (IsTemplate() || !GetWorld()) return;
+	if (!Mirror.IsInitialized() || !TinyGladeMesh) return;
+	const FCSMeshResidentRef Resident = TinyGladeMesh->GetResident();
+	if (!Resident.IsValid()) return;   // 网格还没分配：地面重建完会再走一次这条路
+	if (!EnsureGroundMaskTexture()) return;
+
+	// 幂等：路（落笔计数）、格子、延伸距离、贴图本身都没变就不重算。全量重建换了常驻流时调用方先清零。
+	auto HashFloat = [](uint32 Seed, float Value) { return HashCombine(Seed, *reinterpret_cast<const uint32*>(&Value)); };
+	uint32 Hash = ::GetTypeHash(PaintRevision);
+	Hash = HashCombine(Hash, ::GetTypeHash(Mirror.NumVertsX));
+	Hash = HashCombine(Hash, ::GetTypeHash(Mirror.NumVertsY));
+	Hash = HashFloat(Hash, Mirror.CellSize);
+	Hash = HashFloat(Hash, GroundMaskExtendDistance);
+	Hash = HashCombine(Hash, ::GetTypeHash(GroundMask.Get()));
+	if (Hash == 0) Hash = 1;   // 0 是"还没算过"的哨兵
+	if (Hash == GroundMaskBuiltHash) return;
+
+	CSGroundRoadField::FBlurDesc Desc;
+	Desc.GroundVerts = FIntPoint(Mirror.NumVertsX, Mirror.NumVertsY);
+	Desc.GroundCellSize = Mirror.CellSize;
+	Desc.Channel = FVector4f(1.0f, 0.0f, 0.0f, 0.0f);   // R = 道路权重
+	// 延伸距离 E → 核：PostGain = 2 时遮罩按 erfc(d / σ√2) 衰减，取 σ = E / 2 ⇒ 离路 E 处约剩 5%；
+	// `CSGroundRoadField` 的半径口径是 σ = 半径 / 3，所以半径 = 1.5E。E = 0 时不糊、增益 1 ⇒ 遮罩 = 原始路权重。
+	const float Extend = FMath::Max(GroundMaskExtendDistance, 0.0f);
+	Desc.Radius = 1.5f * Extend;
+	Desc.PostGain = Extend > 0.0f ? 2.0f : 1.0f;
+	Desc.bMaxWithSource = true;   // 只往外加：窄路、路头糊开后不足 1 也不许变"浅"
+	if (!CSGroundRoadField::UpdateMaskTexture(Resident, GroundMask, Desc)) return;
+	GroundMaskBuiltHash = Hash;
+}
+
+int32 ACSGroundActor::DebugReadGroundMaskSync(TArray<float>& OutValues, TArray<float>* OutInner) const
+{
+	OutValues.Reset();
+	if (OutInner) OutInner->Reset();
+	if (!GroundMask) return 0;
+	FTextureRenderTargetResource* Resource = GroundMask->GameThread_GetRenderTargetResource();
+	if (!Resource) return 0;
+
+	// 诊断回读按设计就是阻塞的，但要进计数器（计数器要么数到每一次阻塞，要么就不能拿它当证据）。
+	UCSMesh::CountedBlockingFlush();
+	TArray<FLinearColor> Pixels;
+	// G32R32F 的读回转换不做 MinMax / Unorm 重映射（RHISurfaceDataConversion.h），读到的就是写进去的值。
+	if (!Resource->ReadLinearColorPixels(Pixels)) return 0;
+	OutValues.Reserve(Pixels.Num());
+	for (const FLinearColor& One : Pixels) OutValues.Add(One.R);
+	if (OutInner)
+	{
+		OutInner->Reserve(Pixels.Num());
+		for (const FLinearColor& One : Pixels) OutInner->Add(One.G);
+	}
+	return OutValues.Num();
 }
 
 void ACSGroundActor::ResetPaint()
@@ -428,6 +567,7 @@ void ACSGroundActor::FlushPaintToGpu(bool bBlockIfNeeded)
 				Dab.Color, Dab.ChannelMask, Dab.BlendOp, Dab.VertsX, Dab.VertsY, Dab.RegionMin, Dab.RegionMax);
 		}
 		PendingPaintDabs.Reset();
+		RebuildGroundMask();
 		RebuildStairs();
 		RebuildRockShell();
 		RebuildSkirtDecor();
@@ -458,6 +598,9 @@ void ACSGroundActor::FlushPaintToGpu(bool bBlockIfNeeded)
 		}
 	}
 
+	// 地面遮罩从 **GPU 色流**现算，理由同下面的石阶；而且它必须排在地被 / 灌木之前（它们读的就是它），
+	// 材质也在画它 —— 排错位置的症状是"土路边与草都慢一笔"。
+	RebuildGroundMask();
 	// 石阶的道路门控读的是**GPU 色流**，而落笔只写镜像 + 排队 —— 所以重扫必须排在这里，
 	// 不能排在 ApplyPaintStroke 里。渲染命令 FIFO 保证扫描看到的是刚推上去的那一笔；
 	// 排错位置的症状是"石阶比路慢一笔"，只在快速涂抹时才看得见。
@@ -756,7 +899,13 @@ void ACSGroundActor::ResolveShapers()
 {
 	Shapers.Reset();
 	if (!GetWorld()) return;
-	for (TActorIterator<ACSGroundShaperActor> It(GetWorld()); It; ++It) Shapers.Add(*It);
+	for (TActorIterator<ACSGroundShaperActor> It(GetWorld()); It; ++It)
+	{
+		// 台高 = 塑形物相对**地面**的 Z：它自己还没来得及解析地面时，这里先把指针补上，
+		// 否则这一趟会按"相对世界 0"打包，地面不在 0 高度时整座台高都差一截。
+		if (!It->Ground) It->Ground = this;
+		Shapers.Add(*It);
+	}
 }
 
 void ACSGroundActor::RegisterShaper(ACSGroundShaperActor* Shaper)
@@ -783,17 +932,18 @@ void ACSGroundActor::UnregisterShaper(ACSGroundShaperActor* Shaper)
 
 void ACSGroundActor::BuildShaperGpuParams(TArray<FVector4f>& OutParams) const
 {
-	OutParams.Reset();
+	// 头 + mask 距离场池打成一份（布局见 CSGroundShaperField.h）。CPU 镜像重导出读的也是这一份，
+	// 所以 GPU 位移、石阶、岩壳、地被与镜像连"合成的顺序"都一致。
+	TArray<CSGroundShaperField::FShaperHeader> Headers;
+	TArray<TConstArrayView<float>> Sdfs;
 	for (const TWeakObjectPtr<ACSGroundShaperActor>& Weak : Shapers)
 	{
 		const ACSGroundShaperActor* Shaper = Weak.Get();
 		if (!Shaper) continue;
-		FVector4f Profile, Top, Noise;
-		Shaper->GetHeightFieldParams(Profile, Top, Noise);
-		OutParams.Add(Profile);
-		OutParams.Add(Top);
-		OutParams.Add(Noise);
+		Headers.Add(Shaper->GetFieldHeader());
+		Sdfs.Add(Shaper->GetMaskSdf());
 	}
+	CSGroundShaperField::PackField(Headers, Sdfs, OutParams);
 }
 
 void ACSGroundActor::RebuildHeightsFromShapers()
@@ -817,6 +967,9 @@ void ACSGroundActor::RefreshHeightsInRegion(const FBox2D& WorldRectXY, bool bCom
 
 	// 镜像（CPU 权威，供 SampleHeight/拾取/房子落座查询）。公式是绝对式的"基底 0 与全部
 	// 塑形物取 max"，所以在区域内重算与全量重算逐位相同 —— 撤掉旧隆起靠的是重算，不是减法。
+	// 合成（平滑 max）必须与 GPU 同序同式 ⇒ 直接在 GPU 那份打包缓冲上求值（CSGroundShaperField::EvalField）。
+	TArray<FVector4f> ShaperParams;
+	BuildShaperGpuParams(ShaperParams);
 	bool bChanged = false;
 	float NewMaxAbsHeight = 0.0f;
 	for (int32 Y = Y0; Y <= Y1; ++Y)
@@ -824,11 +977,7 @@ void ACSGroundActor::RefreshHeightsInRegion(const FBox2D& WorldRectXY, bool bCom
 		for (int32 X = X0; X <= X1; ++X)
 		{
 			const FVector2D World(Origin.X + X * Mirror.CellSize, Origin.Y + Y * Mirror.CellSize);
-			float Height = 0.0f;
-			for (const TWeakObjectPtr<ACSGroundShaperActor>& Weak : Shapers)
-			{
-				if (const ACSGroundShaperActor* Shaper = Weak.Get()) Height = FMath::Max(Height, Shaper->SampleShapeHeight(World));
-			}
+			const float Height = CSGroundShaperField::EvalField(FVector2f(float(World.X), float(World.Y)), ShaperParams);
 			float& Slot = Mirror.Heights[Mirror.VertexIndex(X, Y)];
 			if (FMath::IsNearlyEqual(Slot, Height, 0.01f)) continue;
 			Slot = Height;
@@ -839,7 +988,7 @@ void ACSGroundActor::RefreshHeightsInRegion(const FBox2D& WorldRectXY, bool bCom
 	//
 	// ⚠️ **但"镜像没变"不等于"派生链不用动"，这里必须放它们过去**（2026-08-31 实测修复）。
 	// 加载时序是：塑形物先向本 actor 注册、**后**落自己的变换 ⇒ 那一瞬间打包出来的
-	// `GetHeightFieldParams().Profile.xy` 还是 (0,0) ⇒ 岩壳/石阶已经按"塑形物在原点"
+	// `GetFieldHeader().Profile.xy` 还是 (0,0) ⇒ 岩壳/石阶已经按"塑形物在原点"
 	// 披挂过一趟。等变换落定、`RebuildHeightsFromShapers()` 再进来时，镜像是**序列化的、
 	// 本来就对**的 ⇒ `bChanged == false` ⇒ 从前在这里直接 return，三条派生链就永远停在
 	// 那趟陈旧位移上。
@@ -864,15 +1013,12 @@ void ACSGroundActor::RefreshHeightsInRegion(const FBox2D& WorldRectXY, bool bCom
 
 	// 拾取的平面/march 分路看的是全局上界；高度恒 = max(0, 各塑形物台高)，直接从参数取，
 	// 不用扫全表（区域更新的意义就在于不碰区域外的格点）。
-	for (const TWeakObjectPtr<ACSGroundShaperActor>& Weak : Shapers)
+	for (int32 Index = 0; Index < CSGroundShaperField::NumShapers(ShaperParams); ++Index)
 	{
-		const ACSGroundShaperActor* Shaper = Weak.Get();
-		if (!Shaper) continue;
-		FVector4f Profile, Top, Noise;
-		Shaper->GetHeightFieldParams(Profile, Top, Noise);
-		// 上界要取**峰值**：二次抬升在台顶又加了一档，拿 Top.X 当上界会让拾取的平面/march
-		// 分路在台顶附近判错，而裙边噪声只会往下啃、不抬高，所以不用为它留余量。
-		NewMaxAbsHeight = FMath::Max(NewMaxAbsHeight, CSGroundShaperField::PeakHeight(Top));
+		// 上界取**峰值**（打包头里的台高已除过二次抬升，乘回去才是台顶）；裙边噪声只会往下啃、
+		// 平滑合成被封顶在峰高，所以都不用留余量。
+		// 取绝对值：坑（负台高）的深度同样撑开拾取与包围盒的上界。
+		NewMaxAbsHeight = FMath::Max(NewMaxAbsHeight, FMath::Abs(CSGroundShaperField::PeakHeight(CSGroundShaperField::GetHeader(ShaperParams, Index).Top)));
 	}
 	MaxAbsHeight = NewMaxAbsHeight;
 	MarkPackageDirty();
@@ -885,8 +1031,6 @@ void ACSGroundActor::RefreshHeightsInRegion(const FBox2D& WorldRectXY, bool bCom
 		return;
 	}
 
-	TArray<FVector4f> ShaperParams;
-	BuildShaperGpuParams(ShaperParams);
 	++GpuDisplaceCount;
 	UCSMeshOps::DisplaceGroundShapers(
 		TinyGladeMesh, ShaperParams,
@@ -1197,10 +1341,33 @@ int32 ACSGroundActor::DebugReadRockShellDrawIndexCountGpuSync() const
 // 那批胞腔自己写 NaN，**归属簿记整个消失**，没有一行注销代码。
 // -----------------------------------------------------------------------------
 
-FVector2D ACSGroundActor::GetRockShellPatternWorldCentre() const
+CSRockShell::FPatternParams ACSGroundActor::MakeRockShellPatternParams() const
 {
-	if (bRockShellCustomPatternCentre) return FVector2D(GetActorLocation()) + RockShellPatternCentre;
-	return GetWorldRect2D().GetCenter();
+	CSRockShell::FPatternParams Pattern;
+	Pattern.CellSize = RockShellCellSize;
+	Pattern.SeedJitter = RockShellSeedJitter;
+	Pattern.ClusterWarp = RockShellClusterWarp;
+	Pattern.ClusterWavelength = RockShellClusterWavelength;
+	Pattern.SizeVariance = RockShellSizeVariance;
+	Pattern.Seed = uint32(RockShellSeed);
+	Pattern.BoundaryPoints = RockShellBoundaryPoints;
+	return Pattern.Sanitized();
+}
+
+void ACSGroundActor::PostLoad()
+{
+	Super::PostLoad();
+
+	// 旧属性迁移（2026-09-30 程序化图案取代 TG 原件那张 tile）：存盘里有旧缩放（≠ −1）⇒ 换算成胞腔格距，
+	// 密度逐位不变（0.35 ⇒ 193.6 cm）。锚点那两项（bRockShellCustomPatternCentre / RockShellPatternCentre）
+	// 在程序化图案下没有意义，直接删了：图案锚在地面原点，任何 XY 都有石头可长。
+	if (RockShellPatternScale > 0.0f)
+	{
+		RockShellCellSize = FMath::Clamp(RockShellPatternScale * CSRockShell::TGNativeCellSpacingCm, 20.0f, 5000.0f);
+		UE_LOG(LogTinyGladeGround, Log, TEXT("[TinyGladeGround] %s 迁移旧岩壳缩放 %.3f ⇒ RockShellCellSize %.1f cm。"),
+			*GetName(), RockShellPatternScale, RockShellCellSize);
+		RockShellPatternScale = -1.0f;
+	}
 }
 
 uint32 ACSGroundActor::RockShellInputHash() const
@@ -1215,22 +1382,20 @@ uint32 ACSGroundActor::RockShellInputHash() const
 	Hash = HashCombine(Hash, ::GetTypeHash(RockShellSmoothAngleDeg));
 	// 落笔计数：壳在路上是连续下沉（裁决五），下沉量由道路权重驱动 ⇒ 画一笔就得重披挂。
 	Hash = HashCombine(Hash, ::GetTypeHash(PaintRevision));
-	Hash = HashCombine(Hash, GetTypeHash(RockShellPatternMesh.ToSoftObjectPath()));
 	Hash = HashCombine(Hash, ::GetTypeHash(RockShellMaterial.Get()));
 	Hash = HashCombine(Hash, ::GetTypeHash(Mirror.NumVertsX));
 	Hash = HashCombine(Hash, ::GetTypeHash(Mirror.NumVertsY));
 	Hash = HashFloat(Hash, Mirror.CellSize);
+	Hash = HashFloat(Hash, UVWorldPeriod);
 	const FVector Origin = GetActorLocation();
 	Hash = HashFloat(Hash, float(Origin.X));
 	Hash = HashFloat(Hash, float(Origin.Y));
 	Hash = HashFloat(Hash, float(Origin.Z));
-	Hash = HashFloat(Hash, RockShellPatternScale);
-	Hash = HashCombine(Hash, ::GetTypeHash(bRockShellCustomPatternCentre));
-	Hash = HashFloat(Hash, float(RockShellPatternCentre.X));
-	Hash = HashFloat(Hash, float(RockShellPatternCentre.Y));
+	// 程序化图案：几何哈希覆盖格距 / 抖动 / 扭曲 / 功率权重 / 种子 / M，池上限另算（它改的是截断）。
+	Hash = HashCombine(Hash, MakeRockShellPatternParams().GeometryHash());
+	Hash = HashCombine(Hash, ::GetTypeHash(RockShellMaxCells));
 	Hash = HashFloat(Hash, RockShellReliefFloor);
-	// 六个隆起参数都改顶点位置 ⇒ 全部入哈希。漏一个的症状是"改了没反应"，与 D14 开篇
-	// FrameMaterial 那条同型（静默无效，没有任何断言看得见）。
+	// 隆起参数都改顶点位置 ⇒ 全部入哈希。漏一个的症状是"改了没反应"（静默无效，没有任何断言看得见）。
 	Hash = HashFloat(Hash, RockShellCellExpand);
 	Hash = HashFloat(Hash, RockShellSkirtTilt);
 	Hash = HashFloat(Hash, RockShellRiseMultiplier);
@@ -1254,15 +1419,15 @@ uint32 ACSGroundActor::RockShellInputHash() const
 	Hash = HashCombine(Hash, ::GetTypeHash(RockShellSeed));
 
 	// 塑形物：哈希的是**打包后的高度场参数**而不是 actor 指针 —— 拖动一座塑形物时指针不变、
-	// 参数变，而壳恰恰要跟着参数走。顺序敏感是对的：登记顺序变了合成结果不变，但重跑一趟
-	// 披挂的代价只有一个 dispatch，远小于为它维护一份顺序无关哈希的复杂度。
+	// 参数变，而壳恰恰要跟着参数走（激活也一样：它读的就是这份参数）。
 	for (const TWeakObjectPtr<ACSGroundShaperActor>& Weak : Shapers)
 	{
 		const ACSGroundShaperActor* Shaper = Weak.Get();
 		if (!Shaper) continue;
-		FVector4f Profile, Top, Noise;
-		Shaper->GetHeightFieldParams(Profile, Top, Noise);
-		for (const FVector4f& Packed : { Profile, Top, Noise })
+		const CSGroundShaperField::FShaperHeader Header = Shaper->GetFieldHeader();
+		// 换一张同尺寸的 mask 时头逐位不变，距离场的指纹才看得出来。
+		Hash = HashCombine(Hash, ::GetTypeHash(Shaper->GetMaskSdfKey()));
+		for (const FVector4f& Packed : { Header.Profile, Header.Top, Header.Noise, Header.Frame, Header.Shape })
 		{
 			Hash = HashFloat(Hash, Packed.X);
 			Hash = HashFloat(Hash, Packed.Y);
@@ -1273,8 +1438,27 @@ uint32 ACSGroundActor::RockShellInputHash() const
 	return Hash;
 }
 
-bool ACSGroundActor::EnsureRockShellMesh()
+namespace
 {
+/** 空槽的哨兵格键（格键本身可以是任何 int32，但 (MAX, MAX) 在任何地面尺寸下都到不了）。 */
+const FIntPoint CSGround_RockShellFreeSlot(MAX_int32, MAX_int32);
+}
+
+bool ACSGroundActor::EnsureRockShellMesh(int32 NeededCells, bool& bOutRebuilt)
+{
+	bOutRebuilt = false;
+	auto ResetPool = [this]()
+	{
+		RockShellPoolGeometryHash = 0;
+		RockShellPoolRect = FBox2D(ForceInit);
+		RockShellPoolCapacity = 0;
+		RockShellPoolTrianglesPerCell = 0;
+		RockShellSlotOfCell.Reset();
+		RockShellCellOfSlot.Reset();
+		RockShellFreeSlots.Reset();
+		bRockShellGrowPending = false;
+	};
+
 	// 关掉岩壳：连组件带显存一起收掉。留着一个空组件只会在 details 面板里留个误导性的槽位。
 	if (!bRockShell)
 	{
@@ -1284,23 +1468,10 @@ bool ACSGroundActor::EnsureRockShellMesh()
 		RockShellComponent = nullptr;
 		RockShellMaterialInstance = nullptr;
 		RockShellMesh = nullptr;
-		RockShellBuiltPattern = nullptr;
-		RockShellBuiltRect = FBox2D(ForceInit);
-		RockShellBuiltScale = 0.0f;
+		ResetPool();
 		return false;
 	}
 	if (!Mirror.IsInitialized()) return false;
-
-	UStaticMesh* PatternAsset = RockShellPatternMesh.LoadSynchronous();
-	if (!PatternAsset)
-	{
-		UE_LOG(LogTinyGladeGround, Warning,
-			TEXT("[TinyGladeGround] %s 的岩壳图案资产 %s 加载不到 —— 先跑 Scripts/TinyGladeImportRockShell.py。"),
-			*GetName(), *RockShellPatternMesh.ToString());
-		return false;
-	}
-	const CSRockShell::FPattern& Pattern = CSRockShell::GetSharedPattern(PatternAsset);
-	if (!Pattern.IsValid()) return false;   // 抽取失败的具体原因已由 CSRockShell 侧写进日志
 
 	// 蓝图 actor 重跑构造脚本会把组件销毁，指针会失效 —— 先判有效再复用。
 	if (!IsValid(RockShellComponent))
@@ -1309,12 +1480,12 @@ bool ACSGroundActor::EnsureRockShellMesh()
 		RockShellComponent->SetupAttachment(RootComponent);
 		RockShellComponent->RegisterComponent();   // 未注册时任何变更都会释放 GPU 网格
 	}
-	const float Scale = FMath::Clamp(RockShellPatternScale, 0.05f, 4.0f);
+	const CSRockShell::FPatternParams Pattern = MakeRockShellPatternParams();
+	const float Scale = Pattern.PatternScale();
 
 	// 绘制材质 = RockShellMaterial 的动态子实例，只多带 RockShellPatternScale（假倒角把 TG 原生的
-	// 图案口径换算到世界用，见 Docs/TinyGlade/CSRockShellEdgeBevel.md）。父材质换了才重建实例，
-	// 缩放变了只改标量（值没变时 SetScalarParameterValue 自己早退，不打扰渲染线程）。母材质为空时
-	// 不造实例 —— 引擎默认材质没有这个参数，也谈不上倒角。
+	// 图案口径换算到世界用，见 Docs/TinyGlade/RockShell_EdgeBevel.md）。父材质换了才重建实例，
+	// 缩放变了只改标量（值没变时 SetScalarParameterValue 自己早退）。
 	UMaterialInterface* DrawMaterial = RockShellMaterial;
 	if (RockShellMaterial)
 	{
@@ -1325,68 +1496,49 @@ bool ACSGroundActor::EnsureRockShellMesh()
 	}
 	else RockShellMaterialInstance = nullptr;
 	// 组件画 MID，网格的 Materials[0] 放资产本身（烘焙抓的是槽，transient 的 MID 不能进资产）。
-	// 在下面的早退**之前**绑、变了才写：早先槽 0 只在建壳时写，只换 RockShellMaterial 会让它停在
-	// 旧资产上（画面不受影响，GetUsedMaterials 与烘焙受影响）。
 	BindMeshSlotMaterials(RockShellComponent, RockShellMesh, { RockShellMaterial }, DrawMaterial);
 
 	const FBox2D Rect = GetWorldRect2D();
-	// **建壳是阻塞的**（声明流集 / 分配 / 上传各 flush 一次），所以只在"图案或地面矩形真的
-	// 变了"时走。交互期（画笔刷、拖塑形物）永远命中下面这条零成本早退。
-	const bool bBuilt = RockShellMesh != nullptr
-		&& RockShellBuiltPattern.Get() == PatternAsset
-		&& RockShellBuiltRect.bIsValid
-		&& RockShellBuiltRect.Min.Equals(Rect.Min, 1.0)
-		&& RockShellBuiltRect.Max.Equals(Rect.Max, 1.0)
-		&& FMath::IsNearlyEqual(RockShellBuiltScale, Scale)
-		&& RockShellBuiltCentre.Equals(GetRockShellPatternWorldCentre(), 1.0)
+	const uint32 GeometryHash = Pattern.GeometryHash();
+	const int32 MaxCells = FMath::Clamp(RockShellMaxCells, 64, 8192);
+	// 池的身份：图案几何（多边形是它的纯函数）+ 地面矩形（包围盒写死用；矩形的 Min 就是网格原点）。
+	const bool bSameIdentity = RockShellMesh != nullptr
+		&& RockShellPoolGeometryHash == GeometryHash
+		&& RockShellPoolRect.bIsValid
+		&& RockShellPoolRect.Min.Equals(Rect.Min, 1.0)
+		&& RockShellPoolRect.Max.Equals(Rect.Max, 1.0)
+		&& RockShellPoolCapacity > 0
 		&& RockShellComponent->GetGpuMesh() == RockShellMesh
 		// 删除后撤销：网格对象复活了，显存却已被组件还掉 —— 只比指针会把空网格当成建好了。
 		&& IsSlotMeshLive(RockShellMesh);
-	if (bBuilt) return true;
-
-	// ⚠️ 缩小图案 = 地面边上一圈**无壳且无任何提示**。原件 tile 136.5 m 只在 Scale=1 时盖得住
-	// 128 m 的地面；Scale=0.5 只盖 68 m，剩下的地面裸着，而 clamp 的下界是 0.05 —— 从属性面板
-	// 上完全看不出这里有个悬崖。平铺救不回来（实测 tile 两侧边界点不一致、不是周期的，接缝会露），
-	// 所以这里只报警不改行为：clamp 与几何一个字都不动，让用户自己决定要不要那圈裸地。
-	// 只在真的重建时报（上面那条早退吃掉了交互期的每一帧），不会刷屏。
-	//
-	// ⚠️ 判据是地面的**边长**不是对角线：图案与地面都是轴对齐、同心的矩形，
-	// 覆盖条件就是逐轴的 `图案跨度 ≥ 地面跨度`。拿对角线当尺子会在**原生口径**
-	// （136.5 m 图案 × 128 m 地面，文档明写"每边富余 4.25 m"）上报红 ——
-	// 对角线 181 m 永远大于 136.5 m，那条警告会在正确配置下天天响，
-	// 而天天响的警告等于没有警告。
+	bool bNeedBuild = !bSameIdentity;
+	if (bSameIdentity && NeededCells > RockShellPoolCapacity && RockShellPoolCapacity < MaxCells)
 	{
-		const FVector2f PatternSpan = Pattern.BoundsMax - Pattern.BoundsMin;
-		const double Covered = double(FMath::Max(PatternSpan.X, PatternSpan.Y)) * double(Scale);
-		const FVector2D GroundSpan = Rect.GetSize();
-		const double Needed = FMath::Max(GroundSpan.X, GroundSpan.Y);
-		if (Covered < Needed)
+		// 容量不够：拖动期不扩（扩容 = 阻塞 + 全部槽重生成），记下来松手补齐。
+		if (!bLastChangeCommitted)
 		{
-			UE_LOG(LogTinyGladeGround, Warning,
-				TEXT("[TinyGladeGround] %s rock shell pattern covers only %.1f m at scale %.3g, but the ground is %.1f m across")
-				TEXT(" — everything outside the middle %.1f m gets no shell at all, silently.")
-				TEXT(" The tile is not periodic, so tiling cannot fix it: raise RockShellPatternScale back to 1.0")
-				TEXT(" (the native 136.5 m tile) or shrink the ground."),
-				*GetName(), Covered * 0.01, Scale, Needed * 0.01, Covered * 0.01);
+			bRockShellGrowPending = true;
+			return true;
 		}
+		bNeedBuild = true;
 	}
+	if (!bNeedBuild) return true;
 
+	const int32 Capacity = FMath::Clamp(FMath::Max(FMath::CeilToInt32(float(NeededCells) * 1.5f), 256), 64, MaxCells);
 	EnsureSlotMesh(RockShellComponent, RockShellMesh);   // 归岩壳组件所有：组件销毁时它自己还显存
 
-	// **包围盒按地面矩形写死**（kernel 用 NaN 关掉看不见的三角，NaN 会污染任何从顶点算出来
-	// 的包围盒）。Z 的半高刻意**只由地面尺寸推导、不看 MaxAbsHeight** —— 掺进塑形物状态的话
-	// 拖一座塑形物就会改变包围盒 ⇒ 每帧重走这条阻塞的建壳路径，那正是拉尺寸那一轮踩过的坑。
+	// **包围盒按地面矩形写死**（kernel 用 NaN 关掉看不见的三角，NaN 会污染任何从顶点算出来的包围盒）。
+	// Z 的半高只由地面尺寸推导、不看 MaxAbsHeight —— 掺进塑形物状态的话拖一座塑形物就会改变包围盒 ⇒
+	// 每帧重走这条阻塞的建池路径。
 	const FVector Origin = GetActorLocation();
 	const FVector2D Span = Rect.GetSize();
 	const double ZHalf = FMath::Max(2000.0, FMath::Max(Span.X, Span.Y) * 0.25);
 	const FBox Hard(
 		FVector(Rect.Min.X, Rect.Min.Y, Origin.Z - ZHalf),
 		FVector(Rect.Max.X, Rect.Max.Y, Origin.Z + ZHalf));
-	const FVector2D Centre2D = GetRockShellPatternWorldCentre();
-
-	if (!CSRockShell::BuildMesh(RockShellMesh, Pattern, Hard,
-		FVector2f(float(Centre2D.X), float(Centre2D.Y)), Scale, UVWorldPeriod))
+	if (!CSRockShell::BuildMesh(RockShellMesh, Pattern, Capacity, Hard))
 	{
+		ResetPool();
 		return false;
 	}
 
@@ -1394,105 +1546,144 @@ bool ACSGroundActor::EnsureRockShellMesh()
 	BindMeshSlotMaterials(RockShellComponent, RockShellMesh, { RockShellMaterial }, DrawMaterial);
 	RockShellComponent->SetGpuMesh(RockShellMesh);
 
-	RockShellBuiltPattern = PatternAsset;
-	RockShellBuiltRect = Rect;
-	RockShellBuiltScale = Scale;
-	RockShellBuiltCentre = Centre2D;
-	RockShellBuiltHash = 0;   // 新分配的流里是池子上一位租客的字节，必须无条件披挂一趟
+	ResetPool();
+	RockShellPoolGeometryHash = GeometryHash;
+	RockShellPoolRect = Rect;
+	RockShellPoolCapacity = Capacity;
+	RockShellPoolTrianglesPerCell = Pattern.TrianglesPerCell();
+	RockShellCellOfSlot.Init(CSGround_RockShellFreeSlot, Capacity);
+	RockShellFreeSlots.Reserve(Capacity);
+	for (int32 Slot = Capacity - 1; Slot >= 0; --Slot) RockShellFreeSlots.Add(Slot);   // 降序：从尾部取 ⇒ 先用小号
+	bOutRebuilt = true;
 
 	UE_LOG(LogTinyGladeGround, Log,
-		TEXT("[TinyGladeGround] %s 岩壳已建：%u 三角、图案 %s、缩放 %.3f。"),
-		*GetName(), Pattern.TriangleCount, *PatternAsset->GetName(), Scale);
+		TEXT("[TinyGladeGround] %s 岩壳槽位池已建：%d 槽 × %d 三角（胞腔 %.1f cm，M = %d，需要 %d 槽）。"),
+		*GetName(), Capacity, Pattern.TrianglesPerCell(), Pattern.CellSize, Pattern.BoundaryPoints, NeededCells);
 	return true;
 }
 
 void ACSGroundActor::RebuildRockShell()
 {
-	// ⚠️ **第一句就是哈希比较**：短路必须发生在昂贵计算**之前**（已删的塑形物石阶旧路
-	// 恰好相反，那是它当年记在案的缺陷）。下面每一步都比这次比较贵。
+	// ⚠️ **第一句就是哈希比较**：短路必须发生在昂贵计算**之前**。唯一的例外是拖动期欠下的扩容：
+	// 松手那一趟输入可能与最后一帧逐位相同，但它必须把暂缺的胞腔补齐。
 	const uint32 Hash = RockShellInputHash();
-	if (RockShellBuiltHash != 0 && RockShellBuiltHash == Hash) return;
+	const bool bGrowNow = bRockShellGrowPending && bLastChangeCommitted;
+	if (RockShellBuiltHash != 0 && RockShellBuiltHash == Hash && !bGrowNow) return;
 
 	if (IsTemplate() || !GetWorld()) return;
-	if (!EnsureRockShellMesh())
+	if (!bRockShell)
 	{
-		// 失败也记下哈希：抽不出图案的原因（缺资产 / UV 通道不够 / CPU 访问没开）不会在
-		// 同一份输入下自愈，每一 dab 重试一次只是把日志刷爆。改任何一个岩壳属性、或点一次
-		// RebuildGroundMesh，哈希就变了，自然会重试。
+		bool bUnused = false;
+		EnsureRockShellMesh(0, bUnused);   // 收掉组件与显存
 		RockShellBuiltHash = Hash;
 		return;
 	}
-	if (!TinyGladeMesh) return;   // 地面网格还没建：重建完会再走一次这条路
+	if (!Mirror.IsInitialized() || !TinyGladeMesh) return;   // 地面网格还没建：重建完会再走一次这条路
 	const FCSMeshResidentRef GroundResident = TinyGladeMesh->GetResident();
 	if (!GroundResident.IsValid()) return;
 
-	UStaticMesh* PatternAsset = RockShellPatternMesh.Get();
-	const CSRockShell::FPattern& Pattern = CSRockShell::GetSharedPattern(PatternAsset);
-	if (!Pattern.IsValid()) return;
-
+	const CSRockShell::FPatternParams Pattern = MakeRockShellPatternParams();
+	const float Scale = Pattern.PatternScale();
 	const FVector Origin = GetActorLocation();
+	const FVector2D GridOrigin(Origin.X, Origin.Y);
 	const FBox2D Rect = GetWorldRect2D();
-	const FVector2D Centre2D = GetRockShellPatternWorldCentre();
 
-	CSRockShell::FDisplaceParams Params;
-	Params.PatternCentre = Pattern.Centre();
-	Params.WorldCentre = FVector2f(float(Centre2D.X), float(Centre2D.Y));
-	Params.Scale = FMath::Clamp(RockShellPatternScale, 0.05f, 4.0f);
-	Params.ReliefFloor = FMath::Clamp(RockShellReliefFloor, 0.0f, 1.0f);
-	Params.bSmoothNormals = bRockShellSmoothNormals;
-	Params.SmoothAngleDeg = RockShellSmoothAngleDeg;
-	Params.CellExpand = FMath::Max(RockShellCellExpand, 0.0f);
-	Params.SkirtTilt = FMath::Max(RockShellSkirtTilt, 0.0f);
-	Params.RiseMultiplier = FMath::Max(RockShellRiseMultiplier, 0.0f);
-	Params.RiseNoiseAmp = FMath::Max(RockShellRiseNoiseAmount, 0.0f);
-	Params.RiseNoiseFrequency = 1.0f / FMath::Max(RockShellRiseNoiseWavelength, 1.0f);
-	Params.RiseExtend = FMath::Max(RockShellRiseExtend, 0.0f);
-	Params.EdgeCeiling = FMath::Clamp(RockShellEdgeCeiling, 0.0f, 0.999f);
-	Params.BaseLift = FMath::Max(RockShellBaseLift, 0.0f);
-	Params.BaseSink = FMath::Max(RockShellBaseSink, 0.0f);
-	// ⑧ 的参考高度用现成的峰值台账（`RefreshHeightsInRegion` 里按 PeakHeight() 维护），
-	// 不在这里重扫一遍塑形物 —— 两处各算一份迟早分叉。
-	Params.PeakHeight = FMath::Max(MaxAbsHeight, 1.0f);
-	// 标称胞腔半径：原件 609 个胞腔铺满 tile ⇒ 平均间距 = 跨度 / sqrt(胞腔数)，半径取一半。
-	const FVector2f PatternSpan = Pattern.BoundsMax - Pattern.BoundsMin;
-	Params.CellRadiusCm = 0.5f * FMath::Max(PatternSpan.X, PatternSpan.Y) / FMath::Sqrt(float(FMath::Max(Pattern.CellCount, 1u)));
-	Params.DomainMin = FVector2f(float(Rect.Min.X), float(Rect.Min.Y));
-	Params.DomainMax = FVector2f(float(Rect.Max.X), float(Rect.Max.Y));
+	TArray<FVector4f> ShaperParams;
+	BuildShaperGpuParams(ShaperParams);
 
-	// ⚠️ **缩放之后 tile 可能盖不满地面，而盖不到的地方是静默无壳的。**
-	//
-	// 图案是**一张**（`RockShellPatternScale` 缩的是整张 tile，不是胞腔），原生 136.5 m 刚好富余
-	// 地盖住 128 m 的地面；`Scale = 0.35` 之后只剩 47.8 m，中心对齐 ⇒ 外围完全没有壳。
-	// 平铺补不上：实测 tile 两侧边界点不一致、不是周期的，铺出来会露缝
-	// （`Docs/TinyGlade/CSRockShellPattern.md`）。
-	//
-	// 所以这里逐塑形物查一遍"它的触及范围是否落在图案覆盖区内"。不查的症状最难诊断：
-	// 地面正中的土台好好长着碎石，把塑形物往外一拖就一块不剩，而**没有任何断言会红**
-	// —— 与本文件刚修掉的那条陈旧位移是同一类（几何断言全绿、只有出图看得见）。
-	const FVector2D CoverHalf(
-		0.5 * double(PatternSpan.X) * double(Params.Scale),
-		0.5 * double(PatternSpan.Y) * double(Params.Scale));
-	const FBox2D Cover(Centre2D - CoverHalf, Centre2D + CoverHalf);
-	for (const TWeakObjectPtr<ACSGroundShaperActor>& Weak : Shapers)
+	// --- 1) 激活：哪些胞腔**可能**长石头（裙边环带 ⊕ 余量；只许过标不许漏标）---
+	if (RockShellRadiusCacheHash != Pattern.GeometryHash())
 	{
-		const ACSGroundShaperActor* Shaper = Weak.Get();
-		if (!Shaper) continue;
-		const FVector Loc = Shaper->GetActorLocation();
-		const double Reach = double(Shaper->Radius) + double(Shaper->FalloffDistance);
-		const FVector2D Lo(Loc.X - Reach, Loc.Y - Reach);
-		const FVector2D Hi(Loc.X + Reach, Loc.Y + Reach);
-		if (Lo.X < Cover.Min.X || Lo.Y < Cover.Min.Y || Hi.X > Cover.Max.X || Hi.Y > Cover.Max.Y)
+		RockShellRadiusCache.Reset();
+		RockShellRadiusCacheHash = Pattern.GeometryHash();
+	}
+	// 余量 = 坡度差分跨距（一个地面格）+ 胀缩 / 扩张 / 倾斜能把顶点推出多远 + 5 cm。
+	const float Margin = Mirror.CellSize
+		+ (FMath::Max(RockShellCellJitter, 0.0f) + FMath::Max(RockShellCellExpand, 0.0f) + FMath::Max(RockShellSkirtTilt, 0.0f)) * Scale
+		+ 5.0f;
+	// 活着的坡度门槛：Rock = smoothstep(Lo, Hi, s) > 0.1 ⇔ t > 0.196（smoothstep 的逆）。只用于中心隆起的整盘判定。
+	const float AliveSlope = RockShellSlopeLo + 0.196f * FMath::Max(RockShellSlopeHi - RockShellSlopeLo, 1e-3f);
+	TArray<FIntPoint> Active;
+	CSRockShell::CollectActiveCells(Pattern, GridOrigin, Rect, ShaperParams, Margin, AliveSlope, RockShellRadiusCache, Active);
+	const int32 MaxCells = FMath::Clamp(RockShellMaxCells, 64, 8192);
+	if (Active.Num() > MaxCells)
+	{
+		UE_LOG(LogTinyGladeGround, Warning,
+			TEXT("[TinyGladeGround] %s 岩壳激活了 %d 个胞腔，超过上限 RockShellMaxCells = %d —— 按格键截断，截掉的那些不长石头。"),
+			*GetName(), Active.Num(), MaxCells);
+		Active.SetNum(MaxCells);
+	}
+
+	// --- 2) 槽位池（图案 / 矩形变了就重建，容量不够就扩；拖动期不扩）---
+	bool bRebuilt = false;
+	if (!EnsureRockShellMesh(Active.Num(), bRebuilt))
+	{
+		// 失败也记下哈希：同一份输入下不会自愈，每一 dab 重试一次只是把日志刷爆。
+		RockShellBuiltHash = Hash;
+		return;
+	}
+
+	// --- 3) 槽位差分：失效 → 还槽；新增 → 取槽（小号优先）；披挂 = 全部活跃（P1：全量重披挂）---
+	CSRockShell::FJobs Jobs;
+	TSet<FIntPoint> ActiveSet;
+	ActiveSet.Reserve(Active.Num());
+	for (const FIntPoint& Cell : Active) ActiveSet.Add(Cell);
+	TArray<int32> Freed;
+	for (auto It = RockShellSlotOfCell.CreateIterator(); It; ++It)
+	{
+		if (ActiveSet.Contains(It.Key())) continue;
+		Freed.Add(It.Value());
+		RockShellCellOfSlot[It.Value()] = CSGround_RockShellFreeSlot;
+		It.RemoveCurrent();
+	}
+	if (!Freed.IsEmpty())
+	{
+		RockShellFreeSlots.Append(Freed);
+		RockShellFreeSlots.Sort([](int32 A, int32 B) { return A > B; });
+	}
+	int32 Missing = 0;
+	for (const FIntPoint& Cell : Active)
+	{
+		if (RockShellSlotOfCell.Contains(Cell)) continue;
+		if (RockShellFreeSlots.IsEmpty()) { ++Missing; continue; }
+		const int32 Slot = RockShellFreeSlots.Pop(EAllowShrinking::No);
+		RockShellSlotOfCell.Add(Cell, Slot);
+		RockShellCellOfSlot[Slot] = Cell;
+		Jobs.NewCells.Add(FUintVector4(uint32(Slot), uint32(Cell.X), uint32(Cell.Y), 0u));
+	}
+	// 被还回去、这一趟又没被别的胞腔领走的槽才需要关（被领走的会被新胞腔整片重写）。
+	for (const int32 Slot : Freed)
+	{
+		if (RockShellCellOfSlot[Slot] == CSGround_RockShellFreeSlot) Jobs.Kill.Add(uint32(Slot));
+	}
+	if (Missing > 0)
+	{
+		if (!bLastChangeCommitted) bRockShellGrowPending = true;   // 拖动期：松手补齐
+		else if (RockShellPoolCapacity >= MaxCells)
 		{
 			UE_LOG(LogTinyGladeGround, Warning,
-				TEXT("[TinyGladeGround] 岩壳覆盖区：%s 的触及范围（中心 %.0f, %.0f 半径 %.0f）超出了图案覆盖区 ")
-				TEXT("[%.0f, %.0f]x[%.0f, %.0f]（PatternScale=%.2f ⇒ tile 只有 %.1f m）—— 超出的部分不会有壳。")
-				TEXT("把塑形物挪进覆盖区，或把 RockShellPatternScale 调大。"),
-				*Shaper->GetName(), Loc.X, Loc.Y, Reach,
-				Cover.Min.X, Cover.Max.X, Cover.Min.Y, Cover.Max.Y,
-				Params.Scale, 0.01 * double(PatternSpan.X) * double(Params.Scale));
+				TEXT("[TinyGladeGround] %s 岩壳槽位池已到上限 %d，还有 %d 个胞腔分不到槽。"), *GetName(), MaxCells, Missing);
 		}
 	}
-	Params.bFlipWinding = Pattern.bFlipWinding;
+	else if (bLastChangeCommitted)
+	{
+		bRockShellGrowPending = false;
+	}
+	Jobs.Drape.Reserve(RockShellSlotOfCell.Num());
+	for (const TPair<FIntPoint, int32>& Pair : RockShellSlotOfCell) Jobs.Drape.Add(uint32(Pair.Value));
+	Jobs.Drape.Sort();
+
+	// --- 4) 一趟派发。**平面上的 TG 长度乘 PatternScale**（胀缩 / 扩张 / 倾斜、起伏噪声的域；唇宽在建池时）——
+	// 它们要跟多边形尺寸配套。**竖向的厚度 / 基准偏移 / 起伏是世界 cm**：2026-09-30 一度也按胞腔缩，
+	// 默认 1.94 m 的石头只剩 10.5 cm 厚，用户看图判「露出的部分变少」，改回不缩。---
+	CSRockShell::FDisplaceParams Params;
+	Params.Pattern = Pattern;
+	Params.GridOrigin = FVector2f(float(GridOrigin.X), float(GridOrigin.Y));
+	Params.UVWorldPeriod = UVWorldPeriod;
+	Params.DomainMin = FVector2f(float(Rect.Min.X), float(Rect.Min.Y));
+	Params.DomainMax = FVector2f(float(Rect.Max.X), float(Rect.Max.Y));
+	Params.bSmoothNormals = bRockShellSmoothNormals;
+	Params.SmoothAngleDeg = RockShellSmoothAngleDeg;
 	Params.GroundOriginXY = FVector2f(float(Origin.X), float(Origin.Y));
 	Params.GroundCellSize = Mirror.CellSize;
 	Params.GroundVerts = FIntPoint(Mirror.NumVertsX, Mirror.NumVertsY);
@@ -1500,22 +1691,36 @@ void ACSGroundActor::RebuildRockShell()
 	Params.SlopeLo = FMath::Max(RockShellSlopeLo, 0.0f);
 	Params.SlopeHi = RockShellSlopeHi;
 	Params.RoadFade = FMath::Max(RockShellRoadFade, 1.0f);
-	Params.RoadSink = FMath::Max(RockShellRoadSink, 0.0f);
 	Params.RoadBlurRadius = FMath::Max(RockShellRoadBlurRadius, 0.0f);
-	Params.CellJitter = FMath::Max(RockShellCellJitter, 0.0f);
+	Params.RoadSink = FMath::Max(RockShellRoadSink, 0.0f);
+	Params.CellJitter = FMath::Max(RockShellCellJitter, 0.0f) * Scale;
 	Params.CellRelief = FMath::Max(RockShellCellRelief, 0.0f);
+	Params.ReliefFloor = FMath::Clamp(RockShellReliefFloor, 0.0f, 1.0f);
+	Params.CellExpand = FMath::Max(RockShellCellExpand, 0.0f) * Scale;
+	Params.SkirtTilt = FMath::Max(RockShellSkirtTilt, 0.0f) * Scale;
+	Params.BaseLift = FMath::Max(RockShellBaseLift, 0.0f);
+	Params.BaseSink = FMath::Max(RockShellBaseSink, 0.0f);
 	Params.NoiseAmp = FMath::Max(RockShellNoiseAmount, 0.0f);
-	Params.NoiseFrequency = 1.0f / FMath::Max(RockShellNoiseWavelength, 1.0f);
+	Params.NoiseFrequency = 1.0f / (FMath::Max(RockShellNoiseWavelength, 1.0f) * Scale);
+	Params.RiseMultiplier = FMath::Max(RockShellRiseMultiplier, 0.0f);
+	Params.RiseNoiseAmp = FMath::Max(RockShellRiseNoiseAmount, 0.0f);
+	Params.RiseNoiseFrequency = 1.0f / FMath::Max(RockShellRiseNoiseWavelength, 1.0f);
+	Params.RiseExtend = FMath::Max(RockShellRiseExtend, 0.0f);
+	Params.EdgeCeiling = FMath::Clamp(RockShellEdgeCeiling, 0.0f, 0.999f);
+	// ⑧ 的参考高度用现成的峰值台账（`RefreshHeightsInRegion` 里维护），不在这里重扫一遍塑形物。
+	Params.PeakHeight = FMath::Max(MaxAbsHeight, 1.0f);
 	Params.ChipAmount = FMath::Max(RockShellChipAmount, 0.0f);
 	Params.ChipFrequency = 1.0f / FMath::Max(RockShellChipWavelength, 1.0f);
 	Params.Seed = uint32(RockShellSeed);
 
-	TArray<FVector4f> ShaperParams;
-	BuildShaperGpuParams(ShaperParams);
-	if (!CSRockShell::Displace(RockShellMesh, GroundResident, Params, ShaperParams)) return;
+	if (!CSRockShell::Displace(RockShellMesh, GroundResident, Params, ShaperParams, Jobs)) return;
 
 	++RockShellDisplaceCount;
 	RockShellBuiltHash = Hash;
+	UE_LOG(LogTinyGladeGround, Verbose,
+		TEXT("[TinyGladeGround] %s 岩壳：活跃 %d / 池 %d 槽%s；本趟新增 %d、关掉 %d、披挂 %d。"),
+		*GetName(), RockShellSlotOfCell.Num(), RockShellPoolCapacity, bRebuilt ? TEXT("（池刚重建）") : TEXT(""),
+		Jobs.NewCells.Num(), Jobs.Kill.Num(), Jobs.Drape.Num());
 }
 
 bool ACSGroundActor::IsRockShellDrawable(FString& OutReason) const
@@ -1561,16 +1766,24 @@ FString ACSGroundActor::GetRockShellUndrawableReason() const
 	return FString();
 }
 
-bool ACSGroundActor::GetRockShellPatternStats(int32& OutTriangles, int32& OutUVChannels, float& OutMaxCellId,
-	bool& bOutFlipWinding, float& OutDirAgreement) const
+bool ACSGroundActor::GetRockShellPoolStats(int32& OutActiveCells, int32& OutCapacityCells, int32& OutTrianglesPerCell) const
 {
-	const CSRockShell::FPattern& Pattern = CSRockShell::GetSharedPattern(RockShellPatternMesh.Get());
-	OutTriangles = int32(Pattern.TriangleCount);
-	OutUVChannels = Pattern.NumUVChannels;
-	OutMaxCellId = Pattern.MaxCellId;
-	bOutFlipWinding = Pattern.bFlipWinding;
-	OutDirAgreement = Pattern.DirAgreement;
-	return Pattern.IsValid();
+	OutActiveCells = RockShellSlotOfCell.Num();
+	OutCapacityCells = RockShellPoolCapacity;
+	OutTrianglesPerCell = RockShellPoolTrianglesPerCell;
+	return RockShellMesh != nullptr && RockShellPoolCapacity > 0;
+}
+
+int32 ACSGroundActor::DebugGetRockShellCellSlot(FIntPoint Cell) const
+{
+	const int32* Slot = RockShellSlotOfCell.Find(Cell);
+	return Slot ? *Slot : INDEX_NONE;
+}
+
+void ACSGroundActor::DebugGetRockShellActiveCells(TArray<FIntPoint>& OutCells) const
+{
+	RockShellSlotOfCell.GenerateKeyArray(OutCells);
+	OutCells.Sort([](const FIntPoint& A, const FIntPoint& B) { return A.Y != B.Y ? A.Y < B.Y : A.X < B.X; });
 }
 
 int32 ACSGroundActor::DebugReadRockShellSync(TArray<FVector>& OutWorldPositions)
@@ -1619,7 +1832,7 @@ void ACSGroundActor::BuildSkirtDecorSite(CSGroundDecor::FSite& OutSite) const
 	OutSite.Rings.Reset();
 	OutSite.BaseZ = GetActorLocation().Z;
 
-	// ⚠️ 高度场参数走 `GetHeightFieldParams`，**不从 actor 属性再算一遍** ——
+	// ⚠️ 高度场参数走 `GetFieldHeader`，**不从 actor 属性再算一遍** ——
 	// GPU 位移 pass、石阶扫描、CPU 镜像重导出读的都是这一份打包结果。各自再算一遍的症状是
 	// "摆件那圈的半径与土台差了一点点"，只在改过 `SecondaryLiftScale` 之类之后才显形。
 	for (const TWeakObjectPtr<ACSGroundShaperActor>& Weak : Shapers)
@@ -1628,7 +1841,8 @@ void ACSGroundActor::BuildSkirtDecorSite(CSGroundDecor::FSite& OutSite) const
 		if (!Shaper) continue;
 
 		CSGroundDecor::FShaperRing Ring;
-		Shaper->GetHeightFieldParams(Ring.Profile, Ring.Top, Ring.Noise);
+		Ring.Header = Shaper->GetFieldHeader();
+		Ring.Sdf = TArray<float>(Shaper->GetMaskSdf());
 		// 身份取 **actor 名**：随关卡序列化、拖动不变、加载顺序无关。数组下标与世界坐标
 		// 为什么都不行，逐条写在 `CSGroundDecor.h` 的文件头（S1 在槽位上栽过一次）。
 		Ring.Key = CSGroundDecor::RingKey(Shaper->GetName());
@@ -1752,10 +1966,10 @@ bool ACSGroundActor::EnsureSkirtDecorComponents(bool& bOutHandedOver)
 	for (const CSGroundDecor::FShaperRing& Ring : Site.Rings)
 	{
 		const double Radius = double(CSGroundDecor::RingRadius(Ring, Params));
-		const double DistX = FMath::Abs(double(Ring.Profile.X) - Origin.X);
-		const double DistY = FMath::Abs(double(Ring.Profile.Y) - Origin.Y);
+		const double DistX = FMath::Abs(double(Ring.Header.Profile.X) - Origin.X);
+		const double DistY = FMath::Abs(double(Ring.Header.Profile.Y) - Origin.Y);
 		Reach = FMath::Max(Reach, FMath::Max(DistX, DistY) + Radius + MeshReach);
-		Top = FMath::Max(Top, double(CSGroundShaperField::PeakHeight(Ring.Top)) + MeshReach);
+		Top = FMath::Max(Top, double(CSGroundShaperField::PeakHeight(Ring.Header.Top)) + MeshReach);
 	}
 	Reach = CSShaperSteps::QuantizeUp(FMath::Max(Reach, double(MaxAbsHeight) + MeshReach + 1.0));
 	Top = CSShaperSteps::QuantizeUp(Top + MeshReach + 1.0);
@@ -2047,9 +2261,13 @@ uint32 ACSGroundActor::CoverInputHash(const TArray<FCoverEntry>& Entries) const
 	uint32 Hash = ::GetTypeHash(bGroundCoverEnabled);
 	Hash = HashCombine(Hash, ::GetTypeHash(Entries.Num()));
 	Hash = HashCombine(Hash, ::GetTypeHash(GroundCoverSeed));
-	// 落笔计数：遮罩就是顶点色，画一笔路就必须重散一次。逐笔哈希 257² 个字节太贵，
-	// 一个单调计数器给出同样的判定（同岩壳那条）。
+	// 落笔计数：遮罩由顶点色算来，画一笔路就必须重散一次。逐笔哈希 257² 个字节太贵，
+	// 一个单调计数器给出同样的判定（同岩壳那条）。地面遮罩的处理参数与贴图本身（尺寸变了会换一张）也算输入。
 	Hash = HashCombine(Hash, ::GetTypeHash(PaintRevision));
+	Hash = HashFloat(Hash, GroundMaskExtendDistance);
+	Hash = HashFloat(Hash, GroundMaskWarpStrength);
+	Hash = HashFloat(Hash, GroundMaskWarpWavelength);
+	Hash = HashCombine(Hash, ::GetTypeHash(GroundMask.Get()));
 	Hash = HashCombine(Hash, ::GetTypeHash(Mirror.NumVertsX));
 	Hash = HashCombine(Hash, ::GetTypeHash(Mirror.NumVertsY));
 	Hash = HashFloat(Hash, Mirror.CellSize);
@@ -2112,7 +2330,13 @@ uint32 ACSGroundActor::CoverInputHash(const TArray<FCoverEntry>& Entries) const
 		Hash = HashFloat(Hash, One->HeightOffset);
 		Hash = HashCombine(Hash, ::GetTypeHash(One->bCastShadow));
 		Hash = HashCombine(Hash, ::GetTypeHash(One->Salt));
+		Hash = HashFloat(Hash, One->PatchSize);
+		Hash = HashFloat(Hash, One->PatchCoverage);
+		Hash = HashFloat(Hash, One->PatchSoftness);
+		Hash = HashFloat(Hash, One->PatchSparseDensity);
 	}
+	// WPO 淡出不参与散布，但它写在组件上（EnsureCoverComponents），而那一步排在这条短路后面 —— 不进哈希就是"改了没反应"。
+	Hash = HashFloat(Hash, CoverWPOFadeLength);
 	// 0 是"还没散过"的哨兵，真算出 0 时挪开一格，否则那一轮的短路永远不成立。
 	return Hash == 0 ? 1u : Hash;
 }
@@ -2173,6 +2397,12 @@ bool ACSGroundActor::EnsureCoverComponents(const TArray<FCoverEntry>& Entries)
 	CoverBuffers.SetNum(Species.Num());
 	CoverHandover.Capacities.SetNum(Species.Num());
 
+	// WPO 淡出的交界 = 草的近 / 远边界（近处窗口真正画到的距离，窗口被预算收小时跟着收）；草没分两档时取它的 NearDistance。
+	// 草与每一种花共用这一条（2026-09-29 用户："直至交界处时彻底消失"），见 `CoverWPOFadeLength`。
+	float WPOFadeEnd = FMath::Max(Grass.LOD.NearDistance, 100.0f);
+	if (Grass.Mesh && Entries.Num() > 0 && Entries[0].Role == ECoverRole::Near) WPOFadeEnd = FMath::Max(Entries[0].Boundary, 100.0f);
+	const float WPOFadeStart = FMath::Max(WPOFadeEnd - FMath::Max(CoverWPOFadeLength, 0.0f), 0.0f);
+
 	for (int32 Index = 0; Index < Species.Num(); ++Index)
 	{
 		const FCSGroundCoverSpecies& One = *Species[Index];
@@ -2183,11 +2413,28 @@ bool ACSGroundActor::EnsureCoverComponents(const TArray<FCoverEntry>& Entries)
 			CoverComponents[Index]->RegisterComponent();   // 未注册时任何变更都会释放 GPU 网格
 		}
 		CoverComponents[Index]->InstanceMaterial = One.Material;
+		// 影子副本排在换网格之前：网格一换组件就重建一次，先定好要不要那套经典缓冲，免得同一趟建两回。
+		// 投影的物种（花）在 Nanite 路上把影子留给经典副本 —— 影子因此仍落在 CSM 那份软度里（2026-09-29 用户选的方案）。
+		// 不投影的（草）不要副本；不走 Nanite 路时这一条什么都不做。
+		CoverComponents[Index]->SetClassicShadowOnNanitePath(One.bCastShadow);
 		CoverComponents[Index]->SetBaseMesh(One.Mesh);     // 同一张网格时内部直接早退
 		// 逐物种的投影开关，默认关（见 `FCSGroundCoverSpecies::bCastShadow`）。组件是 Transient、
 		// 每次重建都是新对象，而构造函数里 `CastShadow = true` ⇒ 这一行必须每趟都写，不能只在新建时写。
 		CoverComponents[Index]->SetCastShadow(One.bCastShadow);
 		CoverMeshesBuiltFrom[Index] = One.Mesh;
+
+		// WPO：近处与单档条目在 [交界 − 淡出长度, 交界] 里由材质淡到 0，交界之外引擎整个不求 WPO（Nanite 的逐实例
+		// WPO 关闭距离）。远处组合草的材质本来就没有 WPO：两个下标写 0 = 材质不淡出、组件不关（关了也没东西可关）。
+		{
+			const bool bFarClump = Entries[Index].Role == ECoverRole::Far;
+			UCSGpuInstancedMeshComponent* Component = CoverComponents[Index];
+			Component->SetCustomPrimitiveDataFloat(CoverWPOFadeStartIndex, bFarClump ? 0.0f : WPOFadeStart);
+			Component->SetCustomPrimitiveDataFloat(CoverWPOFadeEndIndex, bFarClump ? 0.0f : WPOFadeEnd);
+			Component->InstanceWPODisableDistance = bFarClump ? 0 : FMath::CeilToInt32(WPOFadeEnd);
+			// Nanite 路的距离带按哪个视点判：脚本钉住了窗口就按钉住的机位，否则替身自己跟相机。
+			if (CoverViewOverride.IsSet()) Component->SetDistanceCullViewOverride(CoverViewOverrideLocation);
+			else Component->ClearDistanceCullViewOverride();
+		}
 
 		// 近 / 远两档的距离带：近处 End = 边界、远处 Start = 边界，同一条过渡带 ⇒ 交界互补、没有硬圈。
 		// 普通条目三个都归零（从两档切回一档时要把上一轮写上去的清掉）。代理构造时抄走这三个数，变了才重建渲染状态。
@@ -2318,6 +2565,10 @@ void ACSGroundActor::RebuildGroundCover()
 		P.MaskStart = One.MaskStart;
 		P.MaskEnd = One.MaskEnd;
 		P.MaskShorten = One.MaskShorten;
+		// R（道路权重）读地面遮罩 —— 地面材质混贴图用的也是它（"地形 mask 决定草"）；选了别的通道的物种照旧读色流原值。
+		P.bUseGroundMask = One.MaskChannel == ECSGroundCoverMaskChannel::Red && GroundMask != nullptr;
+		P.MaskWarpStrength = GroundMaskWarpStrength;   // 与地面材质同一对扰动参数（BindGroundMaterial）
+		P.MaskWarpWavelength = GroundMaskWarpWavelength;
 		// 密度已经烘进格距里了，所以概率恒为 1 —— 它在这条路上只剩"这个物种开着吗"这一个语义。
 		P.Chance = 1.0f;
 		P.Jitter = One.Jitter;
@@ -2335,6 +2586,11 @@ void ACSGroundActor::RebuildGroundCover()
 		P.ScaleClumpShare = One.ScaleClumpShare;
 		P.BendRange = FVector2f(float(One.BendRange.X), float(One.BendRange.Y));
 		P.RadialBendScale = One.RadialBendScale;
+		// 聚散（花）。远处组合草复制的是草那一份（草默认 0 = 关），不会平白长出一片一片的草。
+		P.PatchSize = One.PatchSize;
+		P.PatchCoverage = One.PatchCoverage;
+		P.PatchSoftness = One.PatchSoftness;
+		P.PatchSparseDensity = One.PatchSparseDensity;
 		P.Seed = uint32(GroundCoverSeed);
 		// 盐里混进下标：两行花配了同一个 Salt 时仍然分得开。用户填的 Salt 仍然生效
 		// （它决定"同一下标下换个花样"），只是不再是唯一的分离手段。
@@ -2357,7 +2613,7 @@ void ACSGroundActor::RebuildGroundCover()
 
 	TArray<FVector4f> ShaperParams;
 	BuildShaperGpuParams(ShaperParams);
-	if (!CSGroundCover::Scatter(Resident, CoverBuffers, AllParams, ShaperParams)) return;
+	if (!CSGroundCover::Scatter(Resident, CoverBuffers, AllParams, ShaperParams, TArray<FVector4f>(), GroundMask)) return;
 
 	// 包围盒按"地面矩形 × MaxAbsHeight"写死（同石阶）：只有 GPU 知道摆了哪些，CPU 不能读。
 	// 全部物种共用一个盒子 —— 它已经按最坏物种放大过，共用还顺带保证所有交接同时稳态、
@@ -2388,6 +2644,9 @@ void ACSGroundActor::RebuildGroundCover()
 	CSShaperSteps::FHandoverOptions Options;
 	Options.Mode = CSShaperSteps::EHandoverMode::PerPalette;
 	Options.LogLabel = TEXT("地被物种");
+	// 改了就通知（Nanite 路因此不再每帧重写 GPU-Scene）。CoverBuffers 只有上面那一处 CSGroundCover::Scatter 在写，
+	// 写完必到这里；容量变了走 EnsureBuffers 换新 buffer，那是重新交接。2026-10-02 数过，加新的写入路径要一起改。
+	Options.bNotifiesChanges = true;
 	CSShaperSteps::HandOverInstanceSources(Sources, LocalBounds, CoverHandover, Options, this);
 	CoverBuiltHash = Hash;
 }
@@ -2467,8 +2726,12 @@ uint32 ACSGroundActor::BushInputHash(const TArray<UStaticMesh*>& Meshes, const T
 	Hash = HashCombine(Hash, ::GetTypeHash(B.Salt));
 	Hash = HashCombine(Hash, ::GetTypeHash(GroundCoverSeed));
 
-	// 地面这一侧的输入与地被相同：路（顶点色，一个单调计数器代表）、格子、位置、高度场参数。
+	// 地面这一侧的输入与地被相同：路（顶点色，一个单调计数器代表；读的是它处理成的地面遮罩）、格子、位置、高度场参数。
 	Hash = HashCombine(Hash, ::GetTypeHash(PaintRevision));
+	Hash = HashFloat(Hash, GroundMaskExtendDistance);
+	Hash = HashFloat(Hash, GroundMaskWarpStrength);
+	Hash = HashFloat(Hash, GroundMaskWarpWavelength);
+	Hash = HashCombine(Hash, ::GetTypeHash(GroundMask.Get()));
 	Hash = HashCombine(Hash, ::GetTypeHash(Mirror.NumVertsX));
 	Hash = HashCombine(Hash, ::GetTypeHash(Mirror.NumVertsY));
 	Hash = HashFloat(Hash, Mirror.CellSize);
@@ -2611,6 +2874,9 @@ void ACSGroundActor::RebuildBuildingBushes()
 	Base.MaskStart = B.RoadMaskStart;
 	Base.MaskEnd = B.RoadMaskEnd;
 	Base.MaskShorten = 0.0f;                 // 路边不压矮：灌木在路上直接不长
+	Base.bUseGroundMask = GroundMask != nullptr;   // 同地被：地面遮罩上露土的地方不长
+	Base.MaskWarpStrength = GroundMaskWarpStrength;
+	Base.MaskWarpWavelength = GroundMaskWarpWavelength;
 	Base.Chance = 1.0f;
 	Base.Jitter = 1.0f;                      // TG：格心 ± 1 m（格距 2 m）
 	Base.MinSlopeCos = FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(B.MaxSlopeDegrees, 0.0f, 89.0f)));
@@ -2656,7 +2922,7 @@ void ACSGroundActor::RebuildBuildingBushes()
 
 	TArray<FVector4f> ShaperParams;
 	BuildShaperGpuParams(ShaperParams);
-	if (!CSGroundCover::Scatter(Resident, BushBuffers, AllParams, ShaperParams, PackedBuildings)) return;
+	if (!CSGroundCover::Scatter(Resident, BushBuffers, AllParams, ShaperParams, PackedBuildings, GroundMask)) return;
 
 	// 包围盒按"地面矩形 × MaxAbsHeight"由配置算死（同地被）：灌木跟着房子到处跑，盒子却不动，
 	// 拖房子因此不会触发阻塞的 SetInstanceSourceGPU。
@@ -2681,6 +2947,8 @@ void ACSGroundActor::RebuildBuildingBushes()
 	CSShaperSteps::FHandoverOptions Options;
 	Options.Mode = CSShaperSteps::EHandoverMode::PerPalette;
 	Options.LogLabel = TEXT("灌木");
+	// 同地被：BushBuffers 只有上面那一处 Scatter 在写，写完必到这里。
+	Options.bNotifiesChanges = true;
 	CSShaperSteps::HandOverInstanceSources(Sources, LocalBounds, BushHandover, Options, this);
 	BushBuiltHash = Hash;
 }
@@ -2748,6 +3016,29 @@ int32 ACSGroundActor::DebugReadGroundCoverOriginsSync(int32 SpeciesIndex, TArray
 	// kernel 写的是**组件空间**的原点（packed 行按组件空间存），带出来的要是世界坐标才好断言。
 	const FTransform Transform = GetActorTransform();
 	for (FVector& One : OutWorldOrigins) One = Transform.TransformPosition(One);
+	return Count;
+}
+
+int32 ACSGroundActor::DebugReadGroundCoverHeightsSync(int32 SpeciesIndex, TArray<FVector>& OutWorldOrigins,
+	TArray<float>& OutHeightScale) const
+{
+	OutWorldOrigins.Reset();
+	OutHeightScale.Reset();
+	if (!CoverBuffers.IsValidIndex(SpeciesIndex)) return -1;
+
+	TArray<FVector4f> Rows;
+	const int32 Count = CSGroundCover::DebugReadInstancesSync(CoverBuffers[SpeciesIndex], nullptr, &Rows);
+	const FTransform Transform = GetActorTransform();
+	OutWorldOrigins.Reserve(Count);
+	OutHeightScale.Reserve(Count);
+	for (int32 Index = 0; Index < Count; ++Index)
+	{
+		const int32 Base = Index * CS_GPU_INSTANCED_ROW_FLOAT4S;
+		if (!Rows.IsValidIndex(Base + 3)) break;
+		OutWorldOrigins.Add(Transform.TransformPosition(FVector(Rows[Base + 3].X, Rows[Base + 3].Y, Rows[Base + 3].Z)));
+		// 第 3 行 = LocalZ = 组件空间的株轴 × HeightScale（含遮罩压矮）；地面只允许平移 ⇒ 长度就是 HeightScale。
+		OutHeightScale.Add(FVector3f(Rows[Base + 2].X, Rows[Base + 2].Y, Rows[Base + 2].Z).Size());
+	}
 	return Count;
 }
 
@@ -2924,11 +3215,12 @@ void ACSGroundActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChang
 		PropertyName == GET_MEMBER_NAME_CHECKED(ACSGroundActor, CellSize) ||
 		PropertyName == GET_MEMBER_NAME_CHECKED(ACSGroundActor, UVWorldPeriod);
 	if (bShapeProperty) RebuildGroundMesh();   // 内部末尾会重扫石阶
-	else if (PropertyName == GET_MEMBER_NAME_CHECKED(ACSGroundActor, GroundMaterial)) BindTinyGladeMaterials({ GroundMaterial });
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(ACSGroundActor, GroundMaterial)) BindGroundMaterial();
 	// 其余属性一律重扫石阶 + 重披挂岩壳：两条链各自就是一次 dispatch，为了省它去维护一张
 	// "哪些属性算石阶/岩壳属性"的名单，收益远小于名单漏一条时"改了参数没反应"的排查成本。
-	// 岩壳自己的哈希会把真正没变的那些吃掉。
-	else { RebuildStairs(); RebuildRockShell(); RebuildSkirtDecor(); RebuildGroundCover(); RebuildBuildingBushes(); }
+	// 岩壳自己的哈希会把真正没变的那些吃掉。地面遮罩排最前（地被 / 灌木读它），同样靠自己的哈希短路；
+	// 材质参数跟着重喂一次（草的 MaskStart / MaskEnd 决定土铺到哪，没变时 MID 自己早退）。
+	else { RebuildGroundMask(); BindGroundMaterial(); RebuildStairs(); RebuildRockShell(); RebuildSkirtDecor(); RebuildGroundCover(); RebuildBuildingBushes(); }
 }
 
 void ACSGroundActor::PostEditUndo()
