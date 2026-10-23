@@ -173,7 +173,7 @@
   <rect class="card guard" x="1108" y="592" width="300" height="82"/>
   <text class="card-title" x="1132" y="620">GetSources() = 0</text>
   <text class="card-text" x="1132" y="646">
-    <tspan x="1132" dy="0">没有 ACSSHallowWaterSource</tspan>
+    <tspan x="1132" dy="0">没有 ACSShallowWaterSource</tspan>
     <tspan x="1132" dy="20">或源点不在 Box 范围内</tspan>
   </text>
 

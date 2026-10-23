@@ -128,7 +128,7 @@
 | `xmodule-2` | `PCGPluginDebug.h` 逐字节重复 | 同上 | 删死副本 | ~46 |
 | `xmodule-3` `gse-21` `gse-27` | OpenVDB 粒子→level-set→mesh 管线 | `ComputeShaderGenerator` ⟷ `GeometryScriptExtraEditor`（`VDBParticleList` vs `FCSGeneratorVDBParticleList`） | 上提到 `ComputeShaderGenerator`（已是 Public 依赖） | ~150–200 |
 | `xmodule-4` | `DynamicMesh→UStaticMesh` 保存管线 | 三个 PCGPlugins 模块各一份 | 提取到共享助手 | ~110 |
-| `xmodule-5` | 同步 GPU buffer-readback 样板 | `ComputeShaderGenerator` 内复制 ~9 次 | 提取 `CSHepler` 风格模板 | ~250 |
+| `xmodule-5` | 同步 GPU buffer-readback 样板 | `ComputeShaderGenerator` 内复制 ~9 次 | 提取 `CSHelper` 风格模板 | ~250 |
 | `mcp-10,11,12,13,18,20` | graph-by-name 查找 ×6、transform-JSON ×3、actor 查找 ×6、vector→JSON ×10+、capabilities 手抄注册表、resolve-actor+component 样板 | `MCPUnreal` 多文件 | 全部收拢进 `MCPUnrealUtils.h` | ~400 |
 | `mcp-4,5,6` | 测试模块把派发表复制为平行副本（已漂移，接受不存在的 op、漏掉真实 op） | `MCPUnrealTests` | 让测试引用生产派发表，删 `ParseJsonBody_BROKEN` | ~300 |
 | `gse-22,23,29` | foliage 实例变换助手、GPU 体素上传块 ×3、foliage↔transform 薄包装 | `GeometryEditorActor.cpp` static ⟷ `UFoliageConverter` | 合并为带 `UWorld*` 的重载 | ~40 |
@@ -151,8 +151,8 @@
 | `hygiene-14` | `T_Smoke005.uasset` 同名两副本（内容不同）：`Content/Effects/Fx/0_Resources/Tex/Smoke/` 与 `Content/MaterialLibrary/Texture/CommonNoise/` | 编辑器内确认引用后合并，走重定向器（uasset 移动需 redirect 处理） |
 | `hygiene-11` | `Config/DefaultEditor.ini` `SimpleMap` 指向已删关卡 `/Game/TopDown/Maps/TopDownExampleMap` | 更新为现有关卡 |
 | `hygiene-12` | `Config/DefaultEngine.ini` 重复/矛盾条目（`RecastNavMesh` 节重复） | 去重 |
-| `critic-3` | `PCGPlugins.uplugin` 强启用 `Landmass` 但代码零引用 | 移除 `Landmass` 依赖项 |
-| `critic-4` | `PCGPlugins.uplugin` 源码插件却标 `"Installed": true`（应为 false，其他源码插件均 false） | 改 `false` 或删该键 |
+| `critic-3` | `PCGPlugins.uplugin` 强启用 `Landmass` 但代码零引用 | ⚠️ 2026-10-23 复核不成立：`Content/Landscape/` 下 6 个资产引用 Landmass，**保留依赖**（见 [结构优化方案](Plan_PluginStructure.md)） |
+| `critic-4` | `PCGPlugins.uplugin` 源码插件却标 `"Installed": true`（应为 false，其他源码插件均 false） | 2026-10-23 复核：当前已是 `false`，无需处理 |
 
 ### 5.3 根目录杂物与 Build.cs 依赖的历史候选
 

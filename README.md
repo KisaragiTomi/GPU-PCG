@@ -221,7 +221,7 @@ GPU 实例化叶子的用户（每个组件各持一份 `InstancedGpuMesh`）：
 
 - 核心 Actor `ACSShallowWaterCapture`（`ComputeShaderGenerator`）本身**不 Tick**：求解由 `StartSolver(TimerRate, Iteration)` 挂在世界 `TimerManager` 上定时驱动，`StopSolver` 停止。`StartSolver` 带参数，细节面板不会给它出按钮，编辑器里从蓝图或下面的 `StartSWSolver` 调。
 - 配套蓝图库 `UCSShallowWaterProcess`（`PCGEditorProcess`）负责保存 / 烘焙 / 调试：`SaveSWData`、`StartSWSolver` / `StopSWSolver`（转发到上面两个）、`DebugDumpSWPassResults` 等。
-- `ApplyResultMeshToSimulation()`（蓝图调用 / 细节面板 `ComputeShader|Bake` 按钮）按当前 `ReusltMesh` 的实际顶点位置和 CSSW 顶点色覆盖整个模拟；组件挂预览网格时改取 `BakedResultMesh`，可在求解运行中调用。需要保留 `SimulationPreviewMesh` 或现有 SimVis 预览瓦片。
+- `ApplyResultMeshToSimulation()`（蓝图调用 / 细节面板 `ComputeShader|Bake` 按钮）按当前 `ResultMeshComponent` 的实际顶点位置和 CSSW 顶点色覆盖整个模拟；组件挂预览网格时改取 `BakedResultMesh`，可在求解运行中调用。需要保留 `SimulationPreviewMesh` 或现有 SimVis 预览瓦片。
   GPU 光栅化水面并对重叠处取最高层，按当前捕获的地面计算水深；恢复流速、湿润覆盖和泡沫，同时替换显示结果、平滑地面及活跃 tile。支持组件变换和组件顶点色覆盖，无颜色时恢复为静水。未覆盖 / 无地形 / 低于地面的单元清为空水，不与旧模拟混合。
   求解器保持原来的运行 / 暂停状态，并支持没有水源 Actor 时继续演化。该功能根据网格重建状态，顶点色有 8 位量化，旧瀑布地面修正与干区湿润历史不在网格中，不能当作逐位恢复的模拟检查点。
   实现：`CSShallowWaterRestore.cpp` / `Shaders/Private/ShallowWaterRestore.usf`。2026-10-15 验证：Rider 首个 `Development_Editor / x64` 配置的完整 Editor 构建及 DLL 链接通过；补齐 UE 必需的 `Platform.ush` 后，目标项目 D3D12 / SM6 全局着色器编译和绑定通过。完整编辑器帧循环中的临时场景 GPU 回读确认：10 cm 水深、零流速、未覆盖区域清空、世界湿润高度、活跃 tile 及无水源继续求解均正确。另有实际 HLSL 的 18 个 D3D11 WARP 用例通过；这些小场景测试不代替复杂烘焙网格的场景验收。
@@ -258,7 +258,7 @@ AVineContainer::GenerateVineGPU()          # 录完图即返回（"已递交"）
 - **网格生成**（`UGeometryGenerate`）：`VDBMeshFromActors` / `VDBMeshFromActorPoints` / `VDBMeshFromSurfaceVoxels`、`VoxelMergeMeshs`（体素 CSG）、`FixUnclosedBoundary` / `ExtrudeUnclosedBoundary`（含 OpenVDB 体素化）。GPU 三角数据直接落进 `UCSMesh`：`CSTriangleDataToGpuMesh` / `CSTriangleBuffersToGpuMesh`、`VDBVoxelsToOpenGpuMesh`，要 `UDynamicMesh` 再走 `UCSMeshOps::CopyToDynamicMesh`。旧的 `SurfaceVoxelsToVDBMesh` 已删除，带生成器的版本改为 `AComputeShaderMeshGenerator::SurfaceVoxelsToVDBGpuMesh`（返回 `UCSMesh*`）
 - **网格属性/工具**（`UGeometryGeneral`）：法线（`CreateVertexNormals` / `BlurVertexNormals` / `CreateVertexNormalFromOverlay`）、UV / 颜色属性转移、焊接、自定义属性、OBB 朝向、距离场查询、树木风场数据（`WindDataForTree`）、`SaveDynamicMeshToStaticMesh`（转发到唯一实现 `SaveDynamicMeshToStaticMeshWithMaterials`，材质槽取自 `MaterialSource` 组件）
 - **VDB 扩展**（`UVDBExtra`）：`ParticlesToVDBMesh` / `ParticlesToVDBMeshUniform`（粒子 → level set → 网格）。VDB → 网格的 `ConvertMeshVDBExtra` 只有 C++ 版，没有网格 → VDB 的节点
-- **曲线/PolyPath**（`UPolyLine`，与 `UNoise` / `UPointFunction` / `UGeneralMath` 同在 `GeometryMathUtils.h`）：`SmoothLine`、按数量 / 长度重采样（`ResamppleByCount` / `ResamppleByLength`，拼写如此）、`ConvertPolyPathToTransforms`、`CurveU`（逐点累计弧长，可归一化）。最近点迭代 `FindNearPointIteration` 只有 C++ 版
+- **曲线/PolyPath**（`UPolyLine`，与 `UNoise` / `UPointFunction` / `UGeneralMath` 同在 `GeometryMathUtils.h`）：`SmoothLine`、按数量 / 长度重采样（`ResampleByCount` / `ResampleByLength`；2026-10-23 前拼作 `Resampple*`，旧名有 FunctionRedirects）、`ConvertPolyPathToTransforms`、`CurveU`（逐点累计弧长，可归一化）。最近点迭代 `FindNearPointIteration` 只有 C++ 版
 - **噪声 / 数组归约**（`UNoise` / `UGeneralMath`）：Curl / Perlin 噪声位移；`Reduce_*` 数组归约
 - **Landscape**（`ULandscapeExtra`）：投影平面、点投影、地形高度 / 法线采样。⚠️ 蓝图节点 `CreateLandscapeMeshTextureData` 目前恒返回空数组，真正填数据的是 C++ 版 `CreateLandscapeTextureData`（`ACSLandscape` 在用）
 - **Foliage 互转**（`UFoliageConverter`）：Foliage 实例 ↔ Transform 数组（转发到 `AVineContainer` 的导入 / 导出）、增删改查实例、自定义数据、距离排序
@@ -321,7 +321,7 @@ AVineContainer::GenerateVineGPU()          # 录完图即返回（"已递交"）
 | `ACSWallActor` | 样条墙（TG 的 freehand 墙，[墙化计划](Docs/TinyGlade/Plan_Wall.md)第 1 步）：墙 = 样条中线，逐点贴地，默认 3 m 高；墙顶压顶砖 + 隔块抬起的垛口、墙端与拐角角石、两面爬藤；拐角只按相邻两段的夹角判（转得缓就是圆滑的墙）。派生自 `ACSWallBase`，与房子共用墙的逻辑 | [`CSWallActor.h`](Source/ComputeShaderGenerator/Public/CSWallActor.h) |
 | `ACSSplineBlockActor` | 样条块排布：刚体块沿样条排列，只缩沿线步距、恰好占满样条（不是 SplineMesh 弯曲） | [`CSSplineBlockActor.h`](Source/ComputeShaderGenerator/Public/CSSplineBlockActor.h) |
 
-纯函数层（剖面 / 接缝 / 角石 / 包边 / 屋面 / 拉尺寸 / 门段）是 header-inline 的 `CSHouseProfile.h`、`CSHouseSeam.h`、`CSHouseQuoin.h`、`CSHouseTrim.h`、`CSHouseRoof.h`、`CSHouseResize.h`、`CSHouseDoorRuns.h`，以及玩家楼梯的 `CSStairs.h`，带逻辑单测。实例化产物各有一个打包 / 散布 kernel，直接写 `UCSGpuInstancedMeshComponent` 的 GPU 实例行：门框砖 `CSHouseFrame.usf`、瓦 `CSHouseTile.usf`、藤蔓 `CSHouseVine.usf`、摆件 `CSHouseDecor.usf`、承重柱砖 `CSHousePillar.usf`、石阶 `CSGroundStairs.usf`、地被 `CSGroundCover.usf`；岩壳则是一张 `UCSMesh`，由 `CSGroundRockShell.usf` 在常驻流上做位移、法线平均与倒角载荷。
+纯函数层（剖面 / 接缝 / 角石 / 包边 / 屋面 / 拉尺寸 / 门段）是 header-inline 的 `CSHouseProfile.h`、`CSHouseSeam.h`、`CSHouseQuoin.h`、`CSHouseTrim.h`、`CSHouseRoof.h`、`CSHouseResize.h`、`CSHouseDoorRuns.h`，以及玩家楼梯的 `CSStairs.h`，带逻辑单测。实例化产物各有一个打包 / 散布 kernel，直接写 `UCSGpuInstancedMeshComponent` 的 GPU 实例行：门框砖 `CSHouseFrame.usf`；瓦、藤蔓、摆件、承重柱砖四支按 CPU 记录打包的 kernel 在 `CSHousePack.usf`；石阶 `CSGroundStairs.usf`、地被 `CSGroundCover.usf`；岩壳则是一张 `UCSMesh`，由 `CSGroundRockShell.usf` 在常驻流上做位移、法线平均与倒角载荷。
 
 贯穿全系统的四条约定（逐条理由见设计文档）：
 
@@ -469,7 +469,7 @@ BVH 那一行标「下界」：基准里用的是节点 32 字节、叶子 4 三
 | 三角收集 / 解析 | `BuildBoxSceneTriangleRequests` + `ResolveStaticMeshTriangleRequests` | 10–12 ms（实测，两条路都要） | 是 |
 | 表面体素化 | 100 万三角 × 547 ns | **0.55 s** | **是** |
 | 空间竞争求解 | 邻居表 2×980²，生长循环 55×980×2 源×≤128 邻居扫描 | 0.08–0.20 s | 否 |
-| 噪声 + 投影（10 轮） | CurlNoise ×2 177 560、Perlin ×1 979 600、投影 ×1 979 600、曲线求值 ×1 979 600，外加每轮 `ResamppleByLength` + `ClonePolyPath` 全量重建 | **1.00–1.29 s** | 间接（体素表大小） |
+| 噪声 + 投影（10 轮） | CurlNoise ×2 177 560、Perlin ×1 979 600、投影 ×1 979 600、曲线求值 ×1 979 600，外加每轮 `ResampleByLength` + `ClonePolyPath` 全量重建 | **1.00–1.29 s** | 间接（体素表大小） |
 | 合并 + 最终投影 + 平滑 + 帧 | 投影 ×395 920、15.8 万点排序、4 遍重采样/平滑、逐点 `MakeFromXZ` | 0.16–0.24 s | 间接 |
 | 网格生成 | `AppendSweepPolygon` → `FDynamicMesh3`（594K 顶点 / 119 万三角）→ 整份拷进容器网格 → `UDynamicMeshComponent` 渲染缓冲重建 | **0.6–1.6 s** | 否 |
 | **合计** | | **约 2.4–3.9 s** | |
