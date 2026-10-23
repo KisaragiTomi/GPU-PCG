@@ -10,6 +10,7 @@
 // DrawIndexedIndirect. Nothing is ever read back to the CPU.
 
 #include "/Engine/Public/Platform.ush"
+#include "/Plugin/PCGPlugins/Shaders/Private/CSPackedVertex.ush"
 
 #define MAX_LEGS 12
 #define ROAD_PI 3.14159265f
@@ -165,12 +166,6 @@ float WrapPositive(float Ang)
 	while (Ang < 0.0) Ang += 2.0 * ROAD_PI;
 	while (Ang >= 2.0 * ROAD_PI) Ang -= 2.0 * ROAD_PI;
 	return Ang;
-}
-
-uint PackSnorm8888(float4 V)
-{
-	int4 I = int4(round(clamp(V, -1.0, 1.0) * 127.0));
-	return (uint(I.x) & 0xFF) | ((uint(I.y) & 0xFF) << 8) | ((uint(I.z) & 0xFF) << 16) | ((uint(I.w) & 0xFF) << 24);
 }
 
 void WriteVertex(uint V, float3 Pos, float2 Dir2D, float2 UV, uint Color)

@@ -15,6 +15,7 @@
 #include "/Engine/Private/Nanite/NaniteDataDecode.ush"
 #include "/Engine/Private/Nanite/NaniteAttributeDecode.ush"
 #include "/Plugin/PCGPlugins/Shaders/Private/CSNaniteCutLayout.ush"
+#include "/Plugin/PCGPlugins/Shaders/Private/CSPackedVertex.ush"
 
 // ClusterPageData / HierarchyBuffer / PageConstants 由 NaniteDataDecode.ush 声明，C++ 按同名绑定。
 
@@ -201,20 +202,6 @@ RWBuffer<uint>  RW_Colors;       // packed BGRA / vertex
 RWBuffer<uint>  RW_Indices;
 RWBuffer<uint>  RW_MaterialIds;  // 1 uint / triangle
 
-// 与 CSMeshOps.usf 的 PackSnorm8888 / PackColorBGRA 逐字节相同：所有生产者喂的是同一条
-// VET_PackedNormal / VET_Color 流。
-uint CSNC_PackSnorm8888(float4 V)
-{
-	int4 I = int4(round(clamp(V, -1.0, 1.0) * 127.0));
-	return (uint(I.x) & 0xFF) | ((uint(I.y) & 0xFF) << 8) | ((uint(I.z) & 0xFF) << 16) | ((uint(I.w) & 0xFF) << 24);
-}
-
-uint CSNC_PackColorBGRA(float4 RGBA)
-{
-	uint4 I = uint4(round(saturate(RGBA) * 255.0));
-	return (I.z & 0xFF) | ((I.y & 0xFF) << 8) | ((I.x & 0xFF) << 16) | ((I.w & 0xFF) << 24);
-}
-
 float3 CSNC_SafeNormal(float3 N, float3 Fallback)
 {
 	const float LenSq = dot(N, N);
@@ -297,7 +284,7 @@ void WriteClustersCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex
 			RW_TexCoords[UVBase + 1u] = 0.0f;
 		}
 
-		RW_Colors[Dst] = CSNC_PackColorBGRA(Raw[0].Color);
+		RW_Colors[Dst] = PackColorBGRA(Raw[0].Color);
 	}
 
 	GroupMemoryBarrierWithGroupSync();
@@ -374,7 +361,7 @@ void WriteClustersCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex
 		WorldTangent = CSNC_SafeNormal(WorldTangent - WorldNormal * dot(WorldTangent, WorldNormal), GetNaniteFallbackTangent(WorldNormal));
 		const float Sign = ((TangentX.w < 0.0f) ? -1.0f : 1.0f) * HandednessSign;
 
-		RW_Tangents[Dst * 2u + 0u] = CSNC_PackSnorm8888(float4(WorldTangent, 0.0f));
-		RW_Tangents[Dst * 2u + 1u] = CSNC_PackSnorm8888(float4(WorldNormal, Sign));
+		RW_Tangents[Dst * 2u + 0u] = PackSnorm8888(float4(WorldTangent, 0.0f));
+		RW_Tangents[Dst * 2u + 1u] = PackSnorm8888(float4(WorldNormal, Sign));
 	}
 }

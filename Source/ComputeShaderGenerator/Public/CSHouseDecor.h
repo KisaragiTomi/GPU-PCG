@@ -191,7 +191,7 @@ struct FParams
 	float FillChance(EFamily Family) const;
 };
 
-/** 一条实例记录 = 3 个 float4，与 `CSHouseDecor.usf` 文件头的布局逐字对应。 */
+/** 一条实例记录 = 3 个 float4，与 `CSHousePack.usf` 里 PackHouseDecorCS 的记录说明逐字对应。 */
 struct FRecord
 {
 	FVector3f WorldPos = FVector3f::ZeroVector;

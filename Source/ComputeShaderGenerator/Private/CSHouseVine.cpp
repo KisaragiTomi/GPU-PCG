@@ -90,9 +90,9 @@ class FCSHouseVinePackCS : public FGlobalShader
 	}
 };
 
-IMPLEMENT_GLOBAL_SHADER(FCSHouseVinePackCS, "/Plugin/PCGPlugins/Shaders/Private/CSHouseVine.usf", "PackHouseVineCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FCSHouseVinePackCS, "/Plugin/PCGPlugins/Shaders/Private/CSHousePack.usf", "PackHouseVineCS", SF_Compute);
 
-/** 记录数组 → 上传用的 float4 平铺。布局与 `CSHouseVine.usf` 文件头逐字对应。 */
+/** 记录数组 → 上传用的 float4 平铺。布局与 `CSHousePack.usf` 里 PackHouseVineCS 的记录说明逐字对应。 */
 void CSHouseVine_Flatten(const TArray<CSHouseVine::FRecord>& In, TArray<FVector4f>& Out)
 {
 	Out.Reset(In.Num() * 4);

@@ -132,7 +132,7 @@ struct FParams
 
 /**
  * 一块瓦。三条轴**按网格的局部轴序**存（`AxisX` 就是喂给网格 +X 的那条世界方向），
- * 排列已经在 CPU 侧折进来了 —— kernel 因此一步正交化都不做，见 `CSHouseTile.usf` 文件头。
+ * 排列已经在 CPU 侧折进来了 —— kernel 因此一步正交化都不做，见 `CSHousePack.usf` 里 PackHouseTileCS 的说明。
  */
 struct FRecord
 {

@@ -1,0 +1,362 @@
+// 房屋实例行打包：摆件、承重柱砖、屋面瓦、墙面藤蔓四支 kernel（TinyGladeHouse D12 / D9 / 四坡屋顶 / D13）。
+//
+// 2026-10-23 前四支各占一个文件（CSHouseDecor / CSHousePillar / CSHouseTile / CSHouseVine.usf）。
+// 它们的记录格式与基的约定各不相同，所以仍是四支 kernel，各自的说明写在 kernel 上方；
+// 共同的最后一步（三行缩放基 + 原点与随机数 + 剔除球）收在 CSHousePack_Rows 里。
+// 门框砖是从拱参数解析推导的、不走 CPU 记录，留在 CSHouseFrame.usf。
+//
+// **为什么不用原子**（四支同一条纪律）：记录是 CPU 排好的，条数与顺序都确定 ⇒ 线程 i 直接写第 i 行，
+// 槽位**恒等于记录序号**，逐实例随机因此由记录自带（各自的 .cpp 按身份哈希算出来）。取 `InterlockedAdd`
+// 的槽位当随机源的后果是"画一笔路全场变色"，而且**不会有任何断言报红** —— S1 已经栽过一次。
+//
+// counter 由 0 号线程直接写死 —— 记录数是 CPU 排定的，不需要原子累加。组件永远不会替我们清 counter，
+// 所以那一句是必需的而不是优化。
+//
+// packed 行布局照抄 CSGpuInstancedMesh.usf：前三行是被缩放过的基（**矩阵的行**，LocalVertexFactory 的
+// GetInstanceTransform 就是这么重建的），第 4 行是原点 + 每实例随机数，第 5 行是剔除球。
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/PCGPlugins/Shaders/Private/CSGpuSharedLayout.ush"
+
+#ifndef THREADGROUPSIZE_X
+#define THREADGROUPSIZE_X 64
+#endif
+
+/**
+ * 记录 → 一个实例的 5 行 packed 数据。X / Y / Z 是组件空间里已经乘过尺寸的基。
+ *
+ * 剔除球必须包住**变换后**的基础网格：MaxAxisScale 由调用方按自己的基给（单位基 × 块缩放取最大分量，
+ * 已缩放的基取最长轴），少放大一点点就会在视锥边缘闪掉实例，而且只在斜看时出现，最难复现。
+ * RadiusPad 是剔除 pass 看不见的额外外扩（瓦的 WPO），其余三支传 0。
+ */
+void CSHousePack_Rows(float3 X, float3 Y, float3 Z, float3 Origin, float Random01,
+	float3 BaseSphereCentre, float BaseSphereRadius, float MaxAxisScale, float RadiusPad, out float4 Rows[5])
+{
+	Rows[0] = float4(X, 0.0f);   // .w 必须是 0：引擎拿它做选中/hitproxy
+	Rows[1] = float4(Y, 0.0f);
+	Rows[2] = float4(Z, 0.0f);
+	Rows[3] = float4(Origin, Random01);
+
+	const float3 SphereCentre = Origin
+		+ X * BaseSphereCentre.x
+		+ Y * BaseSphereCentre.y
+		+ Z * BaseSphereCentre.z;
+	Rows[4] = float4(SphereCentre, BaseSphereRadius * max(MaxAxisScale, 1e-3f) + RadiusPad);
+}
+
+// ============================================================================================
+// 装饰摆件（D12 的**锚点那一半**）
+//
+// **为什么不复用藤蔓那支**：藤的每一段是被拉长的（长度轴按段长缩放、+Y 钉在墙面法线上），
+// 摆件不是 —— 一个桶就是一个桶，只有绕世界上方向的 yaw、加一点等比缩放。
+// 把两件事塞进一支 kernel 得靠分支切基，读起来比两支各自成立的短 kernel 更容易错。
+// 随机数由 `CSHouseDecor.cpp` 按 (家族, 锚点 id, 种子) 的身份哈希算出来。
+//
+// 记录 = 3 个 float4（`CSHouseDecor::FRecord`，CPU 侧同一份定义）：
+//   [0] 世界位置 xyz | 横向缩放
+//   [1] 世界朝向 xyz（单位，水平，背离构件；已含 yaw 抖动）| 逐实例随机 [0,1)
+//   [2] 世界上方向 xyz（单位）| 竖向缩放（再乘横向缩放）
+//
+// 基的约定（与藤蔓那支的 "+Z 沿段、+Y 墙法线" **不同**，这里是"物件立在地上"的常规基）：
+//   +Z = 世界上方向（摆件是竖直立着的，屋顶那两家也照样立直 —— 鸟窝不该跟着坡歪）
+//   +X = 朝外方向（背离墙 / 背离屋脊），在 +Z 的正交补里取
+//   +Y = Z × X
+// clutter 网格大多轴对称（桶、箱、柴垛），没有统一的"正面"约定，所以把局部 +X 对到朝外
+// 方向就够了；真正需要精确正面的是窗台花箱那一批，它们的候选点表还等着 C1 拍板。
+// ============================================================================================
+
+StructuredBuffer<float4> DecorRecords;   // 3 个 float4 / 实例
+
+RWBuffer<float4> RWDecorInstances;       // 5 个 float4 / 实例
+RWBuffer<uint>   RWDecorCounter;         // [0] = 活跃实例数
+
+float4x4 DecorWorldToComponent;
+float3   DecorBaseSphereCentre;          // 基础网格局部包围球心（未缩放）
+float    DecorBaseSphereRadius;
+float3   DecorBlockSize;                 // 三轴块尺寸；clutter 自带真实尺寸 ⇒ 恒 (1,1,1)
+uint     DecorRecordCount;
+uint     DecorMaxInstances;
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void PackHouseDecorCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint Index = DispatchThreadId.x;
+	if (Index >= DecorRecordCount || Index >= DecorMaxInstances) return;
+
+	if (Index == 0u) RWDecorCounter[0] = min(DecorRecordCount, DecorMaxInstances);
+
+	const uint Rec = Index * 3u;
+	const float4 R0 = DecorRecords[Rec + 0u];
+	const float4 R1 = DecorRecords[Rec + 1u];
+	const float4 R2 = DecorRecords[Rec + 2u];
+
+	const float3 WorldPos = R0.xyz;
+	const float Scale = max(R0.w, 1e-4f);
+	const float3 FacingIn = R1.xyz;
+	const float Random01 = R1.w;
+	const float3 UpIn = R2.xyz;
+	const float ScaleZ = max(R2.w, 1e-4f);
+
+	if (dot(UpIn, UpIn) < 1e-8f) return;             // 退化记录宁可少摆一件
+	const float3 AxisZ = normalize(UpIn);
+
+	// 朝外方向投进 Up 的正交补。摆件立在斜坡上时 Facing 与 Up 未必正交，这一步不能省。
+	float3 AxisX = FacingIn - AxisZ * dot(AxisZ, FacingIn);
+	if (dot(AxisX, AxisX) < 1e-8f) return;           // Facing 与 Up 平行 ⇒ 定不出 yaw
+	AxisX = normalize(AxisX);
+	const float3 AxisY = cross(AxisZ, AxisX);
+
+	const float3 LocalX = mul(float4(AxisX, 0.0f), DecorWorldToComponent).xyz;
+	const float3 LocalY = mul(float4(AxisY, 0.0f), DecorWorldToComponent).xyz;
+	const float3 LocalZ = mul(float4(AxisZ, 0.0f), DecorWorldToComponent).xyz;
+	const float3 Origin = mul(float4(WorldPos, 1.0f), DecorWorldToComponent).xyz;
+
+	float3 BlockScale = DecorBlockSize;
+	if (dot(BlockScale, BlockScale) < 1e-8f) BlockScale = float3(1.0f, 1.0f, 1.0f);
+	BlockScale.xy *= Scale;
+	BlockScale.z *= Scale * ScaleZ;
+
+	// 基向量是单位长，所以剔除球按块缩放的最大分量放大。
+	const float MaxAxisScale = max(BlockScale.x, max(BlockScale.y, BlockScale.z));
+	float4 Rows[5];
+	CSHousePack_Rows(LocalX * BlockScale.x, LocalY * BlockScale.y, LocalZ * BlockScale.z, Origin, Random01,
+		DecorBaseSphereCentre, DecorBaseSphereRadius, MaxAxisScale, 0.0f, Rows);
+
+	const uint Base = Index * CS_GPU_INSTANCED_ROW_FLOAT4S;
+	UNROLL for (uint Row = 0u; Row < 5u; ++Row) RWDecorInstances[Base + Row] = Rows[Row];
+}
+
+// ============================================================================================
+// 承重柱砖石（D9 表现层）
+//
+// 与藤蔓那支是同一条流水线的两个消费者，区别只有一处：藤蔓的记录给的是**方向 + 法线**、由 kernel
+// 现搭正交基；砖给的是**三条已经缩放好的轴**，kernel 只做世界 → 组件的线性变换。理由是砖的三个轴
+// 各自独立（交错砌法要逐层交换 X/Y，托架还要逐层放大截面），拿"方向 + 法线"表达不了。
+// 随机数由 `CSHousePillar.cpp` 按 (柱号, 层号, 种子) 的身份哈希算出来，与藤蔓、石阶同一条纪律。
+//
+// 记录 = 4 个 float4（`CSHousePillar::FBrick`，CPU 侧同一份定义）：
+//   [0] 世界砖心 xyz | 逐实例随机 [0,1)
+//   [1] 已缩放的 X 轴 xyz | 未用
+//   [2] 已缩放的 Y 轴 xyz | 未用
+//   [3] 已缩放的 Z 轴 xyz | 未用
+// ============================================================================================
+
+StructuredBuffer<float4> PillarRecords;   // 4 个 float4 / 实例
+
+RWBuffer<float4> RWPillarInstances;       // 5 个 float4 / 实例
+RWBuffer<uint>   RWPillarCounter;         // [0] = 活跃实例数
+
+float4x4 PillarWorldToComponent;
+float3   PillarBaseSphereCentre;          // 基础网格局部包围球心（未缩放）
+float    PillarBaseSphereRadius;
+float3   PillarBlockSize;                 // 三轴块尺寸，已除过基础网格自身尺寸
+uint     PillarRecordCount;
+uint     PillarMaxInstances;
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void PackHousePillarCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint Index = DispatchThreadId.x;
+	if (Index >= PillarRecordCount || Index >= PillarMaxInstances) return;
+
+	if (Index == 0u) RWPillarCounter[0] = min(PillarRecordCount, PillarMaxInstances);
+
+	const uint Rec = Index * 4u;
+	const float4 R0 = PillarRecords[Rec + 0u];
+	const float4 R1 = PillarRecords[Rec + 1u];
+	const float4 R2 = PillarRecords[Rec + 2u];
+	const float4 R3 = PillarRecords[Rec + 3u];
+
+	// 轴已经带着尺寸了，这里只做世界 → 组件。`BlockSize` 再把基础网格自身的尺寸除掉
+	// （`brick` 是 1×1×1 的字典 mesh，所以它通常是 (1,1,1)；留着是为了换资产时不用改 kernel）。
+	const float3 LocalX = mul(float4(R1.xyz, 0.0f), PillarWorldToComponent).xyz * PillarBlockSize.x;
+	const float3 LocalY = mul(float4(R2.xyz, 0.0f), PillarWorldToComponent).xyz * PillarBlockSize.y;
+	const float3 LocalZ = mul(float4(R3.xyz, 0.0f), PillarWorldToComponent).xyz * PillarBlockSize.z;
+	const float3 Origin = mul(float4(R0.xyz, 1.0f), PillarWorldToComponent).xyz;
+
+	// 轴不是单位长（尺寸就烘在里面），所以剔除球按三条轴的最大模长放大。
+	const float MaxAxis = max(length(LocalX), max(length(LocalY), length(LocalZ)));
+	float4 Rows[5];
+	CSHousePack_Rows(LocalX, LocalY, LocalZ, Origin, R0.w,
+		PillarBaseSphereCentre, PillarBaseSphereRadius, MaxAxis, 0.0f, Rows);
+
+	const uint Base = Index * CS_GPU_INSTANCED_ROW_FLOAT4S;
+	UNROLL for (uint Row = 0u; Row < 5u; ++Row) RWPillarInstances[Base + Row] = Rows[Row];
+}
+
+// ============================================================================================
+// 屋面瓦片（四坡屋顶，2026-08-31）
+//
+// **为什么不复用摆件那支**：摆件是"立在地上的物件"—— 局部 +Z 恒等于世界上方向，kernel 只需要把
+// Facing 投进 Up 的正交补求一个 yaw。瓦不是：它**贴在斜坡上**，三条轴（屋面法线 / 上坡向 / 沿排向）
+// 全部由屋面方程定死，而且**每块瓦的三轴尺寸各不相同** —— 排距与列距都是"可用长 / 份数"等分出来的，
+// 逐排都在变。所以记录直接带**整组基**：kernel 一步正交化都不做，也就没有可翻错的号（摆件那支的
+// 投影步在这里既多余又会引入误差）。随机数由 `CSHouseTile.cpp` 按 (面号, 排号, 列号, 种子) 的身份
+// 哈希算出来，取槽位当随机源的后果是"改一下坡度整片屋顶变色"。
+//
+// 记录 = 5 个 float4（`CSHouseTile_Flatten`）：
+//   [0] 世界位置 xyz | 逐实例随机 [0,1)
+//   [1] 世界方向 xyz（单位）→ 瓦网格**局部 +X** | 该轴上的世界尺寸 cm
+//   [2] 同上 → 局部 +Y | 尺寸 cm
+//   [3] 同上 → 局部 +Z | 尺寸 cm
+//   [4] 裁剪平面编码角 / 世界平面常数 / 0 / 0，见 FRecord::ClipPlane。
+//
+// 尺寸走"世界 cm"而不是倍率：`FPaletteBuffers::BlockSize` 填 **1/网格自身尺寸**（与藤蔓那条
+// 同一个手法），于是记录里写多少 cm 画出来就是多少 cm —— 逐排改尺寸不必回头动 BlockSize。
+// ============================================================================================
+
+StructuredBuffer<float4> TileRecords;    // 5 个 float4 / 实例
+
+RWBuffer<float4> RWTileInstances;        // 5 个 float4 / 实例
+RWBuffer<uint>   RWTileCounter;          // [0] = 活跃实例数
+RWBuffer<float>  RWTileCustomData;       // 平面角 + 4 / 平面常数，共用 2-float 实例通道
+
+float4x4 TileWorldToComponent;
+float3   TileBaseSphereCentre;           // 基础网格局部包围球心（未缩放）
+float    TileBaseSphereRadius;
+float3   TileBlockSize;                  // 1 / 网格自身三轴尺寸（把记录里的 cm 换成倍率）
+uint     TileRecordCount;
+uint     TileMaxInstances;
+
+// `M_TinyGladeRoof` 的 WPO 在剔除之后才推顶点（`Scripts/TinyGladeMakeRoofMaterial.py` 文件头）：
+// 除瓦端抬升与水平抖动外，还按模板符号补偿半瓦 / 窄脊的倒角宽度，预留 32 cm 与材质一致。
+// 屋面起伏与檐口起翘按用户 09-15 裁决不移植。剔除 pass 看不见 WPO，球不放大会让视锥边缘瓦片闪掉。
+// 常量而不是参数：改它不动 FParameters，旧 DLL 也照常绑定。
+static const float TileWpoReach = 32.0f;
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void PackHouseTileCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint Index = DispatchThreadId.x;
+	if (Index >= TileRecordCount || Index >= TileMaxInstances) return;
+
+	if (Index == 0u) RWTileCounter[0] = min(TileRecordCount, TileMaxInstances);
+
+	const uint Rec = Index * 5u;
+	const float4 R0 = TileRecords[Rec + 0u];
+	const float4 R1 = TileRecords[Rec + 1u];
+	const float4 R2 = TileRecords[Rec + 2u];
+	const float4 R3 = TileRecords[Rec + 3u];
+	const float4 R4 = TileRecords[Rec + 4u];
+	RWTileCustomData[Index * CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS] = R4.x;
+	RWTileCustomData[Index * CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS + 1u] = R4.y;
+
+	const float3 WorldPos = R0.xyz;
+	const float Random01 = R0.w;
+
+	// 退化记录宁可少铺一块瓦：零长基向量会让 GetInstanceTransform 拿到奇异矩阵，
+	// 画出来是一块拉到无穷远的黑面片，比缺一块瓦难看得多也难查得多。
+	if (dot(R1.xyz, R1.xyz) < 1e-8f || dot(R2.xyz, R2.xyz) < 1e-8f || dot(R3.xyz, R3.xyz) < 1e-8f) return;
+
+	float3 BlockSize = TileBlockSize;
+	if (dot(BlockSize, BlockSize) < 1e-12f) BlockSize = float3(1.0f, 1.0f, 1.0f);
+
+	const float3 ScaleXYZ = float3(R1.w, R2.w, R3.w) * BlockSize;
+
+	const float3 LocalX = mul(float4(normalize(R1.xyz), 0.0f), TileWorldToComponent).xyz * ScaleXYZ.x;
+	const float3 LocalY = mul(float4(normalize(R2.xyz), 0.0f), TileWorldToComponent).xyz * ScaleXYZ.y;
+	const float3 LocalZ = mul(float4(normalize(R3.xyz), 0.0f), TileWorldToComponent).xyz * ScaleXYZ.z;
+	const float3 Origin = mul(float4(WorldPos, 1.0f), TileWorldToComponent).xyz;
+
+	// 基向量已经带着缩放了，所以剔除球按最大轴长度放大，再加上 WPO 的外扩。
+	const float MaxAxisScale = max(length(LocalX), max(length(LocalY), length(LocalZ)));
+	float4 Rows[5];
+	CSHousePack_Rows(LocalX, LocalY, LocalZ, Origin, Random01,
+		TileBaseSphereCentre, TileBaseSphereRadius, MaxAxisScale, TileWpoReach, Rows);
+
+	const uint Base = Index * CS_GPU_INSTANCED_ROW_FLOAT4S;
+	UNROLL for (uint Row = 0u; Row < 5u; ++Row) RWTileInstances[Base + Row] = Rows[Row];
+}
+
+// ============================================================================================
+// 墙面藤蔓（D13）
+//
+// **为什么当初不复用 `CSGroundSteps.usf`**（那条路已随裁决一删除）：它是"沿曲线铺块"，块的长度轴是 +Y、
+// 随机数取 `InterlockedAdd` 的槽位。藤蔓两条都不合：`ivy_branch` 的长度轴在 UE 里是 **+Z**
+// （实测包围盒 min=(-50,-86.6,0) max=(100,86.6,100)，长度就是那条 0→100 的 Z），而槽位随线程组完成
+// 顺序变。随机数由 `CSHouseVine.cpp` 按 (墙号, 藤号, 段号, 种子) 的身份哈希算出来 —— 这既满足"稳定
+// 身份哈希"那条纪律，又让"同一份输入两次散布逐位相同"成为构造性的事实而不是需要断言的巧合。
+//
+// 记录 = 4 个 float4（`CSHouseVine::FRecord`，CPU 侧同一份定义）：
+//   [0] 世界位置 xyz | 长度轴缩放（段长 / 基础网格长度）
+//   [1] 世界方向 xyz（单位，段的长度轴）| 逐实例随机 [0,1)
+//   [2] 世界墙面法线 xyz（单位，朝屋外）| 截面缩放
+//   [3] xy = (SpawnTime 秒, 该实例在藤上的弧长 cm)，进逐实例 custom data
+//
+// 基的约定（与门框砖 `CSHouseFrame.usf` 的"X 面内 / Y 沿曲线 / Z 平面法线"**不同**，这里是）：
+//   +Z = 段的方向（= 基础网格的长度轴，见 `CSHouseVine::BuildBaseMesh` 的换轴）
+//   +Y = 墙面外法线（藤蔓的截面因此贴着墙、叶片平摊在墙上）
+//   +X = 两者的面内垂线
+// ============================================================================================
+
+StructuredBuffer<float4> VineRecords;   // 4 个 float4 / 实例（第 4 个只用 xy）
+
+RWBuffer<float4> RWVineInstances;       // 5 个 float4 / 实例
+RWBuffer<uint>   RWVineCounter;         // [0] = 活跃实例数
+RWBuffer<float>  RWVineCustomData;      // CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS 个 / 实例
+
+float4x4 VineWorldToComponent;
+float3   VineBaseSphereCentre;          // 基础网格局部包围球心（未缩放）
+float    VineBaseSphereRadius;
+float3   VineBlockSize;                 // 三轴块尺寸：xy = 截面、z = 长度轴，均已除过基础网格自身尺寸
+uint     VineRecordCount;
+uint     VineMaxInstances;
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void PackHouseVineCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint Index = DispatchThreadId.x;
+	if (Index >= VineRecordCount || Index >= VineMaxInstances) return;
+
+	if (Index == 0u) RWVineCounter[0] = min(VineRecordCount, VineMaxInstances);
+
+	const uint Rec = Index * 4u;
+	const float4 R0 = VineRecords[Rec + 0u];
+	const float4 R1 = VineRecords[Rec + 1u];
+	const float4 R2 = VineRecords[Rec + 2u];
+	const float4 R3 = VineRecords[Rec + 3u];   // xy = (SpawnTime 秒, 该实例在藤上的弧长 cm)
+
+	// 逐实例 custom data。**在下面那两条退化 return 之前写**：counter 是按记录数直接
+	// 写死的（见文件头），被 return 跳过的槽位若不写就留着上一次的值 —— 症状是零星
+	// 几片叶子的生长相位莫名其妙，且只在记录集变化时出现。
+	// 步长是 CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS（与 C++ 同一份）；本 kernel 只有两个量要写，
+	// 步长抬高时多出来的槽位这里不填、由 GrowTo 的清零兜成 0。
+	RWVineCustomData[Index * CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS + 0u] = R3.x;
+	RWVineCustomData[Index * CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS + 1u] = R3.y;
+
+	const float3 WorldPos = R0.xyz;
+	const float LengthScale = max(R0.w, 1e-4f);
+	float3 Dir = R1.xyz;
+	const float Random01 = R1.w;
+	float3 Normal = R2.xyz;
+	const float SizeScale = max(R2.w, 1e-4f);
+
+	if (dot(Dir, Dir) < 1e-8f || dot(Normal, Dir) > 0.999f) return;   // 退化记录宁可少画一段
+	Dir = normalize(Dir);
+	Normal = normalize(Normal);
+
+	// 面内垂线。X = N×Z ⇒ Y = Z×X = N（右手，且 +Y 正好落回墙面外法线）。
+	float3 AxisX = cross(Normal, Dir);
+	if (dot(AxisX, AxisX) < 1e-8f) return;
+	AxisX = normalize(AxisX);
+	const float3 AxisY = cross(Dir, AxisX);
+
+	const float3 LocalX = mul(float4(AxisX, 0.0f), VineWorldToComponent).xyz;
+	const float3 LocalY = mul(float4(AxisY, 0.0f), VineWorldToComponent).xyz;
+	const float3 LocalZ = mul(float4(Dir, 0.0f), VineWorldToComponent).xyz;
+	const float3 Origin = mul(float4(WorldPos, 1.0f), VineWorldToComponent).xyz;
+
+	float3 BlockScale = VineBlockSize;
+	if (dot(BlockScale, BlockScale) < 1e-8f) BlockScale = float3(1.0f, 1.0f, 1.0f);
+	BlockScale.xy *= SizeScale;
+	BlockScale.z *= LengthScale;
+
+	// 基向量是单位长，所以剔除球按块缩放的最大分量放大。
+	const float MaxAxisScale = max(BlockScale.x, max(BlockScale.y, BlockScale.z));
+	float4 Rows[5];
+	CSHousePack_Rows(LocalX * BlockScale.x, LocalY * BlockScale.y, LocalZ * BlockScale.z, Origin, Random01,
+		VineBaseSphereCentre, VineBaseSphereRadius, MaxAxisScale, 0.0f, Rows);
+
+	const uint Base = Index * CS_GPU_INSTANCED_ROW_FLOAT4S;
+	UNROLL for (uint Row = 0u; Row < 5u; ++Row) RWVineInstances[Base + Row] = Rows[Row];
+}

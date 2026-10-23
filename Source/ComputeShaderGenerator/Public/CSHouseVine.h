@@ -240,7 +240,7 @@ struct FParams
 };
 
 /**
- * 一条实例记录 = 3 个 float4，与 `CSHouseVine.usf` 文件头的布局逐字对应。
+ * 一条实例记录 = 4 个 float4（第 4 个只用 xy），与 `CSHousePack.usf` 里 PackHouseVineCS 的记录说明逐字对应。
  * 分开成结构体只是为了让 CPU 侧读得懂，上传时按 `FVector4f` 平铺。
  */
 struct FRecord
@@ -466,7 +466,7 @@ COMPUTESHADERGENERATOR_API void PackTubePath(const TArray<FWallStrip>& Strips, c
  * 源网格自带非退化的法线/UV 时（`ivy_leaf` / `ivy_flower` 就是）原样沿用，只做换轴。
  *
  * `LengthAxis` 是**源网格**的长度轴（0=X 1=Y 2=Z），换轴后一律变成 +Z ——
- * `CSHouseVine.usf` 的基约定只认 +Z，两种网格共用一支 kernel。
+ * `CSHousePack.usf` 里 PackHouseVineCS 的基约定只认 +Z，两种网格共用一支 kernel。
  *
  * 材质也照抄 LOD0：`TriangleMaterialSlots` = 每个三角所在段的材质槽，`Materials` = 资产的材质槽表
  * （2026-09-15）。实例组件没设整体覆盖材质时靠这两样逐段画资产自己的材质（摆件 / 裙边摆件就是这么画的）。

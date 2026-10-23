@@ -15,6 +15,7 @@
 #include "/Plugin/PCGPlugins/Shaders/Private/CSGpuTriangleUtilities.ush"
 // 焊接修补结果的读取约定（拓扑绕序、代表点位置、零面积撑开），修补后的发射核用。
 #include "/Plugin/PCGPlugins/Shaders/Private/MeshBooleanRepair.ush"
+#include "/Plugin/PCGPlugins/Shaders/Private/CSPackedVertex.ush"
 
 // RW_Stats 槽位
 #define STAT_COPLANAR       0
@@ -1151,21 +1152,6 @@ uint MBOutVertexCapacity;
 uint MBOutIndexCapacity;
 uint MBOutStageB;                             // 1 = 跑过 Stage B，需按 MB_SRC_KEEP 过滤
 
-// 与 CSMeshOps.usf 的同名函数逐字节一致：常驻切线流是 VET_PackedNormal /
-// PF_R8G8B8A8_SNORM，颜色流是 VET_Color（BGRA）。两处必须同时改，否则同一条流被
-// 两个生产者写成两种编码，而顶点工厂只按一种解。
-uint MBOutPackSnorm8888(float4 V)
-{
-	int4 I = int4(round(clamp(V, -1.0, 1.0) * 127.0));
-	return (uint(I.x) & 0xFF) | ((uint(I.y) & 0xFF) << 8) | ((uint(I.z) & 0xFF) << 16) | ((uint(I.w) & 0xFF) << 24);
-}
-
-uint MBOutPackColorBGRA(float4 RGBA)
-{
-	uint4 I = uint4(round(saturate(RGBA) * 255.0));
-	return (I.z & 0xFF) | ((I.y & 0xFF) << 8) | ((I.x & 0xFF) << 16) | ((I.w & 0xFF) << 24);
-}
-
 // FVector3f::GetSafeNormal(UE_SMALL_NUMBER, Fallback) 的等价物。阈值是**模平方**上的
 // 1e-8，与 UE 一致；写成 !(x > t) 是为了让 NaN 也走 fallback。
 float3 MBOutSafeNormal(float3 V, float3 Fallback)
@@ -1416,11 +1402,11 @@ void MBOutEmitTriangle(uint tri, float3 p[3])
 		RW_MBOutPositions[v * 3u + 0u] = p[k].x;
 		RW_MBOutPositions[v * 3u + 1u] = p[k].y;
 		RW_MBOutPositions[v * 3u + 2u] = p[k].z;
-		RW_MBOutTangents[v * 2u + 0u] = MBOutPackSnorm8888(float4(T, 0.0f));
-		RW_MBOutTangents[v * 2u + 1u] = MBOutPackSnorm8888(float4(N, Sign));
+		RW_MBOutTangents[v * 2u + 0u] = PackSnorm8888(float4(T, 0.0f));
+		RW_MBOutTangents[v * 2u + 1u] = PackSnorm8888(float4(N, Sign));
 		RW_MBOutTexCoords[v * 2u + 0u] = UV.x;
 		RW_MBOutTexCoords[v * 2u + 1u] = UV.y;
-		RW_MBOutColors[v] = MBOutPackColorBGRA(Color);
+		RW_MBOutColors[v] = PackColorBGRA(Color);
 		// 输出是逐角点 soup（焊接后的顶点仍要各自保留 UV/法线/颜色接缝），索引恒等。
 		RW_MBOutIndices[v] = v;
 	}

@@ -45,9 +45,9 @@ class FCSHouseDecorPackCS : public FGlobalShader
 	}
 };
 
-IMPLEMENT_GLOBAL_SHADER(FCSHouseDecorPackCS, "/Plugin/PCGPlugins/Shaders/Private/CSHouseDecor.usf", "PackHouseDecorCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FCSHouseDecorPackCS, "/Plugin/PCGPlugins/Shaders/Private/CSHousePack.usf", "PackHouseDecorCS", SF_Compute);
 
-/** 记录数组 → 上传用的 float4 平铺。布局与 `CSHouseDecor.usf` 文件头逐字对应。 */
+/** 记录数组 → 上传用的 float4 平铺。布局与 `CSHousePack.usf` 里 PackHouseDecorCS 的记录说明逐字对应。 */
 void CSHouseDecor_Flatten(const TArray<CSHouseDecor::FRecord>& In, TArray<FVector4f>& Out)
 {
 	Out.Reset(In.Num() * 3);

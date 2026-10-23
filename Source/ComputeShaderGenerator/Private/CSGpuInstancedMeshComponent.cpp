@@ -47,8 +47,8 @@ static TAutoConsoleVariable<int32> CVarCSGpuInstancedVisibleSourceIndex(
 
 namespace
 {
-	/** Same packing as CSDirectMesh.usf / RoadBuilder.usf so the tangent stream stays one format
-	 *  across every GPU mesh path (VET_PackedNormal / PF_R8G8B8A8_SNORM). */
+	/** CPU twin of PackSnorm8888 in Shaders/Private/CSPackedVertex.ush, so the tangent stream stays one
+	 *  format across every GPU mesh path (VET_PackedNormal / PF_R8G8B8A8_SNORM). */
 	uint32 PackSnorm8888(const FVector4f& V)
 	{
 		const int32 X = FMath::RoundToInt(FMath::Clamp(V.X, -1.0f, 1.0f) * 127.0f);

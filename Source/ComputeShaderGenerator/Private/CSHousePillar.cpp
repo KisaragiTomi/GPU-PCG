@@ -44,7 +44,7 @@ class FCSHousePillarPackCS : public FGlobalShader
 	}
 };
 
-IMPLEMENT_GLOBAL_SHADER(FCSHousePillarPackCS, "/Plugin/PCGPlugins/Shaders/Private/CSHousePillar.usf", "PackHousePillarCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FCSHousePillarPackCS, "/Plugin/PCGPlugins/Shaders/Private/CSHousePack.usf", "PackHousePillarCS", SF_Compute);
 }
 
 namespace CSHousePillar

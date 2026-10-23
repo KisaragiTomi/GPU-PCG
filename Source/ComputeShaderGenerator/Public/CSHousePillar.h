@@ -24,7 +24,7 @@
  */
 namespace CSHousePillar
 {
-/** 一块砖 = 原点 + 三条**已经缩放过**的轴。与 `CSHousePillar.usf` 的记录布局逐字对应。 */
+/** 一块砖 = 原点 + 三条**已经缩放过**的轴。与 `CSHousePack.usf` 里 PackHousePillarCS 的记录布局逐字对应。 */
 struct FBrick
 {
 	FVector3f Origin = FVector3f::ZeroVector;   // 世界，砖的**中心**（`brick` 的原点在包围盒正中）

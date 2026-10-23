@@ -121,8 +121,8 @@ float  CoverScaleClumpShare;        // 缩放取样有多少来自簇（1 = 完�
 //
 // 地被这一家的语义：**[0] = 弯曲幅度，[1] 保留（恒写 0）**。
 // 语义是**逐组件**的 —— 藤蔓那一家在同样的 [0]/[1] 上放 SpawnTime 与弧长，互不干扰。
-// 步长 `CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS` 由 C++ 侧 `ModifyCompilationEnvironment` 注入，
-// 本文件**不再写第三份常量**（工程里已经有两份，外加 CSHouseVine.usf 的一处硬编码）。
+// 步长 `CS_GPU_INSTANCED_CUSTOM_DATA_FLOATS` 来自 `CSGpuSharedLayout.ush`（C++ 与所有实例 kernel 共用的那一份），
+// 本文件**不写自己的常量**。
 //
 // ⚠️ **`[1]` 曾经存"该株的世界高度 cm"，2026-09-07 拆掉了 —— 它是冗余的**：本工厂强制
 // `USE_INSTANCING`（`CSGpuInstancedMeshVertexFactory.cpp:28`），因此材质里的 Local→World 走的是

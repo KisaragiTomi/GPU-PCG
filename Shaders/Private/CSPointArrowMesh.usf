@@ -1,7 +1,7 @@
 // 把一组 GPU 常驻的点（float4 位置 + float4 法线）展开成箭头网格，写进
 // LocalVertexFactory 的标准 stream 集（位置 / 打包切线基 / UV / 顶点色）+ 索引缓冲 +
-// DrawIndexedIndirect args。顶点布局与 CSDirectMesh.usf / RoadBuilder.usf 逐字节一致，
-// 因此三者共用 FCSGpuMeshSceneProxy 的同一条绘制路径。
+// DrawIndexedIndirect args。切线与颜色流按 CSPackedVertex.ush 打包，与 CSMeshOps.usf / RoadBuilder.usf
+// 相同，因此共用 FCSGpuMeshSceneProxy 的同一条绘制路径。
 //
 // 一个箭头 = 方形柱身（4 个侧面）+ 四棱锥头，沿该点法线朝向：位置与方向由同一个形状表达，
 // 不再需要"点 + 单独的方向线"两次绘制。
@@ -15,6 +15,7 @@
 // 位置为世界空间；宿主组件以绝对变换渲染，这里不做局部/世界转换。
 
 #include "/Engine/Public/Platform.ush"
+#include "/Plugin/PCGPlugins/Shaders/Private/CSPackedVertex.ush"
 
 Buffer<float4> InPositions;  // xyz = 世界位置
 Buffer<float4> InNormals;    // xyz = 世界法线（箭头指向）
@@ -38,13 +39,6 @@ uint  ArrowColor;     // 打包 RGBA8
 #define ARROW_VERTS   13u
 #define ARROW_TRIS    14u
 #define ARROW_INDICES (ARROW_TRIS * 3u)
-
-// 与 CSDirectMesh.usf 逐字节一致，喂同一条 VET_PackedNormal / PF_R8G8B8A8_SNORM 切线流。
-uint PackSnorm8888(float4 V)
-{
-	int4 I = int4(round(clamp(V, -1.0, 1.0) * 127.0));
-	return (uint(I.x) & 0xFF) | ((uint(I.y) & 0xFF) << 8) | ((uint(I.z) & 0xFF) << 16) | ((uint(I.w) & 0xFF) << 24);
-}
 
 void WriteVertex(uint V, float3 P, float3 N, float3 TanX, float2 UV)
 {

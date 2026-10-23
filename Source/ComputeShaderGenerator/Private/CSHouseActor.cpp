@@ -1995,7 +1995,7 @@ void ACSHouseActor::EnsurePillarBrickComponent()
 	}
 
 	// 剔除球与三轴块尺寸都从基础网格的包围盒推。⚠️ `brick` 是 1×1×1 的**居中**字典 mesh，
-	// 所以 BlockSize 恒等于 (1,1,1) —— 记录里的轴已经带着真实尺寸了（见 CSHousePillar.usf）。
+	// 所以 BlockSize 恒等于 (1,1,1) —— 记录里的轴已经带着真实尺寸了（见 CSHousePack.usf 的 PackHousePillarCS）。
 	// 留着这一步是为了换资产时不用改 kernel。
 	const FBox Local = PillarBrickMesh ? PillarBrickMesh->GetBoundingBox() : FBox(ForceInit);
 	PillarGpuBuffers[0].BaseSphereCentre = Local.IsValid ? FVector3f(Local.GetCenter()) : FVector3f::ZeroVector;
@@ -2027,7 +2027,7 @@ void ACSHouseActor::EnsurePillarBrickComponent()
 	FBox LocalBounds(FVector(-Reach, -Reach, -Depth), FVector(Reach, Reach, PillarSize));
 	LocalBounds = CSHouse_BuildBoundsToComponent(GetBuildTransform(), PillarBrickComponent, LocalBounds);
 	LocalBounds = CSShaperSteps::MergeHandoverBounds(LocalBounds, PillarHandover, bForceFullRebuild);
-	// 柱砖的 kernel（CSHousePillar.usf）不写 custom data，柱材质也不读：不交，省掉剔除 pass 里逐可见槽
+	// 柱砖的 kernel（CSHousePack.usf 的 PackHousePillarCS）不写 custom data，柱材质也不读：不交，省掉剔除 pass 里逐可见槽
 	// 抄一遍全零的那一趟（2026-09-07 审查 B1 的柱子那条：以前交的是一块从未被 kernel 写过的 buffer）。
 	CSShaperSteps::HandOverInstanceSource(
 		CSShaperSteps::MakeHandoverSource(PillarBrickComponent, PillarGpuBuffers[0], /*bWithCustomData*/ false),

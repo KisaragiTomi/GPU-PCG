@@ -34,6 +34,7 @@
 
 #include "/Engine/Public/Platform.ush"
 #include "/Plugin/PCGPlugins/Shaders/Private/CSGroundShaperField.ush"
+#include "/Plugin/PCGPlugins/Shaders/Private/CSPackedVertex.ush"
 
 #ifndef THREADGROUPSIZE_X
 #define THREADGROUPSIZE_X 64
@@ -401,13 +402,6 @@ RWBuffer<float> RW_RockShellTexCoords;    // RockShellTexCoordStride / 顶点（
 uint            RockShellTexCoordStride;  // = TexCoord::NumSets * 2
 float           RockShellInvUVWorldPeriod;
 
-/** 与 CSMeshOps.usf 的 PackColorBGRA 逐字相同（B=0..7, G=8..15, R=16..23, A=24..31）。 */
-uint CSRockShell_PackColorBGRA(float4 RGBA)
-{
-	const uint4 I = uint4(round(saturate(RGBA) * 255.0f));
-	return (I.z & 0xFFu) | ((I.y & 0xFFu) << 8u) | ((I.x & 0xFFu) << 16u) | ((I.w & 0xFFu) << 24u);
-}
-
 [numthreads(THREADGROUPSIZE_X, 1, 1)]
 void WriteRockShellStaticCS(uint3 Id : SV_DispatchThreadID)
 {
@@ -425,7 +419,7 @@ void WriteRockShellStaticCS(uint3 Id : SV_DispatchThreadID)
 	RW_RockShellTexCoords[Base + 0u] = Vert.RestXY.x * RockShellInvUVWorldPeriod;
 	RW_RockShellTexCoords[Base + 1u] = Vert.RestXY.y * RockShellInvUVWorldPeriod;
 	const float Phase = CSRockShell_KeyHash01(Vert.Cell, RockShellPatternSeed * 3u + 4u);
-	RW_RockShellColors[V] = CSRockShell_PackColorBGRA(float4(CSRockShell_IsCapTri(LocalTri) ? 1.0f : 0.0f, 1.0f, Phase, 1.0f));
+	RW_RockShellColors[V] = PackColorBGRA(float4(CSRockShell_IsCapTri(LocalTri) ? 1.0f : 0.0f, 1.0f, Phase, 1.0f));
 }
 
 // =============================================================================
@@ -561,13 +555,6 @@ float3 CSRockShell_SafeNormal(float3 N)
 	const float LenSq = dot(N, N);
 	if (!(LenSq > 1e-12f)) return float3(0.0f, 0.0f, 1.0f);
 	return N * rsqrt(LenSq);
-}
-
-/** 与 CSMeshOps.usf / RoadBuilder.usf / CSDirectMesh.usf 逐字相同的 VET_PackedNormal 打包。 */
-uint CSRockShell_PackSnorm8888(float4 V)
-{
-	int4 I = int4(round(clamp(V, -1.0, 1.0) * 127.0));
-	return (uint(I.x) & 0xFF) | ((uint(I.y) & 0xFF) << 8) | ((uint(I.z) & 0xFF) << 16) | ((uint(I.w) & 0xFF) << 24);
 }
 
 /**
@@ -731,8 +718,8 @@ void DisplaceRockShellCS(uint3 Id : SV_DispatchThreadID)
 	const float3 FaceN = CSRockShell_SafeNormal(cross(P[2] - P[0], P[1] - P[0]));
 	const float3 Helper = (abs(FaceN.z) < 0.99f) ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f);
 	const float3 TanX = CSRockShell_SafeNormal(cross(Helper, FaceN));
-	const uint PackedTanX = CSRockShell_PackSnorm8888(float4(TanX, 0.0f));
-	const uint PackedTanZ = CSRockShell_PackSnorm8888(float4(FaceN, 1.0f));
+	const uint PackedTanX = PackSnorm8888(float4(TanX, 0.0f));
+	const uint PackedTanZ = PackSnorm8888(float4(FaceN, 1.0f));
 	[unroll] for (uint n = 0u; n < 3u; ++n)
 	{
 		const uint V = Tri * 3u + n;
@@ -797,8 +784,8 @@ void AverageRockShellNormalsCS(uint3 Id : SV_DispatchThreadID)
 	const float3 N = CSRockShell_SafeNormal(Sum);
 	const float3 Helper = (abs(N.z) < 0.99f) ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f);
 	const float3 TanX = CSRockShell_SafeNormal(cross(Helper, N));
-	RW_RockShellTangents[V * 2u + 0u] = CSRockShell_PackSnorm8888(float4(TanX, 0.0f));
-	RW_RockShellTangents[V * 2u + 1u] = CSRockShell_PackSnorm8888(float4(N, 1.0f));
+	RW_RockShellTangents[V * 2u + 0u] = PackSnorm8888(float4(TanX, 0.0f));
+	RW_RockShellTangents[V * 2u + 1u] = PackSnorm8888(float4(N, 1.0f));
 }
 
 // =============================================================================

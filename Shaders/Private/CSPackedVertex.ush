@@ -1,0 +1,55 @@
+#pragma once
+
+// 常驻顶点流的打包 / 解包：切线流是 VET_PackedNormal / PF_R8G8B8A8_SNORM（TangentX、TangentZ 各一个
+// 8888 SNORM，TangentZ.w = 副切线符号），颜色流是 VET_Color（内存序 BGRA，与 FColor 一致）。
+//
+// 所有往这套流写顶点的 kernel（CSMeshOps / RoadBuilder / CSPointArrowMesh / VVVoxel / MeshBoolean /
+// CSNaniteCut / CSGroundRockShell）都 include 这一份：同一条流被两个生产者写成两种编码时，顶点工厂
+// 只会按一种解，症状是那一路的法线或颜色整片错。CPU 侧的镜像（CSMeshOps.cpp、CSGpuInstancedMeshComponent.cpp
+// 里的同名函数）与这里逐位一致，改编码要三处一起改。
+
+uint PackSnorm8888(float4 V)
+{
+	int4 I = int4(round(clamp(V, -1.0, 1.0) * 127.0));
+	return (uint(I.x) & 0xFF) | ((uint(I.y) & 0xFF) << 8) | ((uint(I.z) & 0xFF) << 16) | ((uint(I.w) & 0xFF) << 24);
+}
+
+// PackSnorm8888 的逆。
+//
+// ⚠️ **必须先转 int 再右移**：HLSL 的 `>>` 对 **uint 是逻辑移位**（补 0）、只有 int 才是
+// 算术移位（补符号位）。写成 `(int)((P << 24) >> 24)` 时那两下移位都发生在 uint 上，
+// 于是每个分量都被剥掉符号 —— −1 存成 0x81，取回来是 +129/127 而不是 −1。
+//
+// 实测后果（2026-08-31 定位，疑案 A 的光照那一半）：凡是走过一次 `TransformMeshCS` /
+// `NegateNormalsCS` 的网格，**全部法线被折进 +X+Y+Z 那个卦限**。房子只要被
+// `ACSHouseActor::ApplyBodyPlacement` 增量搬过一次（拖动归位、平移、快扫唤醒都走这条），
+// 朝 −X/−Y 的两面墙法线当场翻面 ⇒ 背对太阳 ⇒ Lumen 的半球指进屋里 ⇒ 那面墙
+// **精确 (0,0,0)**，屋面则偏亮。而反照率、三角形数、包围盒、砖数、零阻塞**全部照绿**：
+// 法线不进任何一条断言。松手/全量重建会从 CPU 重新上传法线，所以症状表现为
+// "拖动中的画面 ≠ 松手后的画面"，看着像 Lumen 预热不够（`预热 8→384 次一个数都不动`，
+// 见 `Scripts/TinyGladeShotResizeProbe.py` 的 Q1）。
+float4 UnpackSnorm8888(uint P)
+{
+	return float4(
+		float((int)(P << 24) >> 24),
+		float((int)(P << 16) >> 24),
+		float((int)(P << 8) >> 24),
+		float((int)P >> 24)) / 127.0f;
+}
+
+// 线性 RGBA（0..1）→ BGRA8：B 在最低字节（B=0..7, G=8..15, R=16..23, A=24..31），即 VET_Color
+// 期望的顺序；CPU 回读按同一字节序解。
+uint PackColorBGRA(float4 RGBA)
+{
+	uint4 I = uint4(round(saturate(RGBA) * 255.0));
+	return (I.z & 0xFF) | ((I.y & 0xFF) << 8) | ((I.x & 0xFF) << 16) | ((I.w & 0xFF) << 24);
+}
+
+float4 UnpackColorBGRA(uint Packed)   // PackColorBGRA 的逆，返回 0..1 的 RGBA
+{
+	return float4(
+		float((Packed >> 16) & 0xFFu) / 255.0f,
+		float((Packed >> 8) & 0xFFu) / 255.0f,
+		float(Packed & 0xFFu) / 255.0f,
+		float((Packed >> 24) & 0xFFu) / 255.0f);
+}
