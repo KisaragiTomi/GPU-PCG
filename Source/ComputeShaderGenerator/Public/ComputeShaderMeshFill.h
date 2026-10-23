@@ -227,7 +227,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Options)
 	float Size = 1;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Options)
-	float RandomRoation = 0;
+	float RandomRotation = 0;
 
 	bool IsValid()
 	{
@@ -269,7 +269,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FillTarget")
 	float SpawnSize = 1;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FillTarget")
-	float RandomRoation = 0;
+	float RandomRotation = 0;
 
 	ACSFillTarget();
 

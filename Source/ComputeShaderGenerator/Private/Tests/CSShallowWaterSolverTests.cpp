@@ -59,11 +59,11 @@ namespace
 
 	/** 水源。C++ 类本身不带组件（蓝图 BP_CSSW_Source 才有根和圆盘）：没有根时 GetActorLocation 恒为原点、
 	 *  缩放恒为 1，所以这里补一个根。 */
-	ACSSHallowWaterSource* CSSWSolverTest_SpawnSource(UWorld* World, const FVector& Offset, double RadiusTexels)
+	ACSShallowWaterSource* CSSWSolverTest_SpawnSource(UWorld* World, const FVector& Offset, double RadiusTexels)
 	{
 		FActorSpawnParameters SpawnParameters;
 		SpawnParameters.ObjectFlags = RF_Transient;
-		ACSSHallowWaterSource* Source = World->SpawnActor<ACSSHallowWaterSource>(ACSSHallowWaterSource::StaticClass(), FTransform::Identity, SpawnParameters);
+		ACSShallowWaterSource* Source = World->SpawnActor<ACSShallowWaterSource>(ACSShallowWaterSource::StaticClass(), FTransform::Identity, SpawnParameters);
 		if (!Source) return nullptr;
 
 		USceneComponent* Root = NewObject<USceneComponent>(Source, TEXT("Root"), RF_Transient);
@@ -102,7 +102,7 @@ namespace
 		for (int32 Step = 0; Step < Steps; ++Step)
 		{
 			Water->LastSolverFrameNumber = 0;
-			Water->ShallowWaterSolverSoucePoint(1);
+			Water->ShallowWaterSolverSourcePoint(1);
 		}
 	}
 
@@ -232,7 +232,7 @@ bool FCSShallowWaterSolverSourceSpreadTest::RunTest(const FString& Parameters)
 	const FVector2D SourceTexel(SX + 0.5, SY + 0.5);
 	if (!TestEqual(TEXT("地板拍进了高度图"), CSSWSolverTest_ReadGroundZ(Water)[SY * Size + SX], float(CSSWSolverTest_Origin.Z), 0.5f)) return false;
 
-	ACSSHallowWaterSource* Source = CSSWSolverTest_SpawnSource(World, FVector(CSSWSolverTest_TexelCenterOffset(CaptureSize, SX, SY), 100.0), Radius);
+	ACSShallowWaterSource* Source = CSSWSolverTest_SpawnSource(World, FVector(CSSWSolverTest_TexelCenterOffset(CaptureSize, SX, SY), 100.0), Radius);
 	if (!TestNotNull(TEXT("水源"), Source)) return false;
 
 	// ① 落点
@@ -434,7 +434,7 @@ bool FCSShallowWaterSolverClosedBasinTest::RunTest(const FString& Parameters)
 	constexpr int32 SY = 16;
 	constexpr double Radius = 4.0;
 	const FVector2D SourceTexel(SX + 0.5, SY + 0.5);
-	ACSSHallowWaterSource* Source = CSSWSolverTest_SpawnSource(World, FVector(CSSWSolverTest_TexelCenterOffset(CaptureSize, SX, SY), 60.0), Radius);
+	ACSShallowWaterSource* Source = CSSWSolverTest_SpawnSource(World, FVector(CSSWSolverTest_TexelCenterOffset(CaptureSize, SX, SY), 60.0), Radius);
 	if (!TestNotNull(TEXT("水源"), Source)) return false;
 
 	// 速度 pass 的边界带：离边 ≤ 2 格（WATERBOUNDSIZE + 1）。

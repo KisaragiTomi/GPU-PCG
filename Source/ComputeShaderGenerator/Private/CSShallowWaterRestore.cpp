@@ -73,8 +73,8 @@ IMPLEMENT_GLOBAL_SHADER(FSWRestoreApplyCS, "/Plugin/PCGPlugins/Shaders/Private/S
 
 void ACSShallowWaterCapture::ApplyResultMeshToSimulation()
 {
-	if (!GetWorld() || !ReusltMesh || HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject) || IsActorBeingDestroyed()) return;
-	UStaticMesh* Source = ReusltMesh->GetStaticMesh();
+	if (!GetWorld() || !ResultMeshComponent || HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject) || IsActorBeingDestroyed()) return;
+	UStaticMesh* Source = ResultMeshComponent->GetStaticMesh();
 	// StartSolver replaces the result component's mesh with the preview tile. Never restore that tile.
 	if (!Source || Source == SimulationPreviewMesh) Source = BakedResultMesh;
 	const FStaticMeshRenderData* RenderData = Source ? Source->GetRenderData() : nullptr;
@@ -89,7 +89,7 @@ void ACSShallowWaterCapture::ApplyResultMeshToSimulation()
 	FShaderResourceViewRHIRef Positions = LOD.VertexBuffers.PositionVertexBuffer.GetSRV();
 	FBufferRHIRef Indices = LOD.IndexBuffer.GetRHI();
 	const FColorVertexBuffer* ColorBuffer = &LOD.VertexBuffers.ColorVertexBuffer;
-	if (Source == ReusltMesh->GetStaticMesh() && !ReusltMesh->LODData.IsEmpty() && ReusltMesh->LODData[0].OverrideVertexColors) ColorBuffer = ReusltMesh->LODData[0].OverrideVertexColors;
+	if (Source == ResultMeshComponent->GetStaticMesh() && !ResultMeshComponent->LODData.IsEmpty() && ResultMeshComponent->LODData[0].OverrideVertexColors) ColorBuffer = ResultMeshComponent->LODData[0].OverrideVertexColors;
 	FShaderResourceViewRHIRef Colors = ColorBuffer->GetColorComponentsSRV();
 	const bool bHasColors = Colors.IsValid() && ColorBuffer->GetNumVertices() == VertexCount;
 	if (!Positions.IsValid() || !Indices.IsValid() || VertexCount == 0u || TriangleCount == 0u
@@ -99,7 +99,7 @@ void ACSShallowWaterCapture::ApplyResultMeshToSimulation()
 		UE_LOG(LogTemp, Warning, TEXT("[CSSW] ApplyResultMeshToSimulation: invalid domain or unavailable LOD0 GPU buffers on %s; state unchanged."), *GetName());
 		return;
 	}
-	const FTransform SourceTransform = ReusltMesh->GetComponentTransform();
+	const FTransform SourceTransform = ResultMeshComponent->GetComponentTransform();
 	const FBox SourceBounds = Source->GetBoundingBox().TransformBy(SourceTransform);
 	const FVector Origin = GetActorLocation();
 	const double HalfSize = CaptureSize * 0.5;
@@ -127,7 +127,7 @@ void ACSShallowWaterCapture::ApplyResultMeshToSimulation()
 	RebuildSimulationVisualization();
 	SetMaterialParameter();
 	if (SimVisHISM && SimVisHISM->GetInstanceCount() > 0) SimVisHISM->SetVisibility(true);
-	ReusltMesh->SetVisibility(false);
+	ResultMeshComponent->SetVisibility(false);
 
 	const FTransform LocalToSim(SourceTransform.GetRotation(), SourceTransform.GetTranslation() - Origin, SourceTransform.GetScale3D());
 	FSWRestoreMeshParameters Mesh{};

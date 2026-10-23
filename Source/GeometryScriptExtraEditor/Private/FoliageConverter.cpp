@@ -63,7 +63,7 @@ const UFoliageType* UFoliageConverter::GetFoliageType(UStaticMesh* StaticMesh)
 	return FoliageTypes.Num() > 0 ? FoliageTypes[0] : nullptr;
 }
 
-void UFoliageConverter::GetAllInstancesTransfrom(UFoliageType* InFoliageType, TArray<FTransform>& OutTransforms)
+void UFoliageConverter::GetAllInstancesTransform(UFoliageType* InFoliageType, TArray<FTransform>& OutTransforms)
 {
 	for (TActorIterator<AInstancedFoliageActor> It(GWorld); It; ++It)
 	{

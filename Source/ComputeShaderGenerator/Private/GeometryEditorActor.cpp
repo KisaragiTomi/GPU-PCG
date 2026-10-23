@@ -4678,7 +4678,7 @@ static bool AddVineSCPasses(
 	AddSmoothPass(SmoothASRV, SmoothBUAV);    // iter 2: A -> B
 	AddSmoothPass(SmoothBSRV, SmoothAUAV);    // iter 3: B -> A (result)
 
-	// ---- Stage B3 (prep port): pre-projection ResamppleByLength (count-changing) ----
+	// ---- Stage B3 (prep port): pre-projection ResampleByLength (count-changing) ----
 	CREATE_RDG_STRUCTURED_UAV_SRV(NewLineLength, uint32, TargetCount, TEXT("SpaceColonizationQueue_NewLineLength"))
 	CREATE_RDG_STRUCTURED_UAV_SRV(NewSegLength, uint32, TargetCount, TEXT("SpaceColonizationQueue_NewSegLength"))
 	CREATE_RDG_STRUCTURED_UAV_SRV(NewLineOffset, uint32, TargetCount, TEXT("SpaceColonizationQueue_NewLineOffset"))

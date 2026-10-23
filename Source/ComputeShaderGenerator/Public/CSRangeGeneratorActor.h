@@ -1,7 +1,7 @@
 #pragma once
 
 // -----------------------------------------------------------------------------
-// Range/Instance 生成器 Actor（自 ComputeShaderGenerateHepler.h 拆出，2026-08）。
+// Range/Instance 生成器 Actor（自 ComputeShaderGenerateHelper.h 拆出，2026-08）。
 // 同模块内搬迁不改变 /Script/ComputeShaderGenerator.* 类路径，BP 子类与关卡实例不受影响。
 // -----------------------------------------------------------------------------
 
@@ -47,7 +47,7 @@ public:
 	UInstancedStaticMeshComponent* Instances;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ComputeShader")
-	FIntVector DivdeCount = FIntVector(10, 10, 10);
+	FIntVector DivideCount = FIntVector(10, 10, 10);
 	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ComputeShader")
 	float CaptureSize = 1024;

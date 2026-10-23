@@ -44,7 +44,7 @@ public:
 	// -------------------------------------------------------------------------
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
-	UStaticMeshComponent* ReusltMesh;
+	UStaticMeshComponent* ResultMeshComponent;
 
 	UPROPERTY(Transient, BlueprintReadWrite, DuplicateTransient, Category = "Debug")
 	UHierarchicalInstancedStaticMeshComponent* SimVisHISM;
@@ -247,7 +247,7 @@ public:
 	}
 
 	UFUNCTION(BlueprintCallable, Category = "ComputeShader")
-	void ShallowWaterSolverSoucePoint(int32 InIteration);
+	void ShallowWaterSolverSourcePoint(int32 InIteration);
 
 	UFUNCTION(BlueprintCallable, Category = "ComputeShader")
 	void CaptureAll();
@@ -255,7 +255,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ComputeShader")
 	void SetHeight();
 
-	/** Replace the entire simulation from ReusltMesh (or BakedResultMesh while previewing).
+	/** Replace the entire simulation from ResultMeshComponent (or BakedResultMesh while previewing).
 	 *  Restores surface height and CSSW vertex-color velocity / wet coverage / foam against current ground.
 	 *  Uncovered cells become dry. Keeps the solver's running or paused state. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "ComputeShader|Bake")
@@ -296,14 +296,14 @@ public:
 	void OnBakeComplete();
 	virtual void OnBakeComplete_Implementation();
 
-	/** 生成两个静态代理 actor：StaticMeshActor（复制 ReusltMesh 当前网格/材质/变换）+
+	/** 生成两个静态代理 actor：StaticMeshActor（复制 ResultMeshComponent 当前网格/材质/变换）+
 	 *  DecalActor（复制 CausticsDecal 当前材质/DecalSize/变换），并挂到本 actor 下。
 	 *  先销毁本 actor 已挂载的代理，再重建，因此可重复调用。不销毁自身，销毁时机由调用方控制。 */
 	UFUNCTION(BlueprintCallable, Category = "ComputeShader|Bake")
 	void SpawnResultProxyActors(AStaticMeshActor*& OutMeshActor, ADecalActor*& OutDecalActor);
 
 	/** 有烘焙/结果网格时，生成一对静态代理 actor（StaticMeshActor + DecalActor）挂到本 actor 下、
-	 *  打上 AutoProxyTag，并隐藏本体的 ReusltMesh / CausticsDecal —— 让关卡里留下的是普通 actor，
+	 *  打上 AutoProxyTag，并隐藏本体的 ResultMeshComponent / CausticsDecal —— 让关卡里留下的是普通 actor，
 	 *  不再依赖本 actor 的运行时组件。没有结果网格时整个跳过（不生成、也不隐藏本体）。
 	 *  重复调用安全：挂载前先销毁已挂载的同 tag 代理。 */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "ComputeShader|Bake")
@@ -339,7 +339,7 @@ private:
 	/** 销毁挂在本 actor 下、带 Tag 的 actor；Tag 为 None 时销毁全部挂载 actor。返回销毁个数。 */
 	int32 DestroyAttachedProxyActors(FName Tag);
 
-	/** 按 ReusltMesh / CausticsDecal 当前的网格、材质与世界变换生成一对代理 actor，打上 ProxyTag
+	/** 按 ResultMeshComponent / CausticsDecal 当前的网格、材质与世界变换生成一对代理 actor，打上 ProxyTag
 	 *  并挂到本 actor 下。不负责回收旧代理，调用方自行决定回收策略。 */
 	void BuildProxyActors(FName ProxyTag, AStaticMeshActor*& OutMeshActor, ADecalActor*& OutDecalActor);
 
@@ -365,7 +365,7 @@ private:
 
 
 UCLASS()
-class COMPUTESHADERGENERATOR_API ACSSHallowWaterSource : public AActor
+class COMPUTESHADERGENERATOR_API ACSShallowWaterSource : public AActor
 {
 	GENERATED_BODY()
 };

@@ -31,7 +31,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = CliffGenerate)
 	UTextureRenderTarget2D* RT_CurrentSceneDepth;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = CliffGenerate)
-	UTextureRenderTarget2D* InConectivityClassifiy;
+	UTextureRenderTarget2D* InConnectivityClassify;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = CliffGenerate)
 	UTextureRenderTarget2D* RT_TargetHeight;
 
@@ -40,7 +40,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = CliffGenerate)
 	float SpawnSize = 1;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = CliffGenerate)
-	float RandomRoation = 0;
+	float RandomRotation = 0;
 
 
 

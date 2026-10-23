@@ -44,10 +44,10 @@ public:
 	static FGeometryScriptPolyPath SmoothLine(FGeometryScriptPolyPath PolyPath, int NumIterations);
 
 	UFUNCTION(BlueprintPure, Category = PolyLine)
-	static FGeometryScriptPolyPath ResamppleByCount(FGeometryScriptPolyPath PolyPath, int32 NumIterations = 50);
+	static FGeometryScriptPolyPath ResampleByCount(FGeometryScriptPolyPath PolyPath, int32 NumIterations = 50);
 
 	UFUNCTION(BlueprintPure, Category = PolyLine)
-	static FGeometryScriptPolyPath ResamppleByLength(FGeometryScriptPolyPath PolyPath, float Interval = 50);
+	static FGeometryScriptPolyPath ResampleByLength(FGeometryScriptPolyPath PolyPath, float Interval = 50);
 
 	UFUNCTION(BlueprintPure, Category = PolyLine)
 	static TArray<FTransform> ConvertPolyPathToTransforms(FGeometryScriptPolyPath PolyPath, bool GenerateRotator);

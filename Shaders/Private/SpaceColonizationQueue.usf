@@ -765,9 +765,9 @@ void SmoothSpaceColonizationLinesCS(uint3 DispatchThreadId : SV_DispatchThreadID
     RW_SmoothOutPoints[Index] = float4((Prev + Next) * 0.5f, Self.w);
 }
 
-// Pre-projection ResamppleByLength (Increment B, Stage B3) — count-CHANGING, so a second
+// Pre-projection ResampleByLength (Increment B, Stage B3) — count-CHANGING, so a second
 // compaction (CountResample -> PrefixResample -> EmitResample) mirroring the emit triad.
-// Reproduces UPolyLine::ResamppleByLength (GeometryMathUtils.cpp:161-207) bit-faithfully:
+// Reproduces UPolyLine::ResampleByLength (GeometryMathUtils.cpp:161-207) bit-faithfully:
 // NumIterations = int(ArcLen/ResampleLength), Interval = ArcLen/NumIterations, forward
 // serial walk with GetSafeNormal(.001), and the doubled final gap. Reads the smoothed
 // points (emit layout via LineOffset/LineLength); writes a new compact layout.
@@ -825,7 +825,7 @@ void CountResampleSpaceColonizationCS(uint3 DispatchThreadId : SV_DispatchThread
     }
     float Arc = ResampleLineArcLength(Base, Count);
     int NumIterations = (int)(Arc / ResampleLength);
-    uint NewCount = (NumIterations >= 2) ? (uint)NumIterations : 0u; // < 2 -> ResamppleByLength drops
+    uint NewCount = (NumIterations >= 2) ? (uint)NumIterations : 0u; // < 2 -> ResampleByLength drops
     RW_NewLineLength[LineIdx] = NewCount;
     RW_NewSegLength[LineIdx] = (NewCount >= 1u) ? (NewCount - 1u) : 0u;
 }

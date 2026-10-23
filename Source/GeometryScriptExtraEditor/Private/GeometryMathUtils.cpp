@@ -114,7 +114,7 @@ FGeometryScriptPolyPath UPolyLine::SmoothLine(FGeometryScriptPolyPath PolyPath, 
 	return PolyPath;
 }
 
-FGeometryScriptPolyPath UPolyLine::ResamppleByCount(const FGeometryScriptPolyPath PolyPath, int32 NumIterations)
+FGeometryScriptPolyPath UPolyLine::ResampleByCount(const FGeometryScriptPolyPath PolyPath, int32 NumIterations)
 {
 	float Sum = 0;
 	float CurrentLength = 0;
@@ -158,7 +158,7 @@ FGeometryScriptPolyPath UPolyLine::ResamppleByCount(const FGeometryScriptPolyPat
 	return ToReturn;
 }
 
-FGeometryScriptPolyPath UPolyLine::ResamppleByLength(const FGeometryScriptPolyPath PolyPath, float IntervalExp)
+FGeometryScriptPolyPath UPolyLine::ResampleByLength(const FGeometryScriptPolyPath PolyPath, float IntervalExp)
 {
 	float Sum = 0;
 	float CurrentLength = 0;

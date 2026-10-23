@@ -322,7 +322,7 @@ void ACSCliffGenerateCapture::GenerateCliffVerticalCal(TArray<FCSMeshFillData> G
 {
 	if (!IsParameterValidMult() || GenerateDatas.Num() == 0) return;
 	
-	//InConectivityClassifiy->ResizeTarget(TextureSize, TextureSize);
+	//InConnectivityClassify->ResizeTarget(TextureSize, TextureSize);
 	RT_TargetHeight->ResizeTarget(TextureSize, TextureSize);
 	RT_Result->ResizeTarget(1024, 2);
 	

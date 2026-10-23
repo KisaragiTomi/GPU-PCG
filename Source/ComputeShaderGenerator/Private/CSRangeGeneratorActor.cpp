@@ -134,15 +134,15 @@ TArray<FTransform> ACSBoxRangeGenerator::GenerateTransformsInternal()
 	CollisionBox->SetCollisionEnabled(ECollisionEnabled::Type::QueryOnly);
 
 	FTransform ActorTransform = GetActorTransform();
-	FVector l = FVector::OneVector / ((FVector)DivdeCount - FVector::OneVector);
+	FVector l = FVector::OneVector / ((FVector)DivideCount - FVector::OneVector);
 
 	
 	// 计算采样点
-	for (int32 i = 0; i < DivdeCount.X; i++)
+	for (int32 i = 0; i < DivideCount.X; i++)
 	{
-		for (int32 n = 0; n < DivdeCount.Y; n++)
+		for (int32 n = 0; n < DivideCount.Y; n++)
 		{
-			for (int32 c = 0; c < DivdeCount.Z; c++)
+			for (int32 c = 0; c < DivideCount.Z; c++)
 			{
 				FVector Pos = ActorTransform.TransformPosition((FVector(i * l.X, n * l.Y, c * l.Z) - FVector::OneVector * 0.5f) * 100);
 				for (FVector Dir : Dirs)

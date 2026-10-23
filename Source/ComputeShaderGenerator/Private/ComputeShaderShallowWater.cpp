@@ -202,11 +202,11 @@ ACSShallowWaterCapture::ACSShallowWaterCapture(const FObjectInitializer& ObjectI
 	PrimaryActorTick.bStartWithTickEnabled = false;
 
 	GeneratorBounds->SetBoxExtent(FVector(50,50,50));
-	ReusltMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("VisualizationMesh"));
-	ReusltMesh->BoundsScale = 100;
-	ReusltMesh->bVisibleInRayTracing = false;
-	ReusltMesh->SetCastShadow(false);
-	ReusltMesh->SetupAttachment(SceneRoot, TEXT("VisualizationMesh"));
+	ResultMeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("VisualizationMesh"));
+	ResultMeshComponent->BoundsScale = 100;
+	ResultMeshComponent->bVisibleInRayTracing = false;
+	ResultMeshComponent->SetCastShadow(false);
+	ResultMeshComponent->SetupAttachment(SceneRoot, TEXT("VisualizationMesh"));
 	SimVisHISM = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("SimVisHISM"));
 	SimVisHISM->SetupAttachment(SceneRoot, TEXT("SimVisHISM"));
 #if WITH_EDITOR
@@ -257,7 +257,7 @@ void ACSShallowWaterCapture::ScheduleSolverTimerTick()
 		}
 
 		ScheduleSolverTimerTick();
-		ShallowWaterSolverSoucePoint(Iteration);
+		ShallowWaterSolverSourcePoint(Iteration);
 	});
 
 	if (SolverTimerRate > 0.0f)
@@ -499,7 +499,7 @@ void ACSShallowWaterCapture::RebuildSimulationVisualization()
 		if (SimVisHISM)
 		{
 			UStaticMesh* PreviewMesh = SimulationPreviewMesh;
-			if (!PreviewMesh && ReusltMesh) PreviewMesh = ReusltMesh->GetStaticMesh();
+			if (!PreviewMesh && ResultMeshComponent) PreviewMesh = ResultMeshComponent->GetStaticMesh();
 			if (!PreviewMesh && DebugMesh) PreviewMesh = DebugMesh;
 			if (PreviewMesh && SimVisHISM->GetStaticMesh() != PreviewMesh)
 			{
@@ -558,7 +558,7 @@ void ACSShallowWaterCapture::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-void ACSShallowWaterCapture::ShallowWaterSolverSoucePoint(int32 InIteration)
+void ACSShallowWaterCapture::ShallowWaterSolverSourcePoint(int32 InIteration)
 {
 	if (GFrameCounter == LastSolverFrameNumber) return;
 	LastSolverFrameNumber = GFrameCounter;
@@ -582,9 +582,9 @@ void ACSShallowWaterCapture::ShallowWaterSolverSoucePoint(int32 InIteration)
 			GeneratorBounds->Bounds.Origin,
 			GeneratorBounds->Bounds.BoxExtent * FVector(1.2, 1.2, 9999));
 
-		for (TActorIterator<ACSSHallowWaterSource> It(World, ACSSHallowWaterSource::StaticClass()); It; ++It)
+		for (TActorIterator<ACSShallowWaterSource> It(World, ACSShallowWaterSource::StaticClass()); It; ++It)
 		{
-			ACSSHallowWaterSource* Actor = *It;
+			ACSShallowWaterSource* Actor = *It;
 			const FVector Location = Actor->GetActorLocation();
 			if (!SourceBounds.IsInsideOrOn(Location))
 			{
@@ -1011,7 +1011,7 @@ void ACSShallowWaterCapture::SetMaterialParameter_Implementation()
 		return;
 	}
 
-	ApplySimParams(EnsureMID(ReusltMesh, 0, WaterMaterial));
+	ApplySimParams(EnsureMID(ResultMeshComponent, 0, WaterMaterial));
 	ApplySimParams(EnsureMID(SimVisHISM, 0, WaterMaterial));
 
 	if (CausticsDecal && DecalMaterial)
@@ -1030,7 +1030,7 @@ void ACSShallowWaterCapture::ApplyBakedMaterials()
 {
 	if (BakedWaterMaterial)
 	{
-		if (ReusltMesh && ReusltMesh->GetMaterial(0) != BakedWaterMaterial) ReusltMesh->SetMaterial(0, BakedWaterMaterial);
+		if (ResultMeshComponent && ResultMeshComponent->GetMaterial(0) != BakedWaterMaterial) ResultMeshComponent->SetMaterial(0, BakedWaterMaterial);
 		if (SimVisHISM && SimVisHISM->GetMaterial(0) != BakedWaterMaterial) SimVisHISM->SetMaterial(0, BakedWaterMaterial);
 	}
 	if (BakedDecalMaterial && CausticsDecal && CausticsDecal->GetDecalMaterial() != BakedDecalMaterial)
@@ -1209,16 +1209,16 @@ void ACSShallowWaterCapture::StartSolver(float TimerRate, int32 InIteration)
 	SolverTimerRate = FMath::Max(TimerRate, 0.0f);
 	Iteration = FMath::Max(InIteration, 1);
 	ResetSolverState(true);
-	if (SimulationPreviewMesh && ReusltMesh)
+	if (SimulationPreviewMesh && ResultMeshComponent)
 	{
-		ReusltMesh->SetStaticMesh(SimulationPreviewMesh);
-		ReusltMesh->SetRelativeScale3D(FVector::OneVector);
+		ResultMeshComponent->SetStaticMesh(SimulationPreviewMesh);
+		ResultMeshComponent->SetRelativeScale3D(FVector::OneVector);
 	}
 	bUseBakedResultMesh = false;
 	RefreshConstructionLayout();
 	RebuildSimulationVisualization();
 	if (SimVisHISM) SimVisHISM->SetVisibility(true);
-	if (ReusltMesh) ReusltMesh->SetVisibility(false);
+	if (ResultMeshComponent) ResultMeshComponent->SetVisibility(false);
 	CaptureAll();
 	ScheduleSolverTimerTick();
 	OnSolverStarted();
@@ -1328,15 +1328,15 @@ void ACSShallowWaterCapture::ShowBakedResult()
 		// 重建它们，留着不会累积。
 		SimVisHISM->SetVisibility(false);
 	}
-	if (ReusltMesh)
+	if (ResultMeshComponent)
 	{
 		if (BakedResultMesh)
 		{
-			ReusltMesh->SetStaticMesh(BakedResultMesh);
-			ReusltMesh->SetRelativeScale3D(FVector::OneVector);
+			ResultMeshComponent->SetStaticMesh(BakedResultMesh);
+			ResultMeshComponent->SetRelativeScale3D(FVector::OneVector);
 			bUseBakedResultMesh = true;
 		}
-		ReusltMesh->SetVisibility(true);
+		ResultMeshComponent->SetVisibility(true);
 	}
 	// 烘焙 MIC 优先于运行时 MID：贴的是落盘贴图，关卡重开后依然有画面。
 	ApplyBakedMaterials();
@@ -1374,24 +1374,24 @@ void ACSShallowWaterCapture::BuildProxyActors(FName ProxyTag, AStaticMeshActor*&
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	SpawnParams.Owner = this;
 
-	// StaticMeshActor：复制 ReusltMesh 当前网格 + 材质 + 世界变换。
+	// StaticMeshActor：复制 ResultMeshComponent 当前网格 + 材质 + 世界变换。
 	// 取的是组件"当前"的材质而不是 WaterMaterial：ShowBakedResult 已经把烘焙 MIC 贴上去了，
 	// 照抄当前值才能让代理拿到落盘材质（而不是绑 transient RT 的 MID）。
-	UStaticMesh* ProxyMesh = ReusltMesh ? ReusltMesh->GetStaticMesh() : nullptr;
-	if (ReusltMesh && ProxyMesh)
+	UStaticMesh* ProxyMesh = ResultMeshComponent ? ResultMeshComponent->GetStaticMesh() : nullptr;
+	if (ResultMeshComponent && ProxyMesh)
 	{
 		AStaticMeshActor* MeshActor = World->SpawnActor<AStaticMeshActor>(
-			AStaticMeshActor::StaticClass(), ReusltMesh->GetComponentTransform(), SpawnParams);
+			AStaticMeshActor::StaticClass(), ResultMeshComponent->GetComponentTransform(), SpawnParams);
 		if (MeshActor)
 		{
 			UStaticMeshComponent* SMC = MeshActor->GetStaticMeshComponent();
-			SMC->SetMobility(ReusltMesh->Mobility);
+			SMC->SetMobility(ResultMeshComponent->Mobility);
 			SMC->SetStaticMesh(ProxyMesh);
-			const int32 NumMats = ReusltMesh->GetNumMaterials();
-			for (int32 i = 0; i < NumMats; ++i) SMC->SetMaterial(i, ReusltMesh->GetMaterial(i));
-			SMC->SetCastShadow(ReusltMesh->CastShadow);
-			SMC->bVisibleInRayTracing = ReusltMesh->bVisibleInRayTracing;
-			SMC->SetCollisionEnabled(ReusltMesh->GetCollisionEnabled());
+			const int32 NumMats = ResultMeshComponent->GetNumMaterials();
+			for (int32 i = 0; i < NumMats; ++i) SMC->SetMaterial(i, ResultMeshComponent->GetMaterial(i));
+			SMC->SetCastShadow(ResultMeshComponent->CastShadow);
+			SMC->bVisibleInRayTracing = ResultMeshComponent->bVisibleInRayTracing;
+			SMC->SetCollisionEnabled(ResultMeshComponent->GetCollisionEnabled());
 			MeshActor->Tags.Add(ProxyTag);
 			MeshActor->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
 			OutMeshActor = MeshActor;
@@ -1438,8 +1438,8 @@ void ACSShallowWaterCapture::SpawnAutoResultActors()
 {
 	// 先看有没有结果可代理。没有网格就整个跳过：既不生成、也不隐藏本体组件，
 	// 否则会把水体变成"什么都看不见"的状态，比不做还糟。
-	UStaticMesh* ResultMesh = ReusltMesh ? ReusltMesh->GetStaticMesh() : nullptr;
-	if (!ResultMesh)
+	UStaticMesh* ResultStaticMesh = ResultMeshComponent ? ResultMeshComponent->GetStaticMesh() : nullptr;
+	if (!ResultStaticMesh)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[CSSW] SpawnAutoResultActors: %s has no result mesh (bake or start the solver first); nothing spawned."), *GetName());
 		return;
@@ -1458,7 +1458,7 @@ void ACSShallowWaterCapture::SpawnAutoResultActors()
 	}
 
 	// 代理已经接管显示，本体组件让位；隐藏而不是销毁，重新仿真/烘焙时还要用它们。
-	if (ReusltMesh) ReusltMesh->SetVisibility(false);
+	if (ResultMeshComponent) ResultMeshComponent->SetVisibility(false);
 	if (CausticsDecal) CausticsDecal->SetVisibility(false);
 
 	UE_LOG(LogTemp, Log, TEXT("[CSSW] SpawnAutoResultActors on %s: mesh=%s decal=%s (tag '%s'), own mesh/decal hidden."),

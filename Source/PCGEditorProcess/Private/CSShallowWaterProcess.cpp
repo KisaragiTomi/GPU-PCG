@@ -35,7 +35,7 @@ void UCSShallowWaterProcess::SaveSWData(ACSShallowWaterCapture* InCSSWActor)
 	const int32 ActorId = InCSSWActor->EnsureSWUniqueID();
 
 	// 输出资产路径要在选源之前算出来：烘焙结果本身绝不能再当源网格。上一次烘焙后
-	// ShowBakedResult 会清空 SimVis 实例并把结果网格挂到 ReusltMesh 上，若不排除，
+	// ShowBakedResult 会清空 SimVis 实例并把结果网格挂到 ResultMeshComponent 上，若不排除，
 	// 第二次烘焙就会拿"只剩湿区的稀疏网格"当源、再对自己取样，最终三角数归零，
 	// 落到下面的"没有三角"分支把上一次的好资产删掉——症状就是"bake 不再生成 StaticMesh"。
 	const FString DuplicateMeshPath = InCSSWActor->BuildResultAssetPath(); // <关卡目录>/CSSWData/CSSW_<编号>_SM
@@ -68,11 +68,11 @@ void UCSShallowWaterProcess::SaveSWData(ACSShallowWaterCapture* InCSSWActor)
 	}
 	else
 	{
-		// SimVis 网格覆盖整个捕获域，单位变换即可（与 StartSolver 把它挂到 ReusltMesh 时
+		// SimVis 网格覆盖整个捕获域，单位变换即可（与 StartSolver 把它挂到 ResultMeshComponent 时
 		// 强制 Scale=1 的约定一致）。
 		UStaticMesh* Candidate = InCSSWActor->SimulationPreviewMesh;
 		if (IsBakedResult(Candidate)) Candidate = InCSSWActor->SimVisHISM ? InCSSWActor->SimVisHISM->GetStaticMesh() : nullptr;
-		if (IsBakedResult(Candidate)) Candidate = InCSSWActor->ReusltMesh ? InCSSWActor->ReusltMesh->GetStaticMesh() : nullptr;
+		if (IsBakedResult(Candidate)) Candidate = InCSSWActor->ResultMeshComponent ? InCSSWActor->ResultMeshComponent->GetStaticMesh() : nullptr;
 		if (IsBakedResult(Candidate))
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[CSSW] Bake aborted on %s: 找不到可用的源网格（当前挂的是上一次的烘焙结果）。")
@@ -505,10 +505,10 @@ void UCSShallowWaterProcess::SaveSWData(ACSShallowWaterCapture* InCSSWActor)
 	UEditorAssetLibrary::SaveLoadedAsset(NewMesh, false);
 	NewMesh->MarkPackageDirty();
 
-	if (InCSSWActor->ReusltMesh)
+	if (InCSSWActor->ResultMeshComponent)
 	{
 		InCSSWActor->Modify();
-		InCSSWActor->ReusltMesh->Modify();
+		InCSSWActor->ResultMeshComponent->Modify();
 
 		// 记住这次烘焙用的源网格：下一次烘焙要靠它才能避开"拿烘焙结果当源"的死循环。
 		if (!InCSSWActor->SimulationPreviewMesh)
@@ -519,9 +519,9 @@ void UCSShallowWaterProcess::SaveSWData(ACSShallowWaterCapture* InCSSWActor)
 		InCSSWActor->BakedDecalMaterial = BakeDecalMaterial;
 		InCSSWActor->bUseBakedResultMesh = true;
 
-		InCSSWActor->ReusltMesh->SetStaticMesh(NewMesh);
-		InCSSWActor->ReusltMesh->SetRelativeScale3D(FVector::OneVector);
-		InCSSWActor->ReusltMesh->MarkRenderStateDirty();
+		InCSSWActor->ResultMeshComponent->SetStaticMesh(NewMesh);
+		InCSSWActor->ResultMeshComponent->SetRelativeScale3D(FVector::OneVector);
+		InCSSWActor->ResultMeshComponent->MarkRenderStateDirty();
 
 		// 贴烘焙 MIC 的活交给随后的 OnBakeComplete -> ShowBakedResult（它内部会调 ApplyBakedMaterials），
 		// 这里不再重复调用一次。
@@ -544,7 +544,7 @@ ACSShallowWaterCapture* UCSShallowWaterProcess::CSSW_GetSelectActor()
 	SelectedCapture = Cast<ACSShallowWaterCapture>(ParentActor);
 	if (SelectedCapture != nullptr) return SelectedCapture;
 
-	ACSSHallowWaterSource* SelectedSource = Cast<ACSSHallowWaterSource>(SelectedActor);
+	ACSShallowWaterSource* SelectedSource = Cast<ACSShallowWaterSource>(SelectedActor);
 	if (SelectedSource == nullptr) return SelectedCapture;
 
 	TArray<TEnumAsByte<EObjectTypeQuery>> ObjectTypes = {
@@ -571,7 +571,7 @@ void UCSShallowWaterProcess::MaterialTest(ACSShallowWaterCapture* InCSSWActor)
 {
 	if (InCSSWActor == nullptr) return;
 	
-	UStaticMesh* VisMesh = InCSSWActor->ReusltMesh->GetStaticMesh(); 
+	UStaticMesh* VisMesh = InCSSWActor->ResultMeshComponent->GetStaticMesh(); 
 	if (VisMesh == nullptr) return;
 
 	FName CSSWTag = FName("CSSW_Bake");

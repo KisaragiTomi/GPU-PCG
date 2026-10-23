@@ -31,7 +31,7 @@ public:
 	static UHierarchicalInstancedStaticMeshComponent* FindFoliageInstanceComponent(UStaticMesh* StaticMesh);
 
 	UFUNCTION(BlueprintPure, Category = FoliageExtra, meta = (ScriptMethod))
-	static void GetAllInstancesTransfrom(UFoliageType* InFoliageType, TArray<FTransform>& OutTransforms);
+	static void GetAllInstancesTransform(UFoliageType* InFoliageType, TArray<FTransform>& OutTransforms);
 
 	UFUNCTION(BlueprintCallable, Category = FoliageExtra, meta = (ScriptMethod))
 	static void RefreshFoliage(UFoliageType* InFoliageType);
