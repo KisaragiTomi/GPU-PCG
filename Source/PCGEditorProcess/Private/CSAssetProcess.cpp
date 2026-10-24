@@ -144,7 +144,7 @@ void UCSAssetProcess::CalculateMeshHeight(AStaticMeshActor* InMeshActor,  UTextu
 				RDG_EVENT_NAME("ExecuteExampleComputeShader"),
 				PassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *PassParameters, GroupCount);
 				});

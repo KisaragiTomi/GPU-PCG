@@ -13,10 +13,15 @@ public:
 	// Dirty Cache System — Render Targets
 	// -------------------------------------------------------------------------
 
+	// 这三张 RT 由 NewObject 现建（CreateCacheRenderTargets），Outer 不保活：
+	// 必须是 UPROPERTY 才能让 GC 看见它们，否则下一次 GC 就会被回收而指针还在用。
+	UPROPERTY(Transient)
 	TObjectPtr<UTextureRenderTarget2D> VoxelMetaRT;
 
+	UPROPERTY(Transient)
 	TObjectPtr<UTextureRenderTarget2D> TriangleVertexRT;
 
+	UPROPERTY(Transient)
 	TObjectPtr<UTextureRenderTarget2D> TriangleNormalRT;
 
 	// -------------------------------------------------------------------------
@@ -25,6 +30,7 @@ public:
 
 	static FCSInstanceBrushEditorRequest OnInstanceBrushEditorRequest;
 
+	UPROPERTY(Transient)
 	TObjectPtr<UStaticMesh> InstanceBrushMesh = nullptr;
 
 	float InstanceBrushRadius = 500.0f;

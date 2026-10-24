@@ -226,12 +226,13 @@ void UComputeShaderBasicFunction::ConnectivityPixel(UTextureRenderTarget2D* InTe
 				const uint32 BytesPerElement = sizeof(uint32);
 				FRDGBufferRef TmpRDGBuffer_NormalizeCounter; 
 				FRDGBufferUAVRef RDGUAVBuffer_NormalizeCounter;
-				CreateRWBuffer(GraphBuilder, TmpRDGBuffer_NormalizeCounter, RDGUAVBuffer_NormalizeCounter, BytesPerElement, 1, EPixelFormat::PF_R32_UINT, TEXT("NormalizeCountBuffer"));
+				CreateRWBuffer(GraphBuilder, TmpRDGBuffer_NormalizeCounter, RDGUAVBuffer_NormalizeCounter, 1, BytesPerElement, EPixelFormat::PF_R32_UINT, TEXT("NormalizeCountBuffer"));
 				
 				const uint32 BytesPerElementFloat4 = sizeof(FVector4f);
 				FRDGBufferRef TmpRDGBuffer_Result;
 				FRDGBufferUAVRef RDGUAVBuffer_Result;
-				CreateRWBuffer(GraphBuilder, TmpRDGBuffer_Result, RDGUAVBuffer_Result, BytesPerElement, NumElements, EPixelFormat::PF_A32B32G32R32F, TEXT("ResultBuffer"));
+				// 每个像素最多一个岛，结果按 float4 存（Connectivity.usf 的 RW_ResultBuffer）。
+				CreateRWBuffer(GraphBuilder, TmpRDGBuffer_Result, RDGUAVBuffer_Result, NumElements, BytesPerElementFloat4, EPixelFormat::PF_A32B32G32R32F, TEXT("ResultBuffer"));
 				
 				// FRHIBuffer* brhi = Tmp_CountBuffer->GetRHI();
 				// brhi->GetType();
@@ -255,7 +256,7 @@ void UComputeShaderBasicFunction::ConnectivityPixel(UTextureRenderTarget2D* InTe
 					RDG_EVENT_NAME("Init"),
 					PassParameters,
 					ERDGPassFlags::AsyncCompute,
-					[&PassParameters, ComputeShader_Init, GroupCount](FRHIComputeCommandList& RHICmdList)
+					[PassParameters, ComputeShader_Init, GroupCount](FRHIComputeCommandList& RHICmdList)
 					{
 						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_Init, *PassParameters, GroupCount);
 					});
@@ -290,7 +291,7 @@ void UComputeShaderBasicFunction::ConnectivityPixel(UTextureRenderTarget2D* InTe
 					RDG_EVENT_NAME("Count"),
 					PassParameters,
 					ERDGPassFlags::AsyncCompute,
-					[&PassParameters, ComputeShader_Count, GroupCount](FRHIComputeCommandList& RHICmdList)
+					[PassParameters, ComputeShader_Count, GroupCount](FRHIComputeCommandList& RHICmdList)
 					{
 						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_Count, *PassParameters, GroupCount);
 					});
@@ -298,7 +299,7 @@ void UComputeShaderBasicFunction::ConnectivityPixel(UTextureRenderTarget2D* InTe
 					RDG_EVENT_NAME("NormalizeResult"),
 					PassParameters,
 					ERDGPassFlags::AsyncCompute,
-					[&PassParameters, ComputeShader_NormalizeResult, GroupCount](FRHIComputeCommandList& RHICmdList)
+					[PassParameters, ComputeShader_NormalizeResult, GroupCount](FRHIComputeCommandList& RHICmdList)
 					{
 						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_NormalizeResult, *PassParameters, GroupCount);
 					});
@@ -307,7 +308,7 @@ void UComputeShaderBasicFunction::ConnectivityPixel(UTextureRenderTarget2D* InTe
 					RDG_EVENT_NAME("DrawTexture"),
 					PassParameters,
 					ERDGPassFlags::AsyncCompute,
-					[&PassParameters, ComputeShader_DrawTexture, GroupCount](FRHIComputeCommandList& RHICmdList)
+					[PassParameters, ComputeShader_DrawTexture, GroupCount](FRHIComputeCommandList& RHICmdList)
 					{
 						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_DrawTexture, *PassParameters, GroupCount);
 					});
@@ -351,7 +352,7 @@ static void BlurTexture_Internal(FRDGBuilder& GraphBuilder, FTextureRenderTarget
 		RDG_EVENT_NAME("Blur"),
 		PassParameters,
 		ERDGPassFlags::AsyncCompute,
-		[&PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
+		[PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 		{
 			FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *PassParameters, GroupCount);
 		});
@@ -395,7 +396,7 @@ void UComputeShaderBasicFunction::BlurTextureRDG(FRDGBuilder& GraphBuilder, FRDG
 	RDG_EVENT_NAME("Blur"),
 	PassParameters,
 	ERDGPassFlags::AsyncCompute,
-	[&PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
+	[PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 	{
 		FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *PassParameters, GroupCount);
 	});
@@ -459,7 +460,7 @@ void UComputeShaderBasicFunction::UpPixelsMask(UTextureRenderTarget2D* InTexture
 					RDG_EVENT_NAME("ExecuteExampleComputeShader"),
 					PassParameters,
 					ERDGPassFlags::AsyncCompute,
-					[&PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
+					[PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 					{
 						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *PassParameters, GroupCount);
 					});
@@ -509,7 +510,7 @@ void UComputeShaderBasicFunction::ExtentMaskFast(UTextureRenderTarget2D* InTextu
 				RDG_EVENT_NAME("MaskExtendFast"),
 				PassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *PassParameters, GroupCount);
 				});
@@ -570,7 +571,7 @@ void UComputeShaderBasicFunction::DrawLinearColorToRenderTarget(UTextureRenderTa
 				RDG_EVENT_NAME("CalVelocityHeight"),
 				PassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *PassParameters, GroupCount);
 				});
@@ -657,7 +658,7 @@ void UComputeShaderBasicFunction::CalTreeWindTexture(UTextureRenderTarget2D* InW
 				RDG_EVENT_NAME("CalVelocityHeight"),
 				PassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&PassParameters, ComputeShader_TreeWind, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[PassParameters, ComputeShader_TreeWind, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_TreeWind, *PassParameters, GroupCount);
 				});
@@ -783,7 +784,7 @@ TArray<FTransform> UComputeShaderBasicFunction::SampleSpline(UTextureRenderTarge
 					RDG_EVENT_NAME("SampleSpline"),
 					PassParameters,
 					ERDGPassFlags::AsyncCompute,
-					[&PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
+					[PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 					{
 						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *PassParameters, GroupCount);
 					});
@@ -1200,7 +1201,7 @@ void UComputeShaderBasicFunction::BuildTextureArray(FRDGBuilder& GraphBuilder, i
 	RDG_EVENT_NAME("BuildTextureArray"),
 	PassParameters,
 	ERDGPassFlags::AsyncCompute,
-	[&PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
+	[PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 	{
 		FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *PassParameters, GroupCount);
 	});
@@ -1270,7 +1271,7 @@ void UComputeShaderBasicFunction::Test(UTexture2DArray* InArray, UTexture2D* InT
 				RDG_EVENT_NAME("ExecuteExampleComputeShader"),
 				PassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 
 				});

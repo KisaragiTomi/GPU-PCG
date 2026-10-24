@@ -242,7 +242,7 @@ void ACSCliffGenerateCapture::GenerateTargetHeightCal()
 				RDG_EVENT_NAME("MeshFillVerticalRock"),
 				PassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&PassParameters, ComputeShader_InitTargetHeight, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[PassParameters, ComputeShader_InitTargetHeight, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_InitTargetHeight, *PassParameters, GroupCount);
 				});
@@ -257,7 +257,7 @@ void ACSCliffGenerateCapture::GenerateTargetHeightCal()
 				RDG_EVENT_NAME("GenerateTargetHeight"),
 				PassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&PassParameters, ComputeShader_TargetHeight, GroupCount, i, RDGUAV_A, RDGUAV_B](FRHIComputeCommandList& RHICmdList)
+				[PassParameters, ComputeShader_TargetHeight, GroupCount, i, RDGUAV_A, RDGUAV_B](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_TargetHeight, *PassParameters, GroupCount);
 					if ( i % 2 == 0)
@@ -292,7 +292,7 @@ void ACSCliffGenerateCapture::GenerateTargetHeightCal()
 				RDG_EVENT_NAME("Blur"),
 				BlurPassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&BlurPassParameters, ComputeShader_Blur, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[BlurPassParameters, ComputeShader_Blur, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_Blur, *BlurPassParameters, GroupCount);
 				});
@@ -422,7 +422,7 @@ void ACSCliffGenerateCapture::GenerateCliffVerticalCal(TArray<FCSMeshFillData> G
 			CreateUVATextureArrayFormat(GraphBuilder, ArraySize, TmpRDG_MeshTexture2DArray,RDGUAV_MeshHeightTexture2DArray , TextureSizeXY );
 			
 			TArray<FRDGTextureRef> MeshHeightTextures;
-			MeshHeightTextures.Reserve(GenerateDatas.Num());
+			MeshHeightTextures.Reserve(ArraySize);
 			for (int32 i = 0 ; i < ArraySize ; i++)
 			{
 				UTexture2D* MeshHeightMap = MeshDataAssets[i]->CSMeshHeightTexture;
@@ -437,13 +437,13 @@ void ACSCliffGenerateCapture::GenerateCliffVerticalCal(TArray<FCSMeshFillData> G
 					
 				TAPassParameters->RW_TextureArray0 = RDGUAV_MeshHeightTexture2DArray;
 				TAPassParameters->T_ProcssTexture0 = MeshHeightTextures[i];
-				TAPassParameters->InputIntData0 = GenerateDatas[i].SelectIndex;
+				TAPassParameters->InputIntData0 = i;   // 目标切片 = 资产号：后续 pass 按 SelectIndex 取片
 					
 				GraphBuilder.AddPass(
 				RDG_EVENT_NAME("BuildTextureArray"),
 				TAPassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&TAPassParameters, ComputeShader, GeneralGroupCount](FRHIComputeCommandList& RHICmdList)
+				[TAPassParameters, ComputeShader, GeneralGroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *TAPassParameters, GeneralGroupCount);
 				});
@@ -501,7 +501,7 @@ void ACSCliffGenerateCapture::GenerateCliffVerticalCal(TArray<FCSMeshFillData> G
 				RDG_EVENT_NAME("Init"),
 				PassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&PassParameters, ComputeShader_Init, GeneralGroupCount](FRHIComputeCommandList& RHICmdList)
+				[PassParameters, ComputeShader_Init, GeneralGroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_Init, *PassParameters, GeneralGroupCount);
 				});
@@ -511,7 +511,7 @@ void ACSCliffGenerateCapture::GenerateCliffVerticalCal(TArray<FCSMeshFillData> G
 				RDG_EVENT_NAME("ExtentNormalMask"),
 				PassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&PassParameters, ComputeShader_ExtentGenerateMask, GeneralGroupCount](FRHIComputeCommandList& RHICmdList)
+				[PassParameters, ComputeShader_ExtentGenerateMask, GeneralGroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_ExtentGenerateMask, *PassParameters, GeneralGroupCount);
 				});
@@ -526,7 +526,7 @@ void ACSCliffGenerateCapture::GenerateCliffVerticalCal(TArray<FCSMeshFillData> G
 					RDG_EVENT_NAME("MeshFillVerticalRock"),
 					PassParameters,
 					ERDGPassFlags::AsyncCompute,
-					[&PassParameters, ComputeShader_FVR, MeshCheckGroupCount, i, GenerateDatas, &MeshHeightTextures, this, TMeshDepthTexture](FRHIComputeCommandList& RHICmdList)
+					[PassParameters, ComputeShader_FVR, MeshCheckGroupCount, i, GenerateDatas, MeshHeightTextures, this, TMeshDepthTexture](FRHIComputeCommandList& RHICmdList)
 					{
 						float MeshSize = MeshDataAssets[GenerateDatas[i].SelectIndex]->CSMeshSize;
 						float DrawSize = MeshSize / CaptureSize * SpawnSize ;
@@ -543,7 +543,7 @@ void ACSCliffGenerateCapture::GenerateCliffVerticalCal(TArray<FCSMeshFillData> G
 					RDG_EVENT_NAME("FindBestPiexelRW"),
 					PassParameters,
 					ERDGPassFlags::AsyncCompute,
-					[&PassParameters, ComputeShader_FindPixelRW, i, RDGUAV_ResultA, RDGUAV_ResultB, FilterResultSizeXY,  GenerateDatas, &MeshHeightTextures, TMeshDepthTexture](FRHIComputeCommandList& RHICmdList)
+					[PassParameters, ComputeShader_FindPixelRW, i, RDGUAV_ResultA, RDGUAV_ResultB, FilterResultSizeXY,  GenerateDatas, MeshHeightTextures, TMeshDepthTexture](FRHIComputeCommandList& RHICmdList)
 					{
 						PassParameters->T_TMeshDepth = TMeshDepthTexture;
 						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_FindPixelRW, *PassParameters, FIntVector(1, 1, 1));
@@ -564,7 +564,7 @@ void ACSCliffGenerateCapture::GenerateCliffVerticalCal(TArray<FCSMeshFillData> G
 					RDG_EVENT_NAME("Update"),
 					PassParameters,
 					ERDGPassFlags::AsyncCompute,
-					[&PassParameters, ComputeShader_UpdateCurrentHeightMult, GeneralGroupCount, i, RDGUAV_ResultA, RDGUAV_ResultB, RDGUAV_CurrentSceneDepthA, RDGUAV_CurrentSceneDepthB,  GenerateDatas, &MeshHeightTextures, TMeshDepthTexture](FRHIComputeCommandList& RHICmdList)
+					[PassParameters, ComputeShader_UpdateCurrentHeightMult, GeneralGroupCount, i, RDGUAV_ResultA, RDGUAV_ResultB, RDGUAV_CurrentSceneDepthA, RDGUAV_CurrentSceneDepthB,  GenerateDatas, MeshHeightTextures, TMeshDepthTexture](FRHIComputeCommandList& RHICmdList)
 					{
 						PassParameters->T_TMeshDepth = TMeshDepthTexture;
 						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_UpdateCurrentHeightMult, *PassParameters, GeneralGroupCount);

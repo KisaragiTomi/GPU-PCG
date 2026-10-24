@@ -239,7 +239,7 @@ void ACSFillTarget::FillTargetCal(TArray<FCSMeshFillData> GenerateDatas)
 			CreateUVATextureArrayFormat(GraphBuilder, ArraySize, TmpRDG_MeshTexture2DArray,RDGUAV_MeshHeightTexture2DArray , TextureSizeXY );
 						
 			TArray<FRDGTextureRef> MeshHeightTextures;
-			MeshHeightTextures.Reserve(GenerateDatas.Num());
+			MeshHeightTextures.Reserve(ArraySize);
 			for (int32 i = 0 ; i < ArraySize ; i++)
 			{
 				UTexture2D* MeshHeightMap = MeshDataAssets[i]->CSMeshHeightTexture;
@@ -254,13 +254,13 @@ void ACSFillTarget::FillTargetCal(TArray<FCSMeshFillData> GenerateDatas)
 					
 				TAPassParameters->RW_TextureArray0 = RDGUAV_MeshHeightTexture2DArray;
 				TAPassParameters->T_ProcssTexture0 = MeshHeightTextures[i];
-				TAPassParameters->InputIntData0 = GenerateDatas[i].SelectIndex;
+				TAPassParameters->InputIntData0 = i;   // 目标切片 = 资产号：后续 pass 按 SelectIndex 取片
 					
 				GraphBuilder.AddPass(
 				RDG_EVENT_NAME("BuildTextureArray"),
 				TAPassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&TAPassParameters, ComputeShader, GeneralGroupCount](FRHIComputeCommandList& RHICmdList)
+				[TAPassParameters, ComputeShader, GeneralGroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *TAPassParameters, GeneralGroupCount);
 				});
@@ -323,7 +323,7 @@ void ACSFillTarget::FillTargetCal(TArray<FCSMeshFillData> GenerateDatas)
 				RDG_EVENT_NAME("InitFillTarget"),
 				PassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&PassParameters, ComputeShader_InitFillTarget, GeneralGroupCount](FRHIComputeCommandList& RHICmdList)
+				[PassParameters, ComputeShader_InitFillTarget, GeneralGroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_InitFillTarget, *PassParameters, GeneralGroupCount);
 				});
@@ -335,7 +335,7 @@ void ACSFillTarget::FillTargetCal(TArray<FCSMeshFillData> GenerateDatas)
 					RDG_EVENT_NAME("MeshFillTarget"),
 					PassParameters,
 					ERDGPassFlags::AsyncCompute,
-					[&PassParameters, ComputeShader_FMM, MeshCheckGroupCount, i, GenerateDatas, &MeshHeightTextures, this](FRHIComputeCommandList& RHICmdList)
+					[PassParameters, ComputeShader_FMM, MeshCheckGroupCount, i, GenerateDatas, MeshHeightTextures, this](FRHIComputeCommandList& RHICmdList)
 					{
 						float MeshSize = MeshDataAssets[GenerateDatas[i].SelectIndex]->CSMeshSize;
 						float DrawSize = MeshSize / CaptureSize * SpawnSize ;
@@ -352,7 +352,7 @@ void ACSFillTarget::FillTargetCal(TArray<FCSMeshFillData> GenerateDatas)
 					RDG_EVENT_NAME("FindBestPiexelRW"),
 					PassParameters,
 					ERDGPassFlags::AsyncCompute,
-					[&PassParameters, ComputeShader_FindPixelRW, i, TmpTextureUAV_ResultA, TmpTextureUAV_ResultB, FilterResultSizeXY, &MeshHeightTextures](FRHIComputeCommandList& RHICmdList)
+					[PassParameters, ComputeShader_FindPixelRW, i, TmpTextureUAV_ResultA, TmpTextureUAV_ResultB, FilterResultSizeXY, MeshHeightTextures](FRHIComputeCommandList& RHICmdList)
 					{
 						PassParameters->T_TMeshDepth = MeshHeightTextures[0];
 						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_FindPixelRW, *PassParameters, FIntVector(1, 1, 1));
@@ -373,7 +373,7 @@ void ACSFillTarget::FillTargetCal(TArray<FCSMeshFillData> GenerateDatas)
 					RDG_EVENT_NAME("UpdateMult"),
 					PassParameters,
 					ERDGPassFlags::AsyncCompute,
-					[&PassParameters, ComputeShader_UpdateCurrentHeightMult, GeneralGroupCount, i, TmpTextureUAV_ResultA, TmpTextureUAV_ResultB, TmpTextureUAV_CurrentSceneDepthA, TmpTextureUAV_CurrentSceneDepthB, &MeshHeightTextures, GenerateDatas](FRHIComputeCommandList& RHICmdList)
+					[PassParameters, ComputeShader_UpdateCurrentHeightMult, GeneralGroupCount, i, TmpTextureUAV_ResultA, TmpTextureUAV_ResultB, TmpTextureUAV_CurrentSceneDepthA, TmpTextureUAV_CurrentSceneDepthB, MeshHeightTextures, GenerateDatas](FRHIComputeCommandList& RHICmdList)
 					{
 						PassParameters->T_TMeshDepth = MeshHeightTextures[0];
 						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_UpdateCurrentHeightMult, *PassParameters, GeneralGroupCount);
@@ -608,7 +608,7 @@ void ACSFillTarget::CurvaturePostTest()
 				RDG_EVENT_NAME("Test"),
 				PassParameters,
 				ERDGPassFlags::AsyncCompute,
-				[&PassParameters, ComputeShader_Test, GeneralGroupCount](FRHIComputeCommandList& RHICmdList)
+				[PassParameters, ComputeShader_Test, GeneralGroupCount](FRHIComputeCommandList& RHICmdList)
 				{
 					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader_Test, *PassParameters, GeneralGroupCount);
 				});

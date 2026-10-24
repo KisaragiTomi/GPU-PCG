@@ -66,14 +66,14 @@
 
 ## 二、要先修的真实缺陷（P0）
 
-「复核」列打 ✔ 的，是我亲自读代码核实过的。
+「复核」列打 ✔ 的，是我亲自读代码核实过的；标「✅ 已修」的已在 2026-10-24 修复。
 
 | # | 位置 | 问题 | 后果 | 条目 | 复核 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `ComputeShaderGenerator/Public/MeshGeneratorBrushCache.h:16-20` | `AMeshGeneratorBrushCache` 的三张缓存渲染目标是普通 `TObjectPtr` 成员，没有 `UPROPERTY`，模块里也没有 `AddReferencedObjects` | 下一次 GC 就会回收它们，之后继续读写已释放的对象，并交给渲染线程 | 4.4 X01 | ✔ |
-| 2 | `ComputeShaderBasicFunction.cpp:354` 等 12 处 | RDG pass 的 lambda 写 `[&PassParameters]`，按引用捕获了局部指针 | `GraphBuilder.Execute()` 执行 lambda 时这个局部变量已经失效，属于未定义行为 | 4.4 X02 | ✔ |
-| 3 | `ComputeShaderBasicFunction.cpp:229, 234` | `CreateRWBuffer` 的元素数和每元素字节数两个实参写反 | 结果缓冲只有所需大小的 1/4，3/4 的写入被丢弃 | 4.4 X03 | ✔ |
-| 4 | `ComputeShaderMeshFill.cpp:243-257`、`ComputeShaderCliffGenerate.cpp:426-440` | 循环按资产数走，每轮却读 `GenerateDatas[i]`；切片号也用错了 | 资产数多于迭代次数时触发数组越界断言；纹理数组切片写错 | 4.5 U1 | ✔ |
+| 1 | `ComputeShaderGenerator/Public/MeshGeneratorBrushCache.h:16-20` | `AMeshGeneratorBrushCache` 的三张缓存渲染目标是普通 `TObjectPtr` 成员，没有 `UPROPERTY`，模块里也没有 `AddReferencedObjects` | 下一次 GC 就会回收它们，之后继续读写已释放的对象，并交给渲染线程 | 4.4 X01 | ✔ ✅ 已修 |
+| 2 | `ComputeShaderBasicFunction.cpp:354` 等（修复时查全：4 个文件共 31 处，还包括按引用捕获的 `MeshHeightTextures`） | RDG pass 的 lambda 写 `[&PassParameters]`，按引用捕获了局部指针 | `GraphBuilder.Execute()` 执行 lambda 时这个局部变量已经失效，属于未定义行为 | 4.4 X02 | ✔ ✅ 已修 |
+| 3 | `ComputeShaderBasicFunction.cpp:229, 234` | `CreateRWBuffer` 的元素数和每元素字节数两个实参写反 | 结果缓冲只有所需大小的 1/4，3/4 的写入被丢弃 | 4.4 X03 | ✔ ✅ 已修 |
+| 4 | `ComputeShaderMeshFill.cpp:243-257`、`ComputeShaderCliffGenerate.cpp:426-440` | 循环按资产数走，每轮却读 `GenerateDatas[i]`；切片号也用错了 | 资产数多于迭代次数时触发数组越界断言；纹理数组切片写错 | 4.5 U1 | ✔ ✅ 已修 |
 | 5 | `ComputeShaderBasicFunction.cpp:165-171` | `DrawLinearColorsToRenderTarget16` 写越界 | 颜色数多于像素数时堆越界写 | 4.4 X04 | |
 | 6 | `ComputeShaderBasicFunction.cpp:702, 720` | `SampleSpline` 采样失败时少 Add 一项 | 后续按下标读时越界 | 4.4 X05 | |
 | 7 | `GeometryScriptExtraEditor/Public/GeometryAsync.h:19-22` | 先算 `NumInput / NumThreads`，后判 `NumThreads == 0` | 输入少于每线程处理量时整数除零，直接崩溃 | 4.6 L3 | ✔ |
@@ -267,9 +267,9 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 
 | ID | 类别 | 位置 | 问题与证据 | 建议 | 置信度 |
 | --- | --- | --- | --- | --- | --- |
-| X01 | 缺陷（GC） | `Public/MeshGeneratorBrushCache.h:16-20` | `AMeshGeneratorBrushCache` 的 `VoxelMetaRT` / `TriangleVertexRT` / `TriangleNormalRT` 是普通 `TObjectPtr` 成员，没有 `UPROPERTY`，模块里也没有 `AddReferencedObjects`；由 `NewObject` 创建（`.cpp:1059-1061`），Outer 不保活，下一次 GC 就会被回收，之后 `IsValidCacheRT`（136-139）读已释放对象，808-810 还把它交给渲染线程。`InstanceBrushMesh`（:28）同类、风险较低 | 加 `UPROPERTY(Transient)` | high（已复核） |
-| X02 | 缺陷（悬空引用） | `Private/ComputeShaderBasicFunction.cpp:354`（另有 258、293、301、310、398、462、512、573、660、786、1203） | RDG lambda 写 `[&PassParameters]`，按引用捕获局部指针变量；lambda 在 `GraphBuilder.Execute()` 时才跑，`BlurTexture_Internal` 在 375 行 Execute 之前就已返回，引用指向失效栈 | 改按值捕获 | high（已复核） |
-| X03 | 缺陷（缓冲大小） | `Private/ComputeShaderBasicFunction.cpp:229, 234` | `CreateRWBuffer` 签名是 (NumElements, BytesPerElement)（`ComputeShaderGenerateHelper.h:243`），两处实参写反；`ResultBuffer` 只有 4·W·H 字节，按 float4 需要 16·W·H，3/4 的写入被丢弃；231 的 `BytesPerElementFloat4` 没用上 | 改正实参顺序并用上 float4 字节数 | high（已复核） |
+| X01 | 缺陷（GC） | `Public/MeshGeneratorBrushCache.h:16-20` | `AMeshGeneratorBrushCache` 的 `VoxelMetaRT` / `TriangleVertexRT` / `TriangleNormalRT` 是普通 `TObjectPtr` 成员，没有 `UPROPERTY`，模块里也没有 `AddReferencedObjects`；由 `NewObject` 创建（`.cpp:1059-1061`），Outer 不保活，下一次 GC 就会被回收，之后 `IsValidCacheRT`（136-139）读已释放对象，808-810 还把它交给渲染线程。`InstanceBrushMesh`（:28）同类、风险较低 | ✅ 已修：三张 RT 与 `InstanceBrushMesh` 加 `UPROPERTY(Transient)`，强制 GC 后 RT 仍存活。另：`InstanceBrush*` 画刷参数从未有 `UPROPERTY`，`InstanceBrushMesh` 也无处赋值，Instance Brush 目前配置不了（未改，待定是否恢复成可编辑） | high（已复核） |
+| X02 | 缺陷（悬空引用） | `Private/ComputeShaderBasicFunction.cpp:354`（另有 258、293、301、310、398、462、512、573、660、786、1203） | RDG lambda 写 `[&PassParameters]`，按引用捕获局部指针变量；lambda 在 `GraphBuilder.Execute()` 时才跑，`BlurTexture_Internal` 在 375 行 Execute 之前就已返回，引用指向失效栈 | ✅ 已修：改按值捕获。同类写法在悬崖生成（9 处）、MeshFill（6 处）、`CSAssetProcess.cpp`（1 处）也一并改了，包括 `&MeshHeightTextures`、`&TAPassParameters`、`&BlurPassParameters`——这些变量都声明在内层块或循环体里 | high（已复核） |
+| X03 | 缺陷（缓冲大小） | `Private/ComputeShaderBasicFunction.cpp:229, 234` | `CreateRWBuffer` 签名是 (NumElements, BytesPerElement)（`ComputeShaderGenerateHelper.h:243`），两处实参写反；`ResultBuffer` 只有 4·W·H 字节，按 float4 需要 16·W·H，3/4 的写入被丢弃；231 的 `BytesPerElementFloat4` 没用上 | ✅ 已修：改正实参顺序并用上 float4 字节数 | high（已复核） |
 | X04 | 缺陷（越界写） | `Private/ComputeShaderBasicFunction.cpp:165-171` | `DrawLinearColorsToRenderTarget16`（UFUNCTION）颜色数多于像素数时写 `Colors16` 越界 | 循环上界改 `TexturePixelCount` | high |
 | X05 | 缺陷（越界读） | `Private/ComputeShaderBasicFunction.cpp:702, 720` | `SampleSpline` 采样失败时 `continue` 少 Add 一项，之后按 NumSpline 取 `ResampleTransform[i]` 越界 | 失败也 Add 空项，或按实际数量循环 | high |
 | R01 | null-risk | `Private/ComputeShaderBasicFunction.cpp:478-479` | `ExtentMaskFast`（BlueprintCallable，`EUW_Tests` 在用）两个 RT 参数都没判空 | 开头补判空 | high |
@@ -379,7 +379,7 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 | D2 | dead-code | `Private/GeometryEditorActor.cpp:2363-2374、1959-1968、1859-1866` | `FVineMeshPassOutputs` 只在 :3051、:3157 构造，都设 `bBaseStreams = true` 并给了 IndirectArgs / MeshCounters：legacy 输出分支、scratch 兜底、3 个 `Out*UAV` 字段都不可达，`FVVVoxelCS` 的 `FBaseStreams=false` 排列白编译；:1863 的注释与事实相反 | 删开关与 legacy 路径（或在 `ShouldCompilePermutation` 排除 false 排列），修正注释 | high |
 | R3 | redundant-logic | `Private/ComputeShaderMeshFill.cpp:269-281`；`ComputeShaderCliffGenerate.cpp:452-464` | 3 个 FindPixel buffer 和 `RW_Deduplication`、`RW_FilterResulteMult` 在 usf 里只有声明；3 个 UAV 都建在同一个 `Tmp_CountBuffer` 上，清零互相覆盖 | 删掉这些 buffer、纹理、清零、绑定与 usf 声明 | high |
 | R2 | redundant-logic | `Private/ComputeShaderMeshFill.cpp:464-469`；`ComputeShaderCliffGenerate.cpp:85-90` | `ReadLinearColorPixels` 读出的 `LinearSamples` 没人用，紧接着又 `ReadRenderTargetRaw` 读同一张 RT——每次生成多一次阻塞 GPU 回读 | 删掉 | high |
-| U1 | duplicate（含缺陷） | `Private/ComputeShaderCliffGenerate.cpp:35-161、321-607` ↔ `ComputeShaderMeshFill.cpp:143-416、423-543` | 约 200 行几乎逐行相同。两份共有同一个越界：循环到 `MeshDataAssets.Num()`，每轮却读 `GenerateDatas[i]`（只有 NumIteration 个元素，MeshFill :243-257、Cliff :426-440）；而且这里该用的切片号是 `i`，不是 `GenerateDatas[i].SelectIndex` | 先修越界；再抽自由函数到 `Private/CSMeshFillShared.h`（不要插中间 UCLASS，蓝图资产依赖现有层级） | high（越界已复核） |
+| U1 | duplicate（含缺陷） | `Private/ComputeShaderCliffGenerate.cpp:35-161、321-607` ↔ `ComputeShaderMeshFill.cpp:143-416、423-543` | 约 200 行几乎逐行相同。两份共有同一个越界：循环到 `MeshDataAssets.Num()`，每轮却读 `GenerateDatas[i]`（只有 NumIteration 个元素，MeshFill :243-257、Cliff :426-440）；而且这里该用的切片号是 `i`，不是 `GenerateDatas[i].SelectIndex` | 越界 ✅ 已修：切片号改为资产号 `i`，3 资产 × 1 次迭代实测正常。去重还没做：抽自由函数到 `Private/CSMeshFillShared.h`（不要插中间 UCLASS，蓝图资产依赖现有层级） | high（越界已复核） |
 | D3 | dead-code | `Private/GeometryAsync.h` | CSG 里没人包含它，唯一包含点解析到 GSEE 那份（同 g6 的 D1） | 删掉 CSG 这份 | high |
 | R4 | redundant-logic | `Private/ComputeShaderMeshFill.cpp:103-126` | 重叠查询只贡献"带 Tag 的"子集，紧接着遍历全世界的 Tag 又全加一遍（还有重复）；`OverlapOutActorsWithoutTag` 没人用 | 删掉重叠查询；若本意是"盒内且带 Tag"则删第二段，需作者确认 | high |
 | U3 | duplicate | `Private/GeometryEditorActor.cpp:114-150、443-465、591-610、674-693`，绑定 2097-2392 | 4 个 VVVoxel shader 声明并逐行绑定同一组 19 个参数；本文件已对 TriangleSurface / GDF 用 `SHADER_PARAMETER_STRUCT_INCLUDE` | 新建 `FVineVoxelLookupParameters` 并 STRUCT_INCLUDE，约省 140 行 | medium |
@@ -587,7 +587,7 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 
 ## 七、建议的处理顺序
 
-1. **先修[第二节](#二要先修的真实缺陷p0)。** 按模块分批，每批跑 `RunTests PCGPlugins` 和演示回归，基线见测试记录。第 1-4 条会写坏内存或触发断言，优先级最高。
+1. **先修[第二节](#二要先修的真实缺陷p0)。** 按模块分批，每批跑 `RunTests PCGPlugins` 和演示回归，基线见测试记录。第 1-4 条会写坏内存或触发断言，优先级最高（已于 2026-10-24 修复）。
 2. **删死代码和死子系统。** 第三节前三项和各组的 dead-code，收益大、风险小。
 3. **结构性去重。** 需要先定落点：放基类还是 helper，要不要插中间类（插中间类会影响蓝图资产的类层级）。
 4. **多余判空。** 按模块批量清理，机械、低风险；可以改成 `check` 的地方，优先改 `check` 而不是直接删。
