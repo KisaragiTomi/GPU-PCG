@@ -107,7 +107,7 @@
 | `mcp-16,17` | `AnimBP` 路由 | legacy 别名 op + UE 5.7 改名 workaround shim；硬编码 `WITH_PCG/WITH_GAMEPLAY_ABILITIES/WITH_NIAGARA=1` 使 501 fallback 分支不可达 | low |
 | `mcp-3` | `RealtimeMesh` 端点 | `WITH_REALTIMEMESH` 从未定义 | low |
 | `game-4,5` | `DefaultGame.ini` / `Build.cs` | 指向不存在属性的死配置节、仅为模板代码存在的依赖与 include 路径 | low |
-| `pcgep-15` | `PCGPLUGINS_DEBUG` Build.cs 块 | 在 `PCGEditorProcess` 内已死（且跨模块复制粘贴） | low |
+| `pcgep-15` | `PCGPLUGINS_DEBUG` Build.cs 块 | ✅ 2026-10-24 已删：`GeometryScriptExtraEditor`、`PCGEditorProcess` 两份删掉，只留 `ComputeShaderGenerator` 那份（见 [结构优化方案](Plan_PluginStructure.md) `src-7`） | low |
 | `shaders-2` | `Connectivity.usf` | `CPF_Findislands` 被 `CPF_FindislandsFast` 取代 + 44 行注释实验 | low |
 | `shaders-17` | `SampleSpline.usf` | `SS_RASTERIZESPLINE` permutation 从不派发且函数体 100% 注释 | low |
 

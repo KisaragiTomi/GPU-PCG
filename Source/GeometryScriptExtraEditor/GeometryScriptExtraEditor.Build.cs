@@ -1,4 +1,3 @@
-using System;
 using System.IO;
 using UnrealBuildTool;
 
@@ -10,13 +9,6 @@ public class GeometryScriptExtraEditor : ModuleRules
         PCHUsage = ModuleRules.PCHUsageMode.NoPCHs;
         bUseUnity = false;
         bUseRTTI = true;
-        bool bPCGPluginsDebug = Target.Configuration != UnrealTargetConfiguration.Shipping;
-        string PCGPluginsDebugEnv = Environment.GetEnvironmentVariable("PCGPLUGINS_DEBUG");
-        if (!string.IsNullOrWhiteSpace(PCGPluginsDebugEnv))
-        {
-            bPCGPluginsDebug = PCGPluginsDebugEnv != "0" && !PCGPluginsDebugEnv.Equals("false", StringComparison.OrdinalIgnoreCase);
-        }
-        PublicDefinitions.Add("PCGPLUGINS_DEBUG=" + (bPCGPluginsDebug ? "1" : "0"));
 
         // Ensure our own Public headers are found before engine headers with
         // colliding names (e.g. PolyLine.h vs GeometryCore's Polyline.h).

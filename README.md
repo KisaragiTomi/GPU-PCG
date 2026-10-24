@@ -66,7 +66,7 @@ GPU procedural content generation (PCG) tools for Unreal Engine 5.7: procedural 
 | **PCGEditorProcess** | Editor · PostConfigInit | Win64 | 编辑器工具流程：四种笔刷 EdMode（实例 / 点 / 地面顶点色 / 窗）、浅水烘焙、Landscape Edit Layer 与道路、选中 Actor 的视口叠加面板、资产处理、GPU 骨架树的骨骼网格生成、拉尺寸失选监听、Nanite 截面 HLOD 构建器（`UCSNaniteCutHLODBuilder`）。 |
 | **EditorShortcuts** | Editor · Default | Win64 | 编辑器全局快捷键：按键组合 → 调用任意 UFunction（函数库里的静态函数，或逐个选中 actor 上的函数），附 Actor Tag 增删 / 切换函数库。 |
 
-> 调试宏 `PCGPLUGINS_DEBUG` 由 `ComputeShaderGenerator` / `GeometryScriptExtraEditor` / `PCGEditorProcess` 三个 Build.cs 定义，非 Shipping 为 1。**编译期**可用环境变量 `PCGPLUGINS_DEBUG=0` 关掉：它由 UBT 读取，不是运行时开关；Shipping 下 `PCGPLUGINS_DEBUG_ENABLED` 恒为 0，设成 1 也没用。头文件 `PCGPluginDebug.h` 在 `Source/ComputeShaderGenerator/` 的 `Public/` 与 `Private/` 各有一份，内容逐字相同。
+> 调试宏 `PCGPLUGINS_DEBUG` 只在 `ComputeShaderGenerator.Build.cs` 里定义（`PublicDefinitions`，依赖它的模块一并继承），非 Shipping 为 1。**编译期**可用环境变量 `PCGPLUGINS_DEBUG=0` 关掉：它由 UBT 读取，不是运行时开关；Shipping 下 `PCGPLUGINS_DEBUG_ENABLED` 恒为 0，设成 1 也没用。头文件 `PCGPluginDebug.h` 在 `Source/ComputeShaderGenerator/` 的 `Public/` 与 `Private/` 各有一份，内容逐字相同。
 
 > 🧩 **GPU 网格产出统一**：当前采用 `UCSMesh` 网格对象、`UCSMeshOps` 算子库与 `UCSMeshRenderComponent` 渲染组件；接口与数据流见下方核心功能第 1 节。
 

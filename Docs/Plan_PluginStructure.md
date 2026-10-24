@@ -19,7 +19,7 @@
 - **`.uplugin` 有 3 处无效或缺失的声明**（✅ 2026-10-24 已修）：`BlacklistTargets: ["Shipping"]` 不起作用、`ShaderArchive` 引擎不读、实际依赖的 `ProxyLODPlugin` 没声明。都是零代码改动，适合第一批做。另：`Landmass` 依赖**不能删**——`Content/Landscape/` 下 6 个资产在用（旧清理记录 `critic-3` 的「零引用」结论只查了源码）。
 - **Game target 目前链接不过**（静态核对，未实际编译）：`ACSGroundActor` 的地被 / 灌木段整段在 `WITH_EDITOR` 里，却被非编辑器代码调用。要不要支持打包是[待决问题](#七待决问题)，它决定运行时 / 编辑器边界整改的优先级。
 - **文档、脚本、DCC 源文件散落**：插件根有 4 份计划 md（3 份未入库）和 3 个 `.hip`；`Docs/` 里混着 `.cpp`、PLY 生成表、`.obj` / `.bgeo.sc`；`Scripts/` 根目录平铺 124 个文件，且脚本之间按同级路径互相加载，搬家前要先解决加载方式。
-- **2026-10-23 已执行**：在途改动分文档 / 代码两次提交（`repo-1`）；着色器按功能合并了两组并删掉一个死文件（`shd-1` 的一部分，见 [3.3](#33-shaders)）；Content 目录 / 资产名与反射名里的拼写错误已修正（`cnt-1` 的拼写部分与 `src-8`），旧名都留了 CoreRedirects。**2026-10-24** 做了阶段 1 的描述文件三项（`plug-1..3`）。其余条目未动。
+- **2026-10-23 已执行**：在途改动分文档 / 代码两次提交（`repo-1`）；着色器按功能合并了两组并删掉一个死文件（`shd-1` 的一部分，见 [3.3](#33-shaders)）；Content 目录 / 资产名与反射名里的拼写错误已修正（`cnt-1` 的拼写部分与 `src-8`），旧名都留了 CoreRedirects。**2026-10-24** 做完了阶段 1：描述文件三项（`plug-1..3`）与 `src-7`。其余条目未动。
 
 ## 一、现状盘点
 
@@ -130,7 +130,7 @@ L0  基础             18 文件  ≈4.5k 行  CSHelper（ComputeShaderGenerateH
 | `src-4` | P2 | `PCGEditorProcess`（Editor 模块）里有可放置类：`ACSLandscape`、`ACSLandscapeRiver`、`ACSLandscapeRoad`、`ACSLandscapeEditLayerBase`、`URoadMeshComponent` | 打包后这些类不存在，引用它们的关卡会丢 actor；纯编辑器工具则无所谓 |
 | `src-5` | P2 | `ComputeShaderGenerator` 的 `Public/`、`Private/` 平铺 | 186 个文件按名字前缀找，域边界只存在于人脑里 |
 | `src-6` | P2 | 测试与基准约 2.99 万行编进运行时模块 | `WITH_DEV_AUTOMATION_TESTS` 在 Development 游戏构建里同样为 1 |
-| `src-7` | P2 | 三个 Build.cs 各抄一份 `PCGPLUGINS_DEBUG` 块 | `ComputeShaderGenerator` 已用 `PublicDefinitions` 导出给下游，另两份多余（清理记录 `pcgep-15`） |
+| `src-7` | P2 | ✅ 2026-10-24 已修。三个 Build.cs 各抄一份 `PCGPLUGINS_DEBUG` 块 | `ComputeShaderGenerator` 已用 `PublicDefinitions` 导出给下游，另两份多余（清理记录 `pcgep-15`） |
 | `src-8` | P1 | ✅ 2026-10-23 已修。反射名拼写错误：`ACSSHallowWaterSource`、`ReusltMesh`、`ShallowWaterSolverSoucePoint`、`DivdeCount`、`InConectivityClassifiy`、`RandomRoation`（三处）、`GetAllInstancesTransfrom`、`ResamppleByCount/ByLength` | 改名后旧名全在 `DefaultPCGPlugins.ini` 留了重定向；`ReusltMesh` 改成 `ResultMeshComponent` 而不是 `ResultMesh`，因为 `BP_CSSW_Capture` 有同名蓝图函数。`Meshs` 复数写法（`CaptureMeshsInBox` 等约 7 个反射名）未改 |
 | `shd-1` | P2 | 部分完成（2026-10-23，见 [3.3](#33-shaders)）。着色器平铺、新老命名混用，`General.usf` 实为 include 文件 | 改路径要同步 175 + 40 处字符串，错一处全局 shader 启动即 fatal |
 | `doc-1` | P1 | 计划文档散在插件根（4 份，3 份未入库）与工程根（1 份，无版本控制、不同步） | 未入库的计划随时可能丢；另一台机器看不到工程根那份 |
@@ -327,7 +327,7 @@ Scripts/
 | `plug-1` | 删掉三个 Editor 模块的 `BlacklistTargets`（Editor 类型本来就进不了非编辑器目标）；真要按配置排除就改用 `TargetConfigurationDenyList` | 编译通过（✅ 2026-10-24） |
 | `plug-2` | `.uplugin` 的 `Plugins` 加 `{ "Name": "ProxyLODPlugin", "Enabled": true, "TargetAllowList": ["Editor"] }` | 日志 `Mounting Engine plugin ProxyLODPlugin` 仍在（✅ 2026-10-24） |
 | `plug-3` | 删 `ShaderArchive` 字段，同步删 README 里对应的那句说明 | 冷启动全局 shader 正常（✅ 2026-10-24：冷启动跑 `RunTests PCGPlugins` 244 / 240，失败与错误行都与 10-23 相同） |
-| `src-7` | `GeometryScriptExtraEditor`、`PCGEditorProcess` 的 `PCGPLUGINS_DEBUG` 块删掉，只留 `ComputeShaderGenerator` 那份 | 编译通过；`PCGPLUGINS_DEBUG=0` 环境变量仍能关掉 |
+| `src-7` | `GeometryScriptExtraEditor`、`PCGEditorProcess` 的 `PCGPLUGINS_DEBUG` 块删掉，只留 `ComputeShaderGenerator` 那份 | 编译通过；`PCGPLUGINS_DEBUG=0` 环境变量仍能关掉（✅ 2026-10-24：两个模块生成的定义头内容不变、宏改从 `ComputeShaderGenerator` 继承；UBT `-Mode=JsonExport` 在设了 `PCGPLUGINS_DEBUG=0` 时导出值变 0） |
 | — | 保留 `Landmass` 依赖；旧清理记录 `critic-3` 已标为不成立 | — |
 
 ### 阶段 2：文档与 DCC 文件归位（不碰代码逻辑）
