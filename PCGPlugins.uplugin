@@ -19,8 +19,7 @@
     {
       "Name": "GeometryScriptExtraEditor",
       "Type": "Editor",
-      "LoadingPhase": "Default",
-      "BlacklistTargets": ["Shipping"]
+      "LoadingPhase": "Default"
     },
     {
       "Name": "ComputeShaderGenerator",
@@ -32,18 +31,15 @@
       "Name": "PCGEditorProcess",
       "Type": "Editor",
       "LoadingPhase": "PostConfigInit",
-      "PlatformAllowList": ["Win64"],
-      "BlacklistTargets": ["Shipping"]
+      "PlatformAllowList": ["Win64"]
     },
     {
       "Name": "EditorShortcuts",
       "Type": "Editor",
       "LoadingPhase": "Default",
-      "PlatformAllowList": ["Win64"],
-      "BlacklistTargets": ["Shipping"]
+      "PlatformAllowList": ["Win64"]
     }
   ],
-  "ShaderArchive": "PCGPlugins",
   "Plugins": [
     {
       "Name": "GeometryProcessing",
@@ -67,6 +63,13 @@
     {
       "Name": "Landmass",
       "Enabled": true
+    },
+    {
+      "Name": "ProxyLODPlugin",
+      "Enabled": true,
+      "TargetAllowList": [
+        "Editor"
+      ]
     }
   ]
 }

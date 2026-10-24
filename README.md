@@ -37,7 +37,7 @@ GPU procedural content generation (PCG) tools for Unreal Engine 5.7: procedural 
 
 > 仓库名为 `GPU-PCG`，UE 插件名仍为 `PCGPlugins`。下载 ZIP 时，也请将解压后的插件目录命名为 `PCGPlugins`。
 
-> Shader 源码位于 [`Shaders/Private`](Shaders/Private)，由 `ComputeShaderGenerator` 启动时经 `AddShaderSourceDirectoryMapping` 映射为 `/Plugin/PCGPlugins/Shaders/Private`；全局 shader 要在引擎编译 shader 之前注册，这也是该模块用 `PostConfigInit` 加载的原因。`.uplugin` 里的 `ShaderArchive` 字段 5.7.4 引擎源码并不读取，不起注册作用。
+> Shader 源码位于 [`Shaders/Private`](Shaders/Private)，由 `ComputeShaderGenerator` 启动时经 `AddShaderSourceDirectoryMapping` 映射为 `/Plugin/PCGPlugins/Shaders/Private`；全局 shader 要在引擎编译 shader 之前注册，这也是该模块用 `PostConfigInit` 加载的原因。
 
 ---
 
@@ -47,8 +47,8 @@ GPU procedural content generation (PCG) tools for Unreal Engine 5.7: procedural 
 |------|------|
 | 引擎 | **Unreal Engine 5.7，源码编译版**（`Need ue5.7 build from source`） |
 | 平台 | **Win64**（`ComputeShaderGenerator` / `PCGEditorProcess` / `EditorShortcuts` 仅在 Win64 加载） |
-| 依赖引擎插件 | GeometryProcessing、GeometryScripting、ModelingToolsEditorMode、EditorScriptingUtilities、Landmass（`.uplugin` 已声明） |
-| 引擎插件模块 | `ProxyLODMeshReduction`：`GeometryScriptExtraEditor` 直接链接，用于 VDB 转网格与体素 CSG。它属于引擎的 `ProxyLODPlugin`，该插件默认不启用，`.uplugin` 也没有声明这条依赖 |
+| 依赖引擎插件 | GeometryProcessing、GeometryScripting、ModelingToolsEditorMode、EditorScriptingUtilities、Landmass、ProxyLODPlugin（`.uplugin` 已声明） |
+| 引擎插件模块 | `ProxyLODMeshReduction`：`GeometryScriptExtraEditor` 直接链接，用于 VDB 转网格与体素 CSG。它属于引擎的 `ProxyLODPlugin`，该插件引擎默认不启用，由 `.uplugin` 显式启用（只对 Editor 目标） |
 | 第三方库 | OpenVDB、IntelTBB、Blosc、zlib（引擎 ThirdParty）；UVAtlas、DirectXMesh（`ProxyLODPlugin` 自带，插件代码不直接调用）；DX12 / `D3D12RHI`（Win64，显存预算查 DXGI 实时预算）。均随引擎提供，无需额外安装 |
 
 之所以需要**源码编译的引擎**：多个模块直接链接引擎渲染层（`Renderer`/`RenderCore`/`RHI`）与 OpenVDB 等 ThirdParty，并使用自定义全局 Shader，Launcher 版引擎无法编译。
@@ -613,5 +613,5 @@ PCGPlugins/
 
 ## 备注
 
-- 本插件面向**编辑器 / 开发**用途。三个 Editor 模块靠 `"Type": "Editor"` 挡在非编辑器目标之外；`.uplugin` 里它们的 `"BlacklistTargets": ["Shipping"]` 其实不起作用——该字段是 `TargetDenyList` 的弃用别名，只接受目标类型（Game / Editor / Client / Server / Program），按构建配置排除要用 `TargetConfigurationDenyList`。
+- 本插件面向**编辑器 / 开发**用途。三个 Editor 模块靠 `"Type": "Editor"` 挡在非编辑器目标之外，不需要额外的排除列表。以后若要按构建配置排除某个模块，用 `TargetConfigurationDenyList`；`TargetDenyList`（旧名 `BlacklistTargets`）只接受目标类型（Game / Editor / Client / Server / Program），写 `Shipping` 不起作用。
 - `Config/DefaultPCGPlugins.ini` 中的 CoreRedirects 兼容了历史命名（`TAToolsPlugin` → `PCGPlugins`、`GeometryScriptExtra` → `GeometryScriptExtraEditor`、`CSEditorProcess` → `PCGEditorProcess`、`CSLandscapeTempLayer` → `CSLandscape` 等），以及 2026-08-31 `AVineContainer` 从 `GeometryScriptExtraEditor` 迁到 `ComputeShaderGenerator` 后的类 / 结构 / 属性 / 函数重定向，从旧版本工程迁移的资产可自动重指向。其中 `GenerateVineAction` 那条函数重定向的目标已随函数删除（入口现为 `GenerateVineGPU()`）。

@@ -16,10 +16,10 @@
 
 - **核心问题是 `ComputeShaderGenerator` 一个模块装了全部运行时代码**：229 个文件、约 11.5 万行，占插件 C++ 的 88%，`Public/` 88 个头、`Private/` 98 个文件全部平铺。按 include 关系它已经自然分成 5 层，只有 **7 处反向依赖（12 条 include、6 个文件）**。先切断这 7 处，再按层分子文件夹；**暂不拆模块**。
 - **仓库安全排在整理前面**：`PCGPlugins` 是坚果云同步根，`.git` 一起在两台机器间同步；最后一次提交是 2026-09-30，之后积累了 373 条未提交变更。任何搬家式整理都要先收口在途改动，并约定只在一台机器上执行。
-- **`.uplugin` 有 3 处无效或缺失的声明**：`BlacklistTargets: ["Shipping"]` 不起作用、`ShaderArchive` 引擎不读、实际依赖的 `ProxyLODPlugin` 没声明。都是零代码改动，适合第一批做。另：`Landmass` 依赖**不能删**——`Content/Landscape/` 下 6 个资产在用（旧清理记录 `critic-3` 的「零引用」结论只查了源码）。
+- **`.uplugin` 有 3 处无效或缺失的声明**（✅ 2026-10-24 已修）：`BlacklistTargets: ["Shipping"]` 不起作用、`ShaderArchive` 引擎不读、实际依赖的 `ProxyLODPlugin` 没声明。都是零代码改动，适合第一批做。另：`Landmass` 依赖**不能删**——`Content/Landscape/` 下 6 个资产在用（旧清理记录 `critic-3` 的「零引用」结论只查了源码）。
 - **Game target 目前链接不过**（静态核对，未实际编译）：`ACSGroundActor` 的地被 / 灌木段整段在 `WITH_EDITOR` 里，却被非编辑器代码调用。要不要支持打包是[待决问题](#七待决问题)，它决定运行时 / 编辑器边界整改的优先级。
 - **文档、脚本、DCC 源文件散落**：插件根有 4 份计划 md（3 份未入库）和 3 个 `.hip`；`Docs/` 里混着 `.cpp`、PLY 生成表、`.obj` / `.bgeo.sc`；`Scripts/` 根目录平铺 124 个文件，且脚本之间按同级路径互相加载，搬家前要先解决加载方式。
-- **2026-10-23 已执行**：在途改动分文档 / 代码两次提交（`repo-1`）；着色器按功能合并了两组并删掉一个死文件（`shd-1` 的一部分，见 [3.3](#33-shaders)）；Content 目录 / 资产名与反射名里的拼写错误已修正（`cnt-1` 的拼写部分与 `src-8`），旧名都留了 CoreRedirects。其余条目未动。
+- **2026-10-23 已执行**：在途改动分文档 / 代码两次提交（`repo-1`）；着色器按功能合并了两组并删掉一个死文件（`shd-1` 的一部分，见 [3.3](#33-shaders)）；Content 目录 / 资产名与反射名里的拼写错误已修正（`cnt-1` 的拼写部分与 `src-8`），旧名都留了 CoreRedirects。**2026-10-24** 做了阶段 1 的描述文件三项（`plug-1..3`）。其余条目未动。
 
 ## 一、现状盘点
 
@@ -121,9 +121,9 @@ L0  基础             18 文件  ≈4.5k 行  CSHelper（ComputeShaderGenerateH
 | --- | --- | --- | --- |
 | `repo-1` | P0 | ✅ 2026-10-23 已提交。373 条未提交变更横跨 Docs / Source / Content / Scripts / Shaders | 搬家会与在途改动缠在一起，git 改名追踪和同步盘都会出乱子 |
 | `repo-2` | P0 | `.git` 在两台机器间被同步盘同步 | 另一台机器的 worktree 登记出现在本机仓库；并发 git 写操作有拆出冲突副本的风险 |
-| `plug-1` | P1 | 三个 Editor 模块写了 `"BlacklistTargets": ["Shipping"]` | 它是 `TargetDenyList` 的弃用别名，只认 Game / Editor 等目标类型（`ModuleDescriptor.cpp`），`Shipping` 匹配不到任何东西 |
-| `plug-2` | P1 | `GeometryScriptExtraEditor` 链接 `ProxyLODMeshReduction`，`.uplugin` 没声明 `ProxyLODPlugin` | 现在能用只因为 `MeshModelingToolset` 恰好把它带了起来 |
-| `plug-3` | P1 | `.uplugin` 的 `ShaderArchive` 字段 | 5.7.4 引擎不读（README 已注明），留着误导 |
+| `plug-1` | P1 | ✅ 2026-10-24 已修。三个 Editor 模块写了 `"BlacklistTargets": ["Shipping"]` | 它是 `TargetDenyList` 的弃用别名，只认 Game / Editor 等目标类型（`ModuleDescriptor.cpp`），`Shipping` 匹配不到任何东西 |
+| `plug-2` | P1 | ✅ 2026-10-24 已修。`GeometryScriptExtraEditor` 链接 `ProxyLODMeshReduction`，`.uplugin` 没声明 `ProxyLODPlugin` | 修之前能用，只因为 `ModelingToolsEditorMode` / `GeometryScripting` 依赖的 `MeshModelingToolset` 恰好把它带了起来 |
+| `plug-3` | P1 | ✅ 2026-10-24 已修。`.uplugin` 的 `ShaderArchive` 字段 | 5.7.4 的描述文件解析（`Runtime/Projects` 与 UBT）都不读这个键，留着误导 |
 | `src-1` | P1 | 7 处反向依赖，见 [1.4](#14-computeshadergenerator-的实际分层) | 不先切断，分文件夹只是换个地方平铺，拆模块更无从谈起 |
 | `src-2` | P1 | 重名头：`PCGPluginDebug.h` 在 `Public/`、`Private/` 各一份且逐字相同；`Private/GeometryAsync.h` 与 `GeometryScriptExtraEditor/Public/GeometryAsync.h` 只差一行注释，前者无人 include | 同名头让「用的是哪份」取决于搜索顺序；分文件夹后更难发现（对应清理记录 `xmodule-1`、`xmodule-2`） |
 | `src-3` | P1 / P2 | Game target 链接不过 | `CSGroundActor.h` 无条件声明 `RebuildGroundCover`、`SetBuildingFootprint`、`RemoveBuildingFootprint`，定义却在 `CSGroundActor.cpp` 的 `#if WITH_EDITOR` 大段里，`CSGroundActor.cpp` 与 `CSHouseActor.cpp` 又在守卫外调用它们（静态核对）。工程 `Binaries/Win64/UETest574_2.exe` 停在 2026-04-29，此后没有成功的游戏构建。是否 P1 取决于[待决问题 1](#七待决问题) |
@@ -324,9 +324,9 @@ Scripts/
 
 | 步骤 | 改动 | 验证 |
 | --- | --- | --- |
-| `plug-1` | 删掉三个 Editor 模块的 `BlacklistTargets`（Editor 类型本来就进不了非编辑器目标）；真要按配置排除就改用 `TargetConfigurationDenyList` | 编译通过 |
-| `plug-2` | `.uplugin` 的 `Plugins` 加 `{ "Name": "ProxyLODPlugin", "Enabled": true, "TargetAllowList": ["Editor"] }` | 日志 `Mounting Engine plugin ProxyLODPlugin` 仍在 |
-| `plug-3` | 删 `ShaderArchive` 字段，同步删 README 里对应的那句说明 | 冷启动全局 shader 正常 |
+| `plug-1` | 删掉三个 Editor 模块的 `BlacklistTargets`（Editor 类型本来就进不了非编辑器目标）；真要按配置排除就改用 `TargetConfigurationDenyList` | 编译通过（✅ 2026-10-24） |
+| `plug-2` | `.uplugin` 的 `Plugins` 加 `{ "Name": "ProxyLODPlugin", "Enabled": true, "TargetAllowList": ["Editor"] }` | 日志 `Mounting Engine plugin ProxyLODPlugin` 仍在（✅ 2026-10-24） |
+| `plug-3` | 删 `ShaderArchive` 字段，同步删 README 里对应的那句说明 | 冷启动全局 shader 正常（✅ 2026-10-24：冷启动跑 `RunTests PCGPlugins` 244 / 240，失败与错误行都与 10-23 相同） |
 | `src-7` | `GeometryScriptExtraEditor`、`PCGEditorProcess` 的 `PCGPLUGINS_DEBUG` 块删掉，只留 `ComputeShaderGenerator` 那份 | 编译通过；`PCGPLUGINS_DEBUG=0` 环境变量仍能关掉 |
 | — | 保留 `Landmass` 依赖；旧清理记录 `critic-3` 已标为不成立 | — |
 
