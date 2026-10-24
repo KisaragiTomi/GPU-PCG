@@ -6,6 +6,7 @@
 
 - [项目清理审计记录](project-cleanup-plan.md)（历史候选项；执行前需按当前代码重新核实）
 - [PCGPlugins 结构优化方案](Plan_PluginStructure.md)（2026-10-23 盘点：模块分层与反向依赖、目录 / 文档 / 脚本归位、分阶段步骤）
+- [代码冗余与空指针检查审查](Review_CodeRedundancy.md)（2026-10-24：338 条，其中约 25 处真实缺陷要先修；多余判空 98 条）
 - [GPU 三角形 Buffer 统一现状](gpu-triangle-buffer-unification.md)
 - [GPU 三角形统一设计沿革](GpuTriangleUnified_Plan.md)（已被 CSMesh 对象层取代的方案）
 - [GPU 网格光追与 Lumen surface cache](GpuMeshRayTracing.md)
