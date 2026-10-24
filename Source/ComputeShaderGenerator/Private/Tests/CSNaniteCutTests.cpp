@@ -218,7 +218,9 @@ bool FCSNaniteCutExtractAutomationTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("CutError 递增时三角数单调不增"), NonMonotonic, 0);
 
 	// ④ 确定性
-	UCSNaniteCutOps::AppendNaniteCut(Target, Grid, Transform, 0.0f, Replace, Fine);
+	// 结果另开变量：FineSource 引用着 Fine.Sources，复用 Fine 会释放那块数组、让引用悬空。
+	FCSNaniteCutResult FineAgain;
+	UCSNaniteCutOps::AppendNaniteCut(Target, Grid, Transform, 0.0f, Replace, FineAgain);
 	FCSGpuMeshCPUData Again;
 	if (TestTrue(TEXT("再回读一次"), Target->ReadbackMeshSync(Again)))
 	{
