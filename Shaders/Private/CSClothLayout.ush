@@ -1,0 +1,38 @@
+// GPU 布料的 C++ 与 .usf 共用布局常量（CSClothSim.usf ↔ CSClothSim*.cpp，计划见 Docs/GpuClothSim_Plan.md）。
+//
+// 规矩同 CSGpuSharedLayout.ush：只许有 #define 与注释，字面量不带类型后缀；着色器按
+// "/Plugin/PCGPlugins/Shaders/Private/CSClothLayout.ush" include，C++ 按 "CSClothLayout.ush"（Build.cs 把本目录加进了 include 路径）。
+//
+// ⚠️ 为什么不并进 CSGpuSharedLayout.ush：那一份被 GPU 实例化的顶点工厂（CSGpuInstancedIndexedVertexFactory.ush）
+// include，顶点工厂的源码哈希是**每一张材质 shader map** 的键的一部分 —— 往里加一行，全工程的材质 shader 全部重编
+// （2026-10-26 实测：改完首次启动，引擎自带的 WorldGridMaterial 都报 "Missing cached shadermap ... compiling"）。
+// 布料只被自己的 compute shader 用，放在这里改它只重编这几条 kernel。
+
+#pragma once
+
+// 法线定点累加器的比例：单位长度 = CS_CLOTH_FIXED_SCALE 个计数（float 原子加平台性不一，所以用 int 累加）。
+// 每个角贡献「单位面法线 × 内角」，分量 ≤ π；int32 的上限 2^31 / 2^14 = 131072，所以一个粒子挂上万个三角也不溢出。
+// 约束本身不走累加器：上过色的 Gauss-Seidel 直接改写位置（见 CSClothSim.usf 的 SolveColorCS）。
+#define CS_CLOTH_FIXED_SCALE 16384
+
+// 粒子钉组号的"自由"值。钉住的粒子 InvMass = 0，按所在钉组的变换做运动学跟随。
+#define CS_CLOTH_FREE_PARTICLE 0xFFFFFFFF
+
+// 约束记录 uint4 (A, B, asuint(RestLength), Type) 的 Type。tether 是单边约束：只在拉长时起作用。
+#define CS_CLOTH_CONSTRAINT_STRETCH 0
+#define CS_CLOTH_CONSTRAINT_BEND    1
+#define CS_CLOTH_CONSTRAINT_TETHER  2
+
+// 每个碰撞体 4 个 float4：[0..1] 上一帧的形状、[2..3] 本帧的形状，substep 之间线性插值。
+// 一个形状两个 float4：球 = (球心, 半径)(_, _, _, 类型)；胶囊 = (端点 A, 半径)(端点 B, 类型)；
+// 平面 = (朝外法线, 平面偏移 d：n·x = d)(_, _, _, 类型)。全部在 sim 空间（相对 SimOrigin）。
+#define CS_CLOTH_COLLIDER_FLOAT4S 4
+#define CS_CLOTH_COLLIDER_SPHERE  0
+#define CS_CLOTH_COLLIDER_CAPSULE 1
+#define CS_CLOTH_COLLIDER_PLANE   2
+
+// 每个钉组 6 个 float4：上一帧 3x4 仿射的三行 + 本帧三行（sim 空间 → sim 空间，作用在粒子的 rest 位置上）。
+#define CS_CLOTH_PIN_GROUP_FLOAT4S 6
+
+// 状态 buffer 的 uint 数：[0] = 本帧写回时遇到的非有限粒子数（这些角点不写回，保留上一帧的值），其余保留。
+#define CS_CLOTH_STATUS_UINTS 4

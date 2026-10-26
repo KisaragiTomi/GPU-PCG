@@ -1,0 +1,415 @@
+// GPU 布料：XPBD 常驻算子逐帧驱动 UCSMesh 形变（Docs/GpuClothSim_Plan.md，D3 的 pass 序）。
+//
+//   for s in Substeps:                     small-steps XPBD：substep 数替代迭代数
+//     PredictCS             1 线程/粒子    Verlet 式预测；钉住粒子按钉组变换做运动学跟随
+//     for i in Iterations:
+//       for c in Colors:
+//         SolveColorCS      1 线程/约束    一种颜色的 XPBD 距离约束（拉伸 / 弯曲 / tether），直接改写两端位置
+//     CollideCS             1 线程/粒子    解析碰撞（有碰撞体时）
+//   AccumulateNormalsCS     1 线程/三角    角度加权的单位面法线 → NormalAccum（定点原子累加）
+//   FinalizeNormalsCS       1 线程/粒子    归一化 → ParticleNormals，清零 NormalAccum
+//   SkinBackCS              1 线程/渲染顶点 位置 + 旋转后的切线基写回 UCSMesh 的常驻流
+//
+// 约束是上过色的 Gauss-Seidel（同色约束两两不共享可动粒子，见 FCSClothSetupData::ColorRanges），不是计划原先的
+// Jacobi + 原子累加：后者每个粒子的修正要除以挂在它身上的约束数，拉伸收敛太慢，过不了边长误差 < 5% 的验收。
+//
+// 粒子位置一律在 sim 空间（相对 SimOrigin，见 FCSClothSetupOptions::SimOrigin），只有 SkinBack 加回原点。
+// 共用常量（定点比例、约束类型、碰撞体 / 钉组布局）在 CSClothLayout.ush，与 C++ 同一份。
+
+#include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/ComputeShaderUtils.ush"   // GetUnWrappedDispatchThreadId：>65535 组时折成 2D
+#include "/Plugin/PCGPlugins/Shaders/Private/CSClothLayout.ush"
+#include "/Plugin/PCGPlugins/Shaders/Private/CSPackedVertex.ush"
+#include "/Plugin/PCGPlugins/Shaders/Private/VinePerlinNoise.ush"
+
+#ifndef THREADGROUPSIZE_X
+#define THREADGROUPSIZE_X 64
+#endif
+
+// --- 粒子域（sim 空间）--------------------------------------------------------
+RWStructuredBuffer<float4> RW_Positions;       // xyz 位置，w = InvMass（0 = 钉住）
+RWStructuredBuffer<float4> RW_PrevPositions;   // xyz 上一 substep 末的位置
+StructuredBuffer<float4>   Positions;
+StructuredBuffer<float4>   PrevPositions;
+StructuredBuffer<float4>   RestPositions;      // xyz rest，w = InvMass
+StructuredBuffer<uint>     PinGroups;          // 钉组号；CS_CLOTH_FREE_PARTICLE = 自由
+RWStructuredBuffer<int>    RW_NormalAccum;     // 3 int / 粒子：定点法线和
+RWStructuredBuffer<float4> RW_ParticleNormals;
+StructuredBuffer<float4>   ParticleNormals;    // 上一帧末的粒子法线（风的受力面朝向）
+StructuredBuffer<float4>   RestNormals;        // setup 时同一套 pass 算出的 rest 粒子法线
+
+// --- 约束域 --------------------------------------------------------------------
+StructuredBuffer<uint4>    Constraints;        // (A, B, asuint(RestLength), Type)，按颜色连续存放
+RWStructuredBuffer<float>  RW_Lambdas;         // XPBD 的 λ，每 substep 第一次迭代视为 0
+StructuredBuffer<uint>     TriangleParticles;  // 3 粒子号 / 三角
+
+// --- 映射域与网格常驻流 ----------------------------------------------------------
+StructuredBuffer<uint>     CornerToParticle;   // 渲染顶点 → 粒子
+StructuredBuffer<uint>     RestTangents;       // 2 uint / 渲染顶点：setup 时网格切线流的原样拷贝（含副切线符号）
+RWBuffer<float>            RW_MeshPositions;   // UCSMesh Position 流：3 float / 顶点，世界空间
+RWBuffer<uint>             RW_MeshTangents;    // UCSMesh TangentBasis 流：2 packed 8888 / 顶点
+RWStructuredBuffer<uint>   RW_Status;          // CS_CLOTH_STATUS_UINTS
+
+// --- 每帧小数组 ----------------------------------------------------------------
+StructuredBuffer<float4>   PinTransforms;      // CS_CLOTH_PIN_GROUP_FLOAT4S / 钉组
+StructuredBuffer<float4>   Colliders;          // CS_CLOTH_COLLIDER_FLOAT4S / 碰撞体
+
+uint NumParticles;
+uint NumTriangles;
+uint NumRenderVertices;
+uint NumColliders;
+uint ColorOffset;          // 本次派发的颜色在 Constraints 里的起点
+uint ColorCount;
+
+float SubstepDt;
+float InvPrevSubstepDt;    // 上一个 substep 的 1/dt：帧长变化时速度 = 位移 / 上一步的步长
+float InvSubstepDtSq;
+float SubstepAlpha;        // 本 substep 末在 [上一帧, 本帧] 之间的位置：(s+1)/S，钉组与碰撞体按它插值
+float DampingFactor;       // exp(-LinearDamping · dt)
+float MaxSpeed;
+float3 Gravity;
+uint bWind;
+float3 WindVelocity;
+float WindTurbulence;      // cm/s
+float3 WindNoiseOffset;    // 随时间平移的噪声相位
+float WindNoiseFrequency;  // 1/cm
+float WindNormalDrag;      // 1/s：相对风速沿法线的分量往风速收敛的速率
+float WindTangentialDrag;  // 1/s：切向分量（布面"擦着风"的那部分，远小于法向）
+uint bTeleport;
+float4 TeleportRow0;
+float4 TeleportRow1;
+float4 TeleportRow2;
+
+float StretchCompliance;
+float CompressionCompliance;
+float BendCompliance;
+float TetherCompliance;
+float MaxCorrection;       // 单条约束单次修正、每个端点的位移上限（cm）：炸开时的保险丝
+uint bFirstIteration;
+
+float CollisionThickness;
+float Friction;
+
+float3 SimOrigin;
+
+// ---------------------------------------------------------------- helpers
+
+// 定点编码（法线累加用）。clamp 只是兜底：每角的贡献 ≤ π。
+int CSCloth_Encode(float Value)
+{
+	return int(round(clamp(Value, -2048.0f, 2048.0f) * float(CS_CLOTH_FIXED_SCALE)));
+}
+
+float CSCloth_Decode(int Value)
+{
+	return float(Value) * (1.0f / float(CS_CLOTH_FIXED_SCALE));
+}
+
+float3 CSCloth_TransformPoint(float4 Row0, float4 Row1, float4 Row2, float3 P)
+{
+	return float3(dot(Row0.xyz, P) + Row0.w, dot(Row1.xyz, P) + Row1.w, dot(Row2.xyz, P) + Row2.w);
+}
+
+bool CSCloth_IsFinite(float3 V)
+{
+	return all(isfinite(V));
+}
+
+float3 CSCloth_SafeNormalize(float3 V, float3 Fallback)
+{
+	const float LenSq = dot(V, V);
+	return (LenSq > 1e-12f && CSCloth_IsFinite(V)) ? V * rsqrt(LenSq) : Fallback;
+}
+
+float3 CSCloth_ClampLength(float3 V, float MaxLength)
+{
+	const float Len = length(V);
+	return Len > MaxLength ? V * (MaxLength / Len) : V;
+}
+
+// 相对风速分解到粒子法线上：法向分量往风速收敛得快（布面兜风），切向分量慢（擦着风）。
+// 法线正负号无所谓 —— (v·n)n 对 n 取反不变。
+float3 CSCloth_WindAcceleration(float3 X, float3 V, float3 N)
+{
+	float3 Wind = WindVelocity;
+	if (WindTurbulence > 0.0f)
+	{
+		const float3 Q = X * WindNoiseFrequency + WindNoiseOffset;
+		Wind += WindTurbulence * float3(
+			VinePerlinNoise3D(Q),
+			VinePerlinNoise3D(Q + float3(31.7f, 47.3f, 13.1f)),
+			VinePerlinNoise3D(Q + float3(71.9f, 5.3f, 89.2f)));
+	}
+	const float3 Relative = Wind - V;
+	const float NormalLenSq = dot(N, N);
+	if (!(NormalLenSq > 1e-8f)) return Relative * WindTangentialDrag;
+	N *= rsqrt(NormalLenSq);
+	const float RelativeN = dot(Relative, N);
+	return N * (RelativeN * WindNormalDrag) + (Relative - N * RelativeN) * WindTangentialDrag;
+}
+
+// 解析碰撞：投影出形状 + 厚度，再按 Friction 抵消本 substep 位移的切向部分（位置级摩擦）。
+float3 CSCloth_Collide(float3 X, float3 Prev)
+{
+	for (uint Collider = 0; Collider < NumColliders; ++Collider)
+	{
+		const uint Base = Collider * CS_CLOTH_COLLIDER_FLOAT4S;
+		const float4 S0 = lerp(Colliders[Base + 0], Colliders[Base + 2], SubstepAlpha);
+		const float4 S1 = lerp(Colliders[Base + 1], Colliders[Base + 3], SubstepAlpha);
+		const uint Type = uint(Colliders[Base + 3].w + 0.5f);
+
+		float3 Normal = float3(0.0f, 0.0f, 1.0f);
+		float Penetration = 0.0f;
+		if (Type == CS_CLOTH_COLLIDER_PLANE)
+		{
+			Normal = CSCloth_SafeNormalize(S0.xyz, float3(0.0f, 0.0f, 1.0f));
+			Penetration = S0.w + CollisionThickness - dot(X, Normal);
+		}
+		else
+		{
+			float3 Center = S0.xyz;
+			if (Type == CS_CLOTH_COLLIDER_CAPSULE)
+			{
+				const float3 AB = S1.xyz - S0.xyz;
+				const float T = saturate(dot(X - S0.xyz, AB) / max(dot(AB, AB), 1e-8f));
+				Center = S0.xyz + AB * T;
+			}
+			const float3 Offset = X - Center;
+			const float Dist = length(Offset);
+			Penetration = S0.w + CollisionThickness - Dist;
+			Normal = Dist > 1e-6f ? Offset / Dist : float3(0.0f, 0.0f, 1.0f);
+		}
+		if (!(Penetration > 0.0f)) continue;
+
+		X += Normal * Penetration;
+		if (Friction > 0.0f)
+		{
+			const float3 Move = X - Prev;
+			X -= (Move - Normal * dot(Move, Normal)) * Friction;
+		}
+	}
+	return X;
+}
+
+// v 绕 U = From×To 转过 From→To 的最小旋转：R v = c·v + U×v + U(U·v)/(1+c)，c = From·To。
+float3 CSCloth_Rotate(float3 V, float3 U, float C)
+{
+	return C * V + cross(U, V) + U * (dot(U, V) / (1.0f + C));
+}
+
+float CSCloth_CornerAngle(float3 P, float3 Q, float3 R)
+{
+	const float3 U = CSCloth_SafeNormalize(Q - P, float3(1.0f, 0.0f, 0.0f));
+	const float3 V = CSCloth_SafeNormalize(R - P, float3(0.0f, 1.0f, 0.0f));
+	return acos(clamp(dot(U, V), -1.0f, 1.0f));
+}
+
+void CSCloth_AddNormal(uint Particle, float3 N)
+{
+	InterlockedAdd(RW_NormalAccum[Particle * 3 + 0], CSCloth_Encode(N.x));
+	InterlockedAdd(RW_NormalAccum[Particle * 3 + 1], CSCloth_Encode(N.y));
+	InterlockedAdd(RW_NormalAccum[Particle * 3 + 2], CSCloth_Encode(N.z));
+}
+
+// ---------------------------------------------------------------- kernels
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void PredictCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint P = GetUnWrappedDispatchThreadId(GroupId, GroupIndex, THREADGROUPSIZE_X);
+	if (P >= NumParticles) return;
+
+	float4 X = RW_Positions[P];
+	float3 Prev = RW_PrevPositions[P].xyz;
+
+	const uint Group = PinGroups[P];
+	if (Group != uint(CS_CLOTH_FREE_PARTICLE))
+	{
+		// 运动学：rest 位置乘上一帧 / 本帧的钉组变换，按 substep 插值。Prev 记下当前位置，
+		// 以后若被解钉，速度从这里接着算，不会凭空多出一跳。
+		const float3 Rest = RestPositions[P].xyz;
+		const uint Base = Group * CS_CLOTH_PIN_GROUP_FLOAT4S;
+		const float3 From = CSCloth_TransformPoint(PinTransforms[Base + 0], PinTransforms[Base + 1], PinTransforms[Base + 2], Rest);
+		const float3 To = CSCloth_TransformPoint(PinTransforms[Base + 3], PinTransforms[Base + 4], PinTransforms[Base + 5], Rest);
+		RW_PrevPositions[P] = float4(X.xyz, 0.0f);
+		RW_Positions[P] = float4(lerp(From, To, SubstepAlpha), 0.0f);
+		return;
+	}
+
+	if (bTeleport != 0u)
+	{
+		// 瞬移：整块布连同速度刚体搬过去（位置与上一步位置同乘一个变换，差值随之旋转）。
+		X.xyz = CSCloth_TransformPoint(TeleportRow0, TeleportRow1, TeleportRow2, X.xyz);
+		Prev = CSCloth_TransformPoint(TeleportRow0, TeleportRow1, TeleportRow2, Prev);
+	}
+
+	float3 V = (X.xyz - Prev) * InvPrevSubstepDt * DampingFactor;
+	float3 Accel = Gravity;
+	if (bWind != 0u) Accel += CSCloth_WindAcceleration(X.xyz, V, ParticleNormals[P].xyz);
+	V += Accel * SubstepDt;
+
+	const float Speed = length(V);
+	if (Speed > MaxSpeed) V *= MaxSpeed / Speed;
+
+	RW_PrevPositions[P] = float4(X.xyz, 0.0f);
+	RW_Positions[P] = float4(X.xyz + V * SubstepDt, X.w);
+}
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void SolveColorCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint Local = GetUnWrappedDispatchThreadId(GroupId, GroupIndex, THREADGROUPSIZE_X);
+	if (Local >= ColorCount) return;
+	const uint C = ColorOffset + Local;
+
+	// 同色约束不共享可动粒子：两端由本线程独占读改写。钉住的端点可能被多条同色约束读，但没人写它。
+	const uint4 Record = Constraints[C];
+	const float4 XA = RW_Positions[Record.x];
+	const float4 XB = RW_Positions[Record.y];
+	const float WSum = XA.w + XB.w;
+	if (!(WSum > 0.0f)) return;
+
+	const float3 D = XA.xyz - XB.xyz;
+	const float Len = length(D);
+	if (!(Len > 1e-6f)) return;   // 两点重合时方向未定义；NaN 也在这里挡掉
+
+	const float Violation = Len - asfloat(Record.z);
+	float Lambda = (bFirstIteration != 0u) ? 0.0f : RW_Lambdas[C];
+
+	float Compliance = StretchCompliance;
+	if (Record.w == CS_CLOTH_CONSTRAINT_TETHER)
+	{
+		// 单边：没被拉过上限就什么都不做。
+		if (Violation <= 0.0f)
+		{
+			RW_Lambdas[C] = 0.0f;
+			return;
+		}
+		Compliance = TetherCompliance;
+	}
+	else if (Record.w == CS_CLOTH_CONSTRAINT_BEND)
+	{
+		Compliance = BendCompliance;
+	}
+	else if (Violation < 0.0f)
+	{
+		Compliance = CompressionCompliance;   // 布受压就起皱，不该像橡皮一样顶回去
+	}
+
+	const float AlphaTilde = Compliance * InvSubstepDtSq;
+	const float DeltaLambda = (-Violation - AlphaTilde * Lambda) / (WSum + AlphaTilde);
+	RW_Lambdas[C] = Lambda + DeltaLambda;
+
+	const float3 Dir = D / Len;
+	if (XA.w > 0.0f) RW_Positions[Record.x] = float4(XA.xyz + CSCloth_ClampLength(Dir * (XA.w * DeltaLambda), MaxCorrection), XA.w);
+	if (XB.w > 0.0f) RW_Positions[Record.y] = float4(XB.xyz - CSCloth_ClampLength(Dir * (XB.w * DeltaLambda), MaxCorrection), XB.w);
+}
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void CollideCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint P = GetUnWrappedDispatchThreadId(GroupId, GroupIndex, THREADGROUPSIZE_X);
+	if (P >= NumParticles) return;
+
+	// 放在一个 substep 的全部约束迭代之后（D3 的 Collide）：约束把布推进碰撞体里，这一步再推出来，
+	// 写回的永远是不穿插的那份。钉住的粒子不碰撞。
+	float4 X = RW_Positions[P];
+	if (!(X.w > 0.0f)) return;
+	X.xyz = CSCloth_Collide(X.xyz, PrevPositions[P].xyz);
+	RW_Positions[P] = X;
+}
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void AccumulateNormalsCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint T = GetUnWrappedDispatchThreadId(GroupId, GroupIndex, THREADGROUPSIZE_X);
+	if (T >= NumTriangles) return;
+
+	const uint I0 = TriangleParticles[T * 3 + 0];
+	const uint I1 = TriangleParticles[T * 3 + 1];
+	const uint I2 = TriangleParticles[T * 3 + 2];
+	const float3 A = Positions[I0].xyz;
+	const float3 B = Positions[I1].xyz;
+	const float3 C = Positions[I2].xyz;
+
+	// 引擎正面口径：cross(C−A, B−A) 指向正面（与 CSGroundActor 的地面网格同一约定）。
+	const float3 Face = cross(C - A, B - A);
+	const float FaceLen = length(Face);
+	if (!(FaceLen > 1e-12f)) return;
+	const float3 Unit = Face / FaceLen;
+
+	// 角度加权：每个角按自己的内角贡献，法线不随三角剖分的疏密偏。每角 ≤ π，溢出余量见 CS_CLOTH_FIXED_SCALE。
+	CSCloth_AddNormal(I0, Unit * CSCloth_CornerAngle(A, B, C));
+	CSCloth_AddNormal(I1, Unit * CSCloth_CornerAngle(B, C, A));
+	CSCloth_AddNormal(I2, Unit * CSCloth_CornerAngle(C, A, B));
+}
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void FinalizeNormalsCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint P = GetUnWrappedDispatchThreadId(GroupId, GroupIndex, THREADGROUPSIZE_X);
+	if (P >= NumParticles) return;
+
+	const float3 Sum = float3(
+		CSCloth_Decode(RW_NormalAccum[P * 3 + 0]),
+		CSCloth_Decode(RW_NormalAccum[P * 3 + 1]),
+		CSCloth_Decode(RW_NormalAccum[P * 3 + 2]));
+	RW_NormalAccum[P * 3 + 0] = 0;
+	RW_NormalAccum[P * 3 + 1] = 0;
+	RW_NormalAccum[P * 3 + 2] = 0;
+
+	// 被挤成零面积的粒子保留上一帧的法线，而不是跳成某个兜底方向。
+	const float LenSq = dot(Sum, Sum);
+	if (LenSq > 1e-12f) RW_ParticleNormals[P] = float4(Sum * rsqrt(LenSq), 0.0f);
+}
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void SkinBackCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint V = GetUnWrappedDispatchThreadId(GroupId, GroupIndex, THREADGROUPSIZE_X);
+	if (V >= NumRenderVertices) return;
+
+	const uint P = CornerToParticle[V];
+	const float3 X = Positions[P].xyz;
+	if (!CSCloth_IsFinite(X))
+	{
+		// 检测在写回之前：NaN 一旦进了常驻流，渲染、回读、落盘全带毒。这个角点留着上一帧的值，
+		// 计数交给游戏线程去停摆（UCSClothSimComponent 轮询 RW_Status[0]）。
+		InterlockedAdd(RW_Status[0], 1u);
+		return;
+	}
+
+	const float3 World = X + SimOrigin;
+	RW_MeshPositions[V * 3 + 0] = World.x;
+	RW_MeshPositions[V * 3 + 1] = World.y;
+	RW_MeshPositions[V * 3 + 2] = World.z;
+
+	// 切线基：把这个渲染顶点自己的 rest 切线基，按所在粒子的法线从 rest 到当前的最小旋转转过去。
+	// 硬边 / UV 缝两侧的渲染顶点共享一个粒子，但各自的 rest 法线与切线不同，转完仍各是各的；
+	// rest 姿态下旋转是恒等，写回的就是原来那份。
+	const float3 From = CSCloth_SafeNormalize(RestNormals[P].xyz, float3(0.0f, 0.0f, 1.0f));
+	const float3 To = CSCloth_SafeNormalize(ParticleNormals[P].xyz, From);
+	const float4 TanX = UnpackSnorm8888(RestTangents[V * 2 + 0]);
+	const float4 TanZ = UnpackSnorm8888(RestTangents[V * 2 + 1]);
+
+	float3 NewZ;
+	float3 NewX;
+	const float CosAngle = dot(From, To);
+	if (CosAngle < -0.9999f)
+	{
+		// 翻了半圈，最小旋转的轴不确定：绕 rest 切线转 180°，切线不动、法线取反，手性不变。
+		NewZ = -TanZ.xyz;
+		NewX = TanX.xyz;
+	}
+	else
+	{
+		const float3 Axis = cross(From, To);
+		NewZ = CSCloth_Rotate(TanZ.xyz, Axis, CosAngle);
+		NewX = CSCloth_Rotate(TanX.xyz, Axis, CosAngle);
+	}
+	NewZ = CSCloth_SafeNormalize(NewZ, To);
+	NewX = CSCloth_SafeNormalize(NewX - NewZ * dot(NewX, NewZ), float3(1.0f, 0.0f, 0.0f));
+
+	RW_MeshTangents[V * 2 + 0] = PackSnorm8888(float4(NewX, 0.0f));
+	RW_MeshTangents[V * 2 + 1] = PackSnorm8888(float4(NewZ, TanZ.w));
+}
