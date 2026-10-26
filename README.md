@@ -61,7 +61,7 @@ GPU procedural content generation (PCG) tools for Unreal Engine 5.7: procedural 
 
 | 模块 | 类型 · 加载阶段 | 平台 | 职责 |
 |------|----------------|------|------|
-| **ComputeShaderGenerator** | Runtime · PostConfigInit | Win64 | GPU Compute Shader 核心：CSMesh 常驻网格对象层、浅水模拟（`ACSShallowWaterCapture`）、藤蔓生成（`AVineContainer`）、体素 / 三角网格生成（`AComputeShaderMeshGenerator`）、MeshBoolean、CliffGenerate、MeshFill、场景捕获、GPU 骨架树、PointBrush、Tiny Glade 房屋与地面等。 |
+| **ComputeShaderGenerator** | Runtime · PostConfigInit | Win64 | GPU Compute Shader 核心：CSMesh 常驻网格对象层、GPU 布料（`UCSClothSimComponent` / `ACSClothActor`）、浅水模拟（`ACSShallowWaterCapture`）、藤蔓生成（`AVineContainer`）、体素 / 三角网格生成（`AComputeShaderMeshGenerator`）、MeshBoolean、CliffGenerate、MeshFill、场景捕获、GPU 骨架树、PointBrush、Tiny Glade 房屋与地面等。 |
 | **GeometryScriptExtraEditor** | Editor · Default | 不限（依赖 Win64-only 的 `ComputeShaderGenerator`，实际同样只能 Win64） | 扩展 Geometry Script 的蓝图函数库：OpenVDB 体素化、网格属性工具、PolyPath、Landscape 采样、Foliage 互转等。纯函数库，不含 actor / 组件。 |
 | **PCGEditorProcess** | Editor · PostConfigInit | Win64 | 编辑器工具流程：四种笔刷 EdMode（实例 / 点 / 地面顶点色 / 窗）、浅水烘焙、Landscape Edit Layer 与道路、选中 Actor 的视口叠加面板、资产处理、GPU 骨架树的骨骼网格生成、拉尺寸失选监听、Nanite 截面 HLOD 构建器（`UCSNaniteCutHLODBuilder`）。 |
 | **EditorShortcuts** | Editor · Default | Win64 | 编辑器全局快捷键：按键组合 → 调用任意 UFunction（函数库里的静态函数，或逐个选中 actor 上的函数），附 Actor Tag 增删 / 切换函数库。 |
@@ -209,6 +209,7 @@ GPU procedural content generation (PCG) tools for Unreal Engine 5.7: procedural 
 | `ACSGroundActor` | `RockShellMesh` | `RockShellComponent` |
 | `ACSPointBrushActor` | `PointArrowMesh`（点箭头调试几何） | `PointArrowComponent` |
 | `UCSGpuInstancedMeshComponent` | `InstancedGpuMesh`（基础网格 + 逐实例流） | 自身 |
+| `ACSClothActor`（`UCSClothSimComponent` 每帧写回它的位置与切线基） | `ClothMesh` | `RenderComponent` |
 
 GPU 实例化叶子的用户（每个组件各持一份 `InstancedGpuMesh`）：地面的石阶 / 石阶卵石 / 裙边摆件 / 地被，房屋的门框砖（接缝、角石、包边、砖墙共用这一个组件）/ 承重柱砖 / 藤蔓枝叶花 / 屋瓦 / 摆件，以及 PointBrush 的实例显示。房屋的尖顶、门扇与窗的预制网格是普通 `UStaticMeshComponent`，不在这一层。
 
@@ -361,6 +362,28 @@ AVineContainer::GenerateVineGPU()          # 录完图即返回（"已递交"）
 - 三个 tag 函数每改一个 actor，就在它**包围盒的最上方**立一个临时文字：加 = 绿色 `+Tag`，删 = 红色 `-Tag`，站在包围盒顶面正中、底边贴顶面往上长，**宽度 = 包围盒**从视口方向看的宽度（等比缩放，朝向视口；带 Game show flag 的视图——含编辑器 Game View (G) 与所有 SceneCapture——看不见它，免得被 CSSW 之类的捕获拍进去），`TagIndicatorSeconds`（默认 2 s）后自毁；Project Settings → Editor Shortcuts → Tag Indicator 可关（2026-09-23 从旧 `ActorTagShortcut` 接回来）。文字 actor 是 transient、不进大纲，生成与销毁都藏在撤销事务之外 —— 绑定默认在 `FScopedTransaction` 里跑，而 `UWorld::SpawnActor` 在事务里会 `ModifyLevel`，不藏的话撤销会把已经自毁的文字连同关卡的 actor 表一起"复活"。验收脚本 `Scripts/EditorShortcutsVerifyTags.py`（21 条）。
 - 蓝图 / Python 可经 `UEditorShortcutSubsystem` 直接执行绑定（`ExecuteBindingByIndex` / `ExecuteBindingByLabel` / `RunBinding` / `ValidateAllBindings`）。
 - 宿主工程 UETest574_2 的 `Config/DefaultEditorPerProjectUserSettings.ini` 里有 4 条绑定（Ctrl+Alt+Shift + W / G / Q / R → Toggle CSSW / UA / Pick / Ref），2026-09-23 起全部指向 `/PCGPlugins/EditorShortcuts_BPFL/BPFL_Tags`（`ToggleCSSW` / `ToggleUA` / `TogglePick` / `ToggleRef`，由 `CreateTagLibrary` 生成）。旧的 `/PCGPlugins/EditorShortcuts/BPFL_ShortcutActions` 与 `/PCGPlugins/EditorShortcuts_BPFL/BPFL_Pick`（`AddPick`）还在，只是没有绑定指向它们了。
+
+### 8. GPU 布料 · XPBD Cloth
+
+`UCSClothSimComponent`（`ComputeShaderGenerator`）把一个 `UCSMesh` 当成固定拓扑的布来逐帧模拟：setup 时回读一次网格、焊接成粒子、建约束上传，之后每帧在渲染线程上自建一张 RDG 图跑完全部 substep，再借 `FCSMeshRenderThreadEdit` 把位置与切线基写回网格的常驻流。运行循环零回读、零阻塞；画面仍由绑同一个网格的 `UCSMeshRenderComponent` 负责，`UCSMeshOps::CopyToStaticMesh` 随时能把当前姿态冻成资产。
+
+```text
+UCSClothSimComponent::TickComponent          # 游戏线程：dt、钉组变换、碰撞体、风 → 一条渲染命令
+  └─ 渲染线程，自建 FRDGBuilder 图
+       ├─ for substep：Predict → 按颜色 SolveColor（拉伸 / 弯曲 / tether）→ Collide
+       ├─ AccumulateNormals → FinalizeNormals
+       └─ FCSMeshRenderThreadEdit：SkinBack 写 UCSMesh 的 Position / TangentBasis 流
+```
+
+- **求解**：small-steps XPBD（默认 8 个 substep × 1 次迭代），约束在 setup 时贪心上色、按颜色做 Gauss-Seidel（同色约束不共享可动粒子，直接改写位置，不用原子）。约束三类：拉伸（受压时换更软的柔度）、跨边弯曲、到最近钉点的长程 tether。
+- **钉点与跟随**：钉盒写在宿主 actor 的局部空间里，钉住的粒子跟着宿主（或钉盒的 `AttachActor`）走；顶点色某个通道也能当钉点遮罩。宿主一帧挪太远按瞬移整块搬过去。
+- **外力与碰撞**：重力、线性阻尼、Perlin 湍流叠加的风（按布面法线分解的相对风速）；球 / 胶囊 / 半空间碰撞体，可跟随 actor，substep 间插值。
+- **失配停摆**：setup 之后别的算子改了网格（Generation 动了）或重新分配过，约束就不再描述这份几何——停摆并写日志，`SetupFromMeshSync` 恢复。写回前发现非有限粒子同样停摆（那些角点保留上一帧的值）。
+- **放进关卡就能看**：`ACSClothActor` 接好源网格（或程序化网格布，默认 2 m × 2 m、64² 格、−X 边钉住）、渲染组件与布料组件。放下去当场就有布（`OnConstruction` 里建，不等 tick），之后在编辑器视口里逐帧模拟，不用进 PIE；`BakeCurrentPoseToStaticMesh` 把当前姿态存成 StaticMesh。
+- ⚠️ 编辑器只在有视口开着 Realtime 时 tick actor：编辑器窗口退到后台时（偏好设置 Performance →「Use Less CPU when in Background」，默认开）布会停在那一帧，回到前台接着摆。真编辑器里的验收跑 `Scripts/RunClothEditorModeCheck.ps1`（拉起编辑器执行 `ClothEditorModeCheck.py`，只对这一次会话关掉后台降频）。
+- ⚠️ 已知限制：没有运动矢量（快摆时 TAA / TSR 有拖影）；光追 BLAS 停在 rest 姿态；没有场景网格碰撞与自碰撞；格距 ≤ 2 cm 的细布要把 substep 调到 16~32 才拉得住。
+- 📖 设计、实测数据与未做的阶段：[`Docs/GpuClothSim_Plan.md`](Docs/GpuClothSim_Plan.md)
+- 🧪 自动化测试 `CSClothSimTests`（`PCGPlugins.ComputeShaderGenerator.ClothSim`，11 条，要真 RHI；`VisualCapture` 把真渲染的两张图存到 `Saved/ClothSimShots/`）
 
 ### 🖌️ PointBrush · 绘制点 → GPU 可直读 buffer
 
@@ -542,6 +565,7 @@ C++ 自动化测试位于 `Source/ComputeShaderGenerator/Private/Tests/` 与 `So
 | `ComputeShaderGenerator.House` | `CSHouseLogicTests` / `CSHouseTileTests` / `CSHouseDecorTests` / `CSHouseVineTests` | 屋面、门段、剖面与裁剪场、门框砖与墩、窗、接缝、角石、包边、抓手、瓦、摆件、藤蔓 |
 | `ComputeShaderGenerator.{GroundDecor, RockShell, GroundShaper, GroundStairs}` | `CSGroundDecorTests` / `CSGroundRockShellTests` / `CSGroundShaperFieldTests` / `CSGroundStairsTests` | 裙边摆件、岩壳、塑形场 CPU / GPU 对拍、石阶 |
 | `ComputeShaderGenerator.SplineBlock` | `CSSplineBlockTests` | 样条块排布 |
+| `ComputeShaderGenerator.ClothSim` | `CSClothSimTests` | GPU 布料：setup 拓扑与上色、悬挂布验收（钉点 / 边长 / 法线 / 包围盒 / 零阻塞）、rest 恒等、球碰撞、风、顶点色钉点、失配停摆、跟随宿主与瞬移、3.3 万粒子稳定性、`ACSClothActor`、真渲染出图 |
 | `TinyGladeHouse.Vine` | `CSHouseVineTests` | 藤管路径（与同文件其它用例的前缀不同） |
 | `ComputeShaderGenerator.NaniteCut` | `CSNaniteCutTests` | Nanite 截面抽取：距离换算、精确截面、根、单调、确定性、追加、镜像；关卡内 HLOD 试验台 |
 | `ComputeShaderGenerator.MeshVisibility` | `CSMeshVisibilityCullTests` | 外部可见性剔除：被封闭外壳包住的删光、外面的全留、材质号跟着压实 |
@@ -566,7 +590,7 @@ C++ 自动化测试位于 `Source/ComputeShaderGenerator/Private/Tests/` 与 `So
 | [`Docs/GpuMeshRayTracing.md`](Docs/GpuMeshRayTracing.md) | GPU 常驻网格的光追 BLAS 接入（Lumen 硬件光追 / 光追阴影 / 反射） | 2026-09-09 落地 |
 | [`Docs/VineGpuResidency.md`](Docs/VineGpuResidency.md) | 藤蔓生成链路的 GPU 常驻化现状与剩余计划 | 2026-08-14；现状表于 2026-09-10 订正过两行 |
 | [`Docs/FrameQuotaScheduler_Plan.md`](Docs/FrameQuotaScheduler_Plan.md) | GPU 生成作业的统一帧配额（分帧）调度 | 设计基线，暂不实施 |
-| [`Docs/GpuClothSim_Plan.md`](Docs/GpuClothSim_Plan.md) | XPBD 布料模拟：常驻算子逐帧驱动 `UCSMesh` 形变 | 计划，未实施 |
+| [`Docs/GpuClothSim_Plan.md`](Docs/GpuClothSim_Plan.md) | XPBD 布料模拟：常驻算子逐帧驱动 `UCSMesh` 形变 | 2026-10-26 P0 / P1 落地（另含 tether 与约束上色），测试 11/11；P2 碰撞升级、自碰撞、多实例未做 |
 | [`Docs/GpuRigidSettle_Plan.md`](Docs/GpuRigidSettle_Plan.md) | 批量刚体沉降（粒子簇形状匹配），布料计划的姊妹篇 | 计划，未实施 |
 | [`NaniteClusterHLOD_Plan.md`](NaniteClusterHLOD_Plan.md) | 用 Nanite cluster 截面给远处的大中型物体组生成简易 HLOD（小物体归 foliage，不进 HLOD）：`UCSNaniteCutOps` 算子 + `UCSNaniteCutHLODBuilder` | 2026-09-22 落地（含关卡内试验台与外部可见性剔除），测试 5/5，测试关卡截图验收；未在 WP 关卡实跑 |
 | [`Docs/CSLandscapeLayer_Framework.md`](Docs/CSLandscapeLayer_Framework.md) | 当前 Landscape 图层继承、Merge 与烘焙入口 | 2026-09-30 按源码清理已删除类与旧接口 |

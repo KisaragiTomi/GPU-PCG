@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1160" role="img" aria-labelledby="title desc">
   <title id="title">GpuClothSim Pass Flow</title>
-  <desc id="desc">UCSClothSimComponent per-frame flow: game-thread input collection, one render-thread FRDGBuilder graph with the XPBD substep loop reading FCSClothState, and the FCSMeshRenderThreadEdit write-back boundary into UCSMesh resident streams.</desc>
+  <desc id="desc">UCSClothSimComponent per-frame flow: game-thread input collection, one render-thread FRDGBuilder graph with the XPBD substep loop (graph-coloured Gauss-Seidel) reading FCSClothGpuState, normals, and the FCSMeshRenderThreadEdit write-back boundary into UCSMesh resident streams.</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
       <path d="M0,0 L10,4 L0,8 Z" fill="#334155"/>
@@ -70,7 +70,7 @@
     <rect class="gpu" x="190" y="122" width="18" height="18" rx="3"/>
     <text class="body" x="216" y="136">RT compute pass</text>
     <rect class="state" x="360" y="122" width="18" height="18" rx="3"/>
-    <text class="body" x="386" y="136">FCSClothState（组件自持 pooled）</text>
+    <text class="body" x="386" y="136">FCSClothGpuState（组件自持 pooled）</text>
     <rect class="resident" x="670" y="122" width="18" height="18" rx="3"/>
     <text class="body" x="696" y="136">UCSMesh 常驻流</text>
     <rect class="scopeBox" x="860" y="122" width="18" height="18" rx="3"/>
@@ -79,16 +79,16 @@
 
   <!-- Band A: Game Thread -->
   <rect class="band" x="32" y="162" width="1216" height="130" rx="10"/>
-  <text class="phaseTitle" x="48" y="186">Game Thread — UCSClothSimComponent::TickComponent</text>
+  <text class="phaseTitle" x="48" y="186">Game Thread — UCSClothSimComponent::TickComponent（TG_PostPhysics）</text>
   <rect class="cpu" x="56" y="200" width="310" height="64" rx="8"/>
   <text class="nodeTitle" x="72" y="222">收集帧输入</text>
-  <text class="body" x="72" y="244">dt clamp + 累积 / 风参 / Colliders 小数组上传</text>
+  <text class="body" x="72" y="244">dt 钳制 / 风 / 碰撞体形状 / 钉组变换（上一帧 + 本帧）</text>
   <rect class="cpu" x="410" y="200" width="330" height="64" rx="8"/>
-  <text class="nodeTitle" x="426" y="222">AllocationGeneration 校验</text>
-  <text class="body" x="426" y="244">与 Setup 缓存不一致 → 停摆 + log，等重新 Setup</text>
+  <text class="nodeTitle" x="426" y="222">Generation / AllocationGeneration 校验</text>
+  <text class="body" x="426" y="244">与 setup 缓存不一致或见到 NaN → 停摆 + log</text>
   <rect class="cpu" x="784" y="200" width="300" height="64" rx="8"/>
   <text class="nodeTitle mono" x="800" y="222">ENQUEUE_RENDER_COMMAND</text>
-  <text class="body" x="800" y="244">每帧一条；P0 自建图 → 当帧生效</text>
+  <text class="body" x="800" y="244">每帧一条；自建图 → 当帧生效，零阻塞</text>
   <path class="arrow" d="M366 232 H410"/>
   <path class="arrow" d="M740 232 H784"/>
   <path class="arrow" d="M934 264 V312"/>
@@ -99,56 +99,54 @@
 
   <!-- Substep loop -->
   <rect class="loopBox" x="56" y="352" width="520" height="390" rx="10"/>
-  <text class="label" x="72" y="372" fill="#15803d">substep 循环 ×4~8（small-steps XPBD）</text>
+  <text class="label" x="72" y="372" fill="#15803d">substep 循环 ×8（small-steps XPBD）</text>
   <rect class="gpu" x="80" y="388" width="300" height="58" rx="8"/>
   <text class="nodeTitle" x="96" y="406">Predict（1 thread/粒子）</text>
-  <text class="tiny mono" x="96" y="424">v = (x - xPrev) / dtPrev; xPrev = x</text>
-  <text class="tiny mono" x="96" y="438">x += (v*damp + (g + wind)*dt) * dt</text>
+  <text class="tiny mono" x="96" y="424">v = (x-xPrev)/dtPrev·damp + (g+wind)·dt</text>
+  <text class="tiny" x="96" y="438">x += v·dt；钉住粒子 = 钉组变换 × rest（插值）</text>
   <path class="arrowGpu" d="M230 446 V466"/>
   <rect class="loopBox" x="80" y="466" width="470" height="164" rx="8"/>
-  <text class="label" x="96" y="484" fill="#15803d">约束迭代 ×1~2（Jacobi + 定点累加）</text>
+  <text class="label" x="96" y="484" fill="#15803d">约束迭代 ×1：按颜色的 Gauss-Seidel</text>
   <rect class="gpu" x="96" y="496" width="210" height="52" rx="8"/>
-  <text class="nodeTitle" x="110" y="516">SolveStretch</text>
-  <text class="tiny" x="110" y="536">1 thread/边 · XPBD 拉伸修正</text>
+  <text class="nodeTitle" x="110" y="516">SolveColor × 13</text>
+  <text class="tiny" x="110" y="536">拉伸 + 弯曲，一种颜色一次派发</text>
   <rect class="gpu" x="330" y="496" width="204" height="52" rx="8"/>
-  <text class="nodeTitle" x="344" y="516">SolveBend</text>
-  <text class="tiny" x="344" y="536">1 thread/对 · cross-edge</text>
-  <rect class="gpu" x="96" y="572" width="210" height="52" rx="8"/>
-  <text class="nodeTitle" x="110" y="590">ApplyDelta</text>
-  <text class="tiny" x="110" y="605">x += decode·ω≈1.5；清零累加器</text>
-  <text class="tiny" x="110" y="619">InterlockedAdd 定点，溢出 clamp</text>
-  <path class="arrowGpu" d="M201 548 V572"/>
-  <path class="arrowGpu" d="M432 548 V598 H308"/>
+  <text class="nodeTitle" x="344" y="516">SolveColor × 1</text>
+  <text class="tiny" x="344" y="536">tether（单边），排在最后</text>
+  <rect class="noteBox" x="96" y="568" width="438" height="52" rx="8"/>
+  <text class="tiny" x="110" y="588">setup 时上色：同色约束不共享可动粒子 → 直接改写两端位置</text>
+  <text class="tiny" x="110" y="606">没有原子、没有 Jacobi 平均；λ 每个 substep 从零起算</text>
+  <path class="arrowGpu" d="M306 522 H330"/>
   <path class="arrowGpu" d="M230 630 V654"/>
   <rect class="gpu" x="80" y="654" width="300" height="58" rx="8"/>
-  <text class="nodeTitle" x="96" y="672">Collide（1 thread/粒子）</text>
-  <text class="tiny" x="96" y="690">P0 analytic：半空间 / 球 / 胶囊投影</text>
-  <text class="tiny" x="96" y="704">P2：GDF 采样 或 LBVH 最近三角</text>
+  <text class="nodeTitle" x="96" y="672">Collide（1 thread/粒子，有碰撞体时）</text>
+  <text class="tiny" x="96" y="690">analytic：半空间 / 球 / 胶囊投影 + 摩擦</text>
+  <text class="tiny" x="96" y="704">碰撞体按上一帧 / 本帧形状插值</text>
   <path class="arrowGpu dash" d="M80 683 H68 V417 H76"/>
-  <text class="tiny" x="96" y="732">循环 substep 次后进入写回</text>
+  <text class="tiny" x="96" y="732">循环 substep 次后进入法线与写回</text>
 
-  <!-- FCSClothState -->
+  <!-- FCSClothGpuState -->
   <rect class="state" x="690" y="352" width="250" height="250" rx="10"/>
-  <text class="nodeTitle" x="706" y="376">FCSClothState</text>
+  <text class="nodeTitle" x="706" y="376">FCSClothGpuState</text>
   <text class="tiny" x="706" y="394">组件自持 TRefCountPtr&lt;FRDGPooledBuffer&gt;</text>
-  <text class="tiny mono" x="706" y="416">Position / PrevPosition ×N</text>
-  <text class="tiny mono" x="706" y="435">InvMass / DeltaAccum(定点)</text>
-  <text class="tiny mono" x="706" y="454">RestTangent ×N</text>
-  <text class="tiny mono" x="706" y="473">StretchEdges + Rest ×E</text>
-  <text class="tiny mono" x="706" y="492">BendPairs + Rest ×B</text>
-  <text class="tiny mono" x="706" y="511">CornerToParticle ×RV</text>
-  <text class="tiny mono" x="706" y="530">Colliders ×C（GT 上传）</text>
+  <text class="tiny mono" x="706" y="416">Positions(w=InvMass) / Prev ×N</text>
+  <text class="tiny mono" x="706" y="435">RestPositions / PinGroups ×N</text>
+  <text class="tiny mono" x="706" y="454">ParticleNormals / RestNormals ×N</text>
+  <text class="tiny mono" x="706" y="473">NormalAccum（定点）×3N</text>
+  <text class="tiny mono" x="706" y="492">Constraints（按颜色）+ λ ×C</text>
+  <text class="tiny mono" x="706" y="511">CornerToParticle / RestTangents ×V</text>
+  <text class="tiny mono" x="706" y="530">PinTransforms / Colliders（每帧）</text>
   <line x1="706" y1="544" x2="924" y2="544" stroke="#d97706" stroke-width="0.8"/>
   <text class="tiny" x="706" y="562">过 CSGpuMemoryBudget 预检</text>
-  <text class="tiny" x="706" y="578">图尾自管访问末态（非网格流）</text>
+  <text class="tiny" x="706" y="578">跨图访问态交给 RDG 默认收尾</text>
   <path class="arrow" d="M576 460 H690"/>
-  <text class="label" x="633" y="452" text-anchor="middle">RW 粒子 / 累加域</text>
+  <text class="label" x="633" y="452" text-anchor="middle">RW 粒子 / λ</text>
   <path class="arrow" d="M690 520 H576"/>
   <text class="label" x="633" y="512" text-anchor="middle">只读 约束 / 映射域</text>
 
   <!-- Side notes -->
   <rect class="noteBox" x="964" y="352" width="252" height="140" rx="8"/>
-  <text class="nodeTitle" x="980" y="374">P2 宿主切换（可选）</text>
+  <text class="nodeTitle" x="980" y="374">P2 宿主切换（未做）</text>
   <text class="body" x="980" y="394">EnqueueGDFJob 每帧 re-enqueue，</text>
   <text class="body" x="980" y="412">整张图挪进渲染器 base pass 后</text>
   <text class="body" x="980" y="430">（GDF 参数此刻才就绪）</text>
@@ -157,31 +155,32 @@
   <rect class="setupBox" x="964" y="516" width="252" height="128" rx="8"/>
   <text class="nodeTitle" x="980" y="538">RDG 纪律</text>
   <text class="body" x="980" y="558">全部 pass 用参数结构体声明依赖；</text>
-  <text class="body" x="980" y="576">手写 dispatch 丢依赖边 → 挂 GPU</text>
-  <text class="body" x="980" y="594">（vine SC 既有教训）</text>
-  <text class="tiny mono" x="980" y="620">r.RDG.ImmediateMode 每阶段验收</text>
+  <text class="body" x="980" y="576">颜色之间的写后读由 RDG 排序，</text>
+  <text class="body" x="980" y="594">并插 UAV 屏障</text>
+  <text class="tiny mono" x="980" y="620">r.RDG.ImmediateMode=1：10/10，逐位相同</text>
 
-  <!-- Write-back scope -->
+  <!-- Normals, then the write-back scope -->
   <path class="arrowGpu" d="M120 742 V816"/>
   <text class="tiny" x="132" y="760">substep 循环结束后，同图内继续</text>
-  <rect class="scopeBox" x="56" y="766" width="560" height="160" rx="10"/>
-  <text class="label" x="230" y="788" fill="#7c3aed">FCSMeshRenderThreadEdit 作用域（CSMesh.h:313）</text>
-  <text class="tiny" x="230" y="804">构造注册网格流 → pass → 析构恢复流访问态</text>
-  <rect class="mesh" x="80" y="816" width="250" height="72" rx="8"/>
-  <text class="nodeTitle" x="96" y="838">SkinBack</text>
-  <text class="tiny" x="96" y="856">1 thread/渲染顶点</text>
-  <text class="tiny mono" x="96" y="872">Pos[c] = x[CornerToParticle[c]]</text>
-  <rect class="mesh" x="360" y="816" width="232" height="72" rx="8"/>
-  <text class="nodeTitle" x="374" y="838">RecomputeNormals</text>
-  <text class="tiny" x="374" y="856">清零→面法线原子累加到三粒子</text>
-  <text class="tiny" x="374" y="872">normalize + 正交化 → pack 8888</text>
-  <path class="arrowViolet" d="M330 852 H360"/>
-  <path class="arrowViolet" d="M592 852 H690"/>
+  <rect class="gpu" x="80" y="816" width="230" height="72" rx="8"/>
+  <text class="nodeTitle" x="96" y="838">Accumulate / FinalizeNormals</text>
+  <text class="tiny" x="96" y="856">1 thread/三角 → 1 thread/粒子</text>
+  <text class="tiny" x="96" y="872">角度加权，定点原子累加</text>
+  <rect class="scopeBox" x="340" y="766" width="276" height="160" rx="10"/>
+  <text class="label" x="356" y="788" fill="#7c3aed">FCSMeshRenderThreadEdit 作用域</text>
+  <text class="tiny" x="356" y="804">只登记 Position / TangentBasis 两条流</text>
+  <rect class="mesh" x="360" y="816" width="236" height="90" rx="8"/>
+  <text class="nodeTitle" x="374" y="838">SkinBack（1 thread/渲染顶点）</text>
+  <text class="tiny mono" x="374" y="856">Pos[v] = x[CornerToParticle[v]] + O</text>
+  <text class="tiny" x="374" y="872">rest 切线基 × 粒子法线的最小旋转</text>
+  <text class="tiny" x="374" y="890">非有限 → 不写回、计数，GT 停摆</text>
+  <path class="arrowGpu" d="M310 852 H360"/>
+  <path class="arrowViolet" d="M596 852 H690"/>
 
   <!-- UCSMesh resident streams -->
   <rect class="resident" x="690" y="772" width="250" height="120" rx="10"/>
   <text class="nodeTitle" x="706" y="796">UCSMesh · FCSMeshResident</text>
-  <text class="tiny mono" x="706" y="816">RW_Positions / RW_Tangents</text>
+  <text class="tiny mono" x="706" y="816">RW_MeshPositions / RW_MeshTangents</text>
   <text class="tiny" x="706" y="836">buffer 身份不变 → proxy 零重建</text>
   <text class="tiny" x="706" y="852">AllocationGeneration 不动</text>
   <text class="tiny" x="706" y="868">Generation 不 bump（BorrowedGraph）</text>
@@ -194,15 +193,15 @@
   <rect class="mesh" x="56" y="1014" width="360" height="76" rx="8"/>
   <text class="nodeTitle" x="72" y="1038">UCSMeshRenderComponent</text>
   <text class="body" x="72" y="1058">SetGpuMesh 绑定；每帧绘制同一批 buffer</text>
-  <text class="tiny" x="72" y="1076">proxy 零重建（CSMeshRenderComponent.h:49）</text>
+  <text class="tiny" x="72" y="1076">ShadowCacheInvalidationBehavior = Always（VSM 不缓存）</text>
   <rect class="io" x="470" y="1014" width="390" height="76" rx="8"/>
   <text class="nodeTitle" x="486" y="1038">CopyToStaticMesh / ReadbackMeshSync</text>
   <text class="body" x="486" y="1058">冻结当前姿态成资产——免费副产品</text>
   <text class="tiny" x="486" y="1076">NaN 检测在写回前，防落盘带毒</text>
   <rect class="setupBox" x="914" y="1014" width="302" height="76" rx="8"/>
   <text class="nodeTitle" x="930" y="1038">Setup 前置（一次性，见 D5）</text>
-  <text class="body" x="930" y="1058">ReadbackMeshSync → CPU 焊接/建约束 → 上传</text>
-  <text class="tiny" x="930" y="1076">运行循环零回读</text>
+  <text class="body" x="930" y="1058">回读 → 焊接 / 约束 / 上色 → 上传</text>
+  <text class="tiny" x="930" y="1076">运行循环零回读、零阻塞</text>
 
-  <text class="tiny" x="640" y="1136" text-anchor="middle">对应 GpuClothSim_Plan.md 的 D2 组件与 tick / D3 求解循环；行号为 2026-08-24 现状</text>
+  <text class="tiny" x="640" y="1136" text-anchor="middle">对应 GpuClothSim_Plan.md 的 D2 组件与 tick / D3 求解循环；按 2026-10-26 的代码</text>
 </svg>
