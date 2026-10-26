@@ -7,7 +7,7 @@
 ## 用法
 
 - 关卡里放 `ACSRoadNetworkActor`，`NetworkFile` 指向 `cs2-road-network-v1` 快照，例如 `D:\MyProject\CitiesSkylines-Road2-C#\Artifacts\public-saves\palmsland-3\network.json`。
-- 要用样条画路，把 `Source` 设为 `Splines`，在 actor 下挂 `ACSRoadSplineActor`，一根样条是一条路，见[样条路网](#样条路网)。`ConvertToSplines` 把快照转成这样的样条路。
+- 要用样条画路，把 `Source` 设为 `Splines`，在 actor 下挂 `ACSRoadSplineActor`，一根样条是一条路，见[样条路网](#样条路网)。`ConvertToSplines` 把快照转成这样的样条路。示例关卡 `/PCGPlugins/CSRoadNet/L_SplineRoadDemo` 由 8 根样条组成，打开后拖样条点即可看到路网实时重建。
 - 改属性、移动松手、关卡加载或复制 actor 时自动重建，也可以点 `Rebuild`。常驻网格不存盘，加载后重新生成。
 - `AssetDirectory` 留空时读 `<CS2ROADLAB 或 D:/MyProject/CitiesSkylines-Road2-C#>/Assets/CS2` 下的 `prefabs.json`、`raw-prefabs.json`、`pieces.bin`。同一目录每个进程只加载一次。
 - 材质按 atlas 的 BaseColor 贴图名（目录里的 `material_bindings`）在 `MaterialFolder` 找 `M_CS2_<NN>_<BaseColor>`，这些材质由 `Scripts/ImportCS2Roads.py` 生成。找不到的 atlas 列在 `MissingAtlases`，改用 `FallbackMaterial`。
@@ -20,7 +20,8 @@
 
 - 来源：挂在该 actor 下的 `ACSRoadSplineActor`、该 actor 自己的 `USplineComponent`，以及挂在它下面的其它 actor 上的 `USplineComponent`（prefab 用 `DefaultSplinePrefab`）。关卡里只有一个样条路网时，没挂在任何路网下的样条路也归它。
 - 每个样条点是一个节点，每段是一条边。`USplineComponent` 的一段是三次 Hermite 曲线，正好等于一条三次 Bezier：`b = P0 + Leave/3`，`c = P1 - Arrive/3`。类型为 `Linear` 或 `Constant` 的点，后面那段按直线处理。
-- 编辑样条（拖点、增删点、改属性、移动、撤销）只设一个标记，路网在下一次 `Tick` 里统一重建一次。
+- 编辑样条只设一个标记，路网在下一次 `Tick` 里统一重建一次，所以拖动时每帧都会重建。拖点、增删点、拖动样条 actor 或路网 actor、改属性或逐点数据、撤销，以及代码里改样条（`UpdateSpline`），都算编辑。示例关卡暖重建约 30–50 ms；转换出来的 Palmsland 每次约 1 s，拖动会很卡。
+- 编辑器只在有实时视口时才 tick actor。开着「Use Less CPU when in Background」（默认开）时，编辑器在后台会关掉所有视口的实时刷新，路网要等切回编辑器才重建。用脚本驱动后台编辑器验证时，加 `"-ini:EditorSettings:[/Script/UnrealEd.EditorPerformanceSettings]:bThrottleCPUWhenNotForeground=False"`，只对这一次会话生效，不会写回设置。
 
 开着 `bAdjustSegments` 的样条按 `SplineSettings` 调整：
 
@@ -129,7 +130,7 @@ Palmsland 转成 3,894 根样条后重建，5,667 条边与读文件时逐位一
 | `Decals.Scenarios` | 2,086 个贴花条目：网格三角形逐个比，裁剪三角形按重心配对，再比顶点属性；另外强制所有条目走装不下时的退路再跑一遍 | 网格布局不同 ≤ 1%，三角形 ≤ 0.5%，顶点同几何；退路逐位一致 | 417,916 个网格三角形 0 不同；56,366 个裁剪三角形 23 个未配对；位置 0.013% 超 1 cm；颜色逐位；退路 0 不同 |
 | `Splines.Basics` | 手画小路网：十字、立交、高差 1.5 m 的交叉、T 形、固定样条交叉、吸附、按长度和转角细分、合并、闭环、未知 prefab | 拓扑和统计逐项 | 全部符合 |
 | `Splines.Palmsland` | Palmsland 经 `ChainNetwork` 转成样条再建回：边和节点的数据、实体编号、组合、GPU 几何 | 逐位 | 5,667 条边转成 3,894 根样条（9,561 个点），0 不同 |
-| `Splines.Actor` | actor 放在离原点几公里处并转 30°，建一次，平移后再建一次：两根样条建成 4 条路 | 两个网格组件保持单位变换；路面包围盒含 4 个路端，中心离路口 < 5 m | 通过 |
+| `Splines.Actor` | actor 放在离原点几公里处并转 30°，建一次，平移后再建一次：两根样条建成 4 条路；再用代码挪一个样条点，下一次 `Tick` 自己重建 | 两个网格组件保持单位变换；路面包围盒含 4 个路端，中心离路口 < 5 m | 通过 |
 
 `Refine.Palmsland` 有 21.6% 的实例三角形数不同，这在噪声范围内：扰动版 C# 自己就有 27% 的实例不同。`Decals.Scenarios` 里 `elevated-cross` 的裁剪三角形只报告不计入预算（1,504 个里 615 个未配对），原因是它的几何本身处在平局上，见下文。
 
@@ -145,6 +146,7 @@ Palmsland 转成 3,894 根样条后重建，5,667 条边与读文件时逐位一
 
 - `Scripts/CS2Road/diff_gpu_geometry.py`：按字段统计测试写出的 `Saved/CSRoadGpu/<金标目录名>/<id>.bin`（几何）与金标的偏差。变形结果和贴花分别写在同目录的 `<id>.deform.bin`、`<id>.decals.bin`。
 - `Scripts/CS2Road/RoadNetworkShots.py`：在 `L_Palmsland` 里生成 GPU 路网，从相同机位分别拍静态导入版和 GPU 版。默认两边都带标线，输出到 `Saved/CS2RoadShots`；设 `CS2ROAD_SHOTS=roads` 只比路面，输出到 `Saved/CS2RoadShots_roads`。要用完整编辑器的 `-ExecCmds="py <脚本>"` 运行，`UnrealEditor-Cmd` 里拍出来是黑的。
+- `Scripts/CS2Road/MakeSplineRoadDemo.py`：生成示例关卡 `L_SplineRoadDemo`，用无头编辑器的 `-ExecutePythonScript` 运行。关卡基于引擎的 Basic 模板（太阳、天空、雾），地面比样条低 0.25 m（路面比样条低 0.2 m）；8 根样条包括主路、十字路口、弯道 T 形路口、两端坡道各落在一条街上的 12 m 高架，以及一条带连接路的环路。关卡已存在时脚本会拒绝覆盖。
 - `Scripts/CS2Road/SplineNetworkShots.py`：在 `L_Palmsland` 离城 900 m 的空地上用样条画一个小路网（十字、T 形、立交、3 m 短段），路网只借 Palmsland 快照的地形，从 5 个机位拍到 `Saved/CS2RoadSplineShots`。运行方式同上。
 
 ## 重新生成

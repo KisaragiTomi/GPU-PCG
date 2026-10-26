@@ -332,8 +332,8 @@ bool FCSRoadSplinesPalmslandTest::RunTest(const FString& Parameters)
 }
 
 // The actor in a level, placed off the origin and turned: two spline roads under it become roads
-// where the splines are, and follow it when it moves. The meshes are world-space, so their
-// components stay at identity wherever the actor is.
+// where the splines are, and follow it when it moves or a spline changes. The meshes are
+// world-space, so their components stay at identity wherever the actor is.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadSplinesActorTest, "PCGPlugins.CSRoadNet.Splines.Actor",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
 
@@ -352,9 +352,10 @@ bool FCSRoadSplinesActorTest::RunTest(const FString& Parameters)
 	Network->Source = ECSRoadNetworkSource::Splines;
 	// Two 60 m roads crossing at the network's origin.
 	const TArray<FVector> Ends = { FVector(-3000.0, 0.0, 0.0), FVector(3000.0, 0.0, 0.0), FVector(0.0, -3000.0, 0.0), FVector(0.0, 3000.0, 0.0) };
+	TArray<ACSRoadSplineActor*> Roads;
 	for (int32 I = 0; I < Ends.Num(); I += 2)
 	{
-		ACSRoadSplineActor* Road = World->SpawnActor<ACSRoadSplineActor>();
+		ACSRoadSplineActor* Road = Roads.Add_GetRef(World->SpawnActor<ACSRoadSplineActor>());
 		Road->AttachToActor(Network, FAttachmentTransformRules::KeepRelativeTransform);
 		Road->Spline->SetSplinePoints({ Ends[I], Ends[I + 1] }, ESplineCoordinateSpace::Local);
 	}
@@ -373,6 +374,13 @@ bool FCSRoadSplinesActorTest::RunTest(const FString& Parameters)
 		for (const FVector& End : Ends) TestTrue(Case + TEXT(": bounds hold the road ends"), Bounds.IsInside(Network->GetActorTransform().TransformPosition(End)));
 		TestTrue(Case + TEXT(": bounds centred on the crossing"), FVector::Dist2D(Bounds.GetCenter(), Network->GetActorLocation()) < 500.0);
 	}
+
+	// A spline edited (by the editor's spline tools, or code) has the network rebuild on its next tick.
+	const FVector Moved(6000.0, 0.0, 0.0);
+	Roads[0]->Spline->SetLocationAtSplinePoint(1, Moved, ESplineCoordinateSpace::Local);
+	Network->Tick(0.0f);
+	TestEqual(TEXT("edited: error"), Network->LastError, FString());
+	TestTrue(TEXT("edited: bounds hold the moved end"), Network->RoadMesh->Bounds.GetBox().IsInside(Network->GetActorTransform().TransformPosition(Moved)));
 	return true;
 }
 

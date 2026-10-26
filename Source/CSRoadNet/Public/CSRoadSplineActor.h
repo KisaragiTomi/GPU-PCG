@@ -79,6 +79,11 @@ public:
 	virtual void CopyPoint(const USplineMetadata* FromSplineMetadata, int32 FromIndex, int32 ToIndex) override;
 	virtual void Reset(int32 NumPoints) override;
 	virtual void Fixup(int32 NumPoints, USplineComponent* SplineComp) override;
+#if WITH_EDITOR
+	// Edited in the details panel, the points change without their spline: the network is told directly.
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	virtual void PostEditUndo() override;
+#endif
 };
 
 /** A road of an ACSRoadNetworkActor building from splines: every point a node, every segment an edge. */
@@ -109,6 +114,8 @@ public:
 
 	virtual USplineMetadata* GetSplinePointsMetadata() override;
 	virtual const USplineMetadata* GetSplinePointsMetadata() const override;
+	// Every change of the curve, from the editor's spline tools (each step of a drag) or from code.
+	virtual void UpdateSpline() override;
 	virtual void PostLoad() override;
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;

@@ -61,6 +61,20 @@ void UCSRoadSplineMetadata::Fixup(int32 NumPoints, USplineComponent* SplineComp)
 	if (Points.Num() != NumPoints) Points.SetNum(NumPoints);
 }
 
+#if WITH_EDITOR
+void UCSRoadSplineMetadata::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	if (const UCSRoadSplineComponent* Spline = Cast<UCSRoadSplineComponent>(GetOuter())) Spline->NotifyNetwork();
+}
+
+void UCSRoadSplineMetadata::PostEditUndo()
+{
+	Super::PostEditUndo();
+	if (const UCSRoadSplineComponent* Spline = Cast<UCSRoadSplineComponent>(GetOuter())) Spline->NotifyNetwork();
+}
+#endif
+
 UCSRoadSplineComponent::UCSRoadSplineComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -75,6 +89,12 @@ USplineMetadata* UCSRoadSplineComponent::GetSplinePointsMetadata()
 const USplineMetadata* UCSRoadSplineComponent::GetSplinePointsMetadata() const
 {
 	return RoadMetadata;
+}
+
+void UCSRoadSplineComponent::UpdateSpline()
+{
+	Super::UpdateSpline();
+	if (!IsTemplate()) NotifyNetwork();
 }
 
 void UCSRoadSplineComponent::PostLoad()
@@ -140,7 +160,8 @@ void ACSRoadSplineActor::Destroyed()
 void ACSRoadSplineActor::PostEditMove(bool bFinished)
 {
 	Super::PostEditMove(bFinished);
-	if (bFinished && Spline) Spline->NotifyNetwork();
+	// Every step of a drag: the network rebuilds once per tick, so the roads follow the gizmo.
+	if (Spline) Spline->NotifyNetwork();
 }
 
 void ACSRoadSplineActor::PostEditUndo()

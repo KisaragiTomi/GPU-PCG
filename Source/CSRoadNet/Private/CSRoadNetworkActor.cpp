@@ -317,14 +317,19 @@ void ACSRoadNetworkActor::ConvertToSplines()
 void ACSRoadNetworkActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
-	if (Source == ECSRoadNetworkSource::Splines || !NetworkFile.FilePath.IsEmpty()) Rebuild();
+	// A slider dragged in the details panel changes a property many times a frame: spline networks
+	// build once on the next tick.
+	if (Source == ECSRoadNetworkSource::Splines) RequestRebuild();
+	else if (!NetworkFile.FilePath.IsEmpty()) Rebuild();
 }
 
 void ACSRoadNetworkActor::PostEditMove(bool bFinished)
 {
 	Super::PostEditMove(bFinished);
-	// The resident streams are world space, so the geometry follows the actor only by rebuilding.
-	if (bFinished && (Source == ECSRoadNetworkSource::Splines || !NetworkFile.FilePath.IsEmpty())) Rebuild();
+	// The resident streams are world space, so the geometry follows the actor only by rebuilding:
+	// a spline network on every tick while it is dragged, a snapshot (a second or more) once let go.
+	if (Source == ECSRoadNetworkSource::Splines) RequestRebuild();
+	else if (bFinished && !NetworkFile.FilePath.IsEmpty()) Rebuild();
 }
 #endif
 
