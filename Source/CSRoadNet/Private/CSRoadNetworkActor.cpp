@@ -9,6 +9,11 @@
 #include "CSRoadGpuMesh.h"
 #include "CSRoadNet.h"
 #include "CSRoadNetworkFile.h"
+#include "CSRoadSplineActor.h"
+#include "CSRoadSplineNetwork.h"
+#include "Components/SplineComponent.h"
+#include "EngineUtils.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformTime.h"
 #include "Materials/MaterialInterface.h"
@@ -17,6 +22,9 @@
 #include "RHIGPUReadback.h"
 #include "RenderGraphUtils.h"
 #include "RenderingThread.h"
+#if WITH_EDITOR
+#include "ScopedTransaction.h"
+#endif
 
 namespace
 {
@@ -48,6 +56,33 @@ TSharedPtr<FCSRoadNetworkActor_Library> CSRoadNetworkActor_Library(const FString
 	return Library;
 }
 
+// The snapshot at Path, read again only when the file changes. One at a time: terrains are large.
+TSharedPtr<const CSRoad::FSavedNetwork> CSRoadNetworkActor_Network(const FString& Path, CSRoad::FAssets& Assets, bool bTerrain, FString& OutError)
+{
+	struct FCached
+	{
+		FString Key;
+		FDateTime Stamp;
+		TSharedPtr<const CSRoad::FSavedNetwork> Network;
+	};
+	static FCached Cached;
+	const FString Full = FPaths::ConvertRelativePathToFull(Path);
+	const FString Key = FString::Printf(TEXT("%s|%d|%p"), *Full, bTerrain ? 1 : 0, &Assets);
+	const FDateTime Stamp = IFileManager::Get().GetTimeStamp(*Full);
+	if (Cached.Network && Cached.Key == Key && Cached.Stamp == Stamp) return Cached.Network;
+	TSharedPtr<CSRoad::FSavedNetwork> Network = MakeShared<CSRoad::FSavedNetwork>();
+	if (!Network->Load(Full, &Assets, bTerrain, OutError)) return nullptr;
+	Cached = { Key, Stamp, Network };
+	return Network;
+}
+
+// The network's space (Unity metres, y up) to the actor's (cm, z up) and back; both exact.
+FVector CSRoadNetworkActor_ToUnreal(const FVector3d& V) { return FVector(V.X, -V.Z, V.Y) * 100.0; }
+FVector3d CSRoadNetworkActor_ToUnity(const FVector& V) { return FVector3d(V.X, V.Z, -V.Y) / 100.0; }
+
+CSRoad::CompositionFlags CSRoadNetworkActor_Flags(const FIntVector& V) { return CSRoad::MakeFlags(static_cast<uint32>(V.X), static_cast<uint32>(V.Y), static_cast<uint32>(V.Z)); }
+FIntVector CSRoadNetworkActor_Flags(const CSRoad::CompositionFlags& F) { return FIntVector(static_cast<int32>(F.m_General), static_cast<int32>(F.m_Left), static_cast<int32>(F.m_Right)); }
+
 // M_CS2_<NN>_<BaseColor> materials (Scripts/ImportCS2Roads.py) by base-colour texture name.
 TMap<FString, UMaterialInterface*> CSRoadNetworkActor_Materials(const FString& Folder)
 {
@@ -71,11 +106,16 @@ TMap<FString, UMaterialInterface*> CSRoadNetworkActor_Materials(const FString& F
 
 ACSRoadNetworkActor::ACSRoadNetworkActor()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	// Ticks only to carry out rebuilds that spline roads asked for.
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = true;
+	// The meshes are world-space and draw with an absolute transform, so they hang under a root of
+	// their own: as the root, a mesh takes the actor's placement and so applies it twice.
+	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("Root")));
 	RoadMesh = CreateDefaultSubobject<UCSMeshRenderComponent>(TEXT("RoadMesh"));
-	RootComponent = RoadMesh;
+	RoadMesh->SetupAttachment(RootComponent);
 	MarkingMesh = CreateDefaultSubobject<UCSMeshRenderComponent>(TEXT("MarkingMesh"));
-	MarkingMesh->SetupAttachment(RoadMesh);
+	MarkingMesh->SetupAttachment(RootComponent);
 	MarkingMesh->SetCastShadow(false);
 	MarkingMesh->bVisibleInRayTracing = false;
 	MarkingMesh->bAffectDistanceFieldLighting = false;
@@ -93,29 +133,206 @@ void ACSRoadNetworkActor::PostRegisterAllComponents()
 {
 	Super::PostRegisterAllComponents();
 	// The resident mesh is transient: a loaded or duplicated actor has no geometry until it builds.
-	if (!bBuildOnLoad || IsTemplate() || !GetWorld() || NetworkFile.FilePath.IsEmpty()) return;
+	if (!bBuildOnLoad || IsTemplate() || !GetWorld()) return;
 	if (RoadMesh && RoadMesh->HasGeneratedGeometry()) return;
+	// Spline roads may register after this actor: build once they all have.
+	if (Source == ECSRoadNetworkSource::Splines) RequestRebuild();
+	else if (!NetworkFile.FilePath.IsEmpty()) Rebuild();
+}
+
+void ACSRoadNetworkActor::RequestRebuild()
+{
+	if (Source == ECSRoadNetworkSource::Splines) bRebuildRequested = true;
+}
+
+void ACSRoadNetworkActor::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	if (!bRebuildRequested) return;
+	bRebuildRequested = false;
 	Rebuild();
+}
+
+TArray<FString> ACSRoadNetworkActor::RoadPrefabNames(const ACSRoadNetworkActor* Network)
+{
+	FString Error;
+	const ACSRoadNetworkActor* From = Network ? Network : GetDefault<ACSRoadNetworkActor>();
+	const TSharedPtr<FCSRoadNetworkActor_Library> Library = CSRoadNetworkActor_Library(From->ResolveAssetDirectory(), Error);
+	TArray<FString> Names;
+	if (Library) Names = Library->Assets.RoadNames();
+	Names.Sort();
+	return Names;
+}
+
+TArray<FString> ACSRoadNetworkActor::GetRoadPrefabOptions() const
+{
+	return RoadPrefabNames(this);
+}
+
+ACSRoadNetworkActor* ACSRoadNetworkActor::LevelSplineNetwork(const ULevel* Level)
+{
+	UWorld* World = Level ? Level->GetWorld() : nullptr;
+	if (!World) return nullptr;
+	ACSRoadNetworkActor* Found = nullptr;
+	for (ACSRoadNetworkActor* Network : TActorRange<ACSRoadNetworkActor>(World))
+	{
+		if (Network->GetLevel() != Level || Network->Source != ECSRoadNetworkSource::Splines) continue;
+		if (Found) return nullptr;
+		Found = Network;
+	}
+	return Found;
+}
+
+TArray<CSRoad::FSplineRoad> ACSRoadNetworkActor::GatherSplines() const
+{
+	// Spline components on this actor, the spline roads that are this network's, and the spline
+	// components of any other actor hanging under it.
+	TArray<USplineComponent*> Components;
+	GetComponents<USplineComponent>(Components);
+	if (UWorld* World = GetWorld()) for (ACSRoadSplineActor* Road : TActorRange<ACSRoadSplineActor>(World)) if (Road->Spline && Road->Spline->FindNetwork() == this) Components.Add(Road->Spline.Get());
+	TArray<AActor*> Attached;
+	GetAttachedActors(Attached, true, true);
+	for (AActor* Actor : Attached)
+	{
+		if (Actor->IsA<ACSRoadSplineActor>()) continue;
+		TArray<USplineComponent*> Own;
+		Actor->GetComponents<USplineComponent>(Own);
+		Components.Append(Own);
+	}
+
+	TArray<CSRoad::FSplineRoad> Splines;
+	const FTransform NetworkToWorld = GetActorTransform();
+	for (const USplineComponent* Component : Components)
+	{
+		const int32 Count = Component->GetNumberOfSplinePoints();
+		if (Count < 2) continue;
+		const UCSRoadSplineComponent* Road = Cast<UCSRoadSplineComponent>(Component);
+		const FTransform ComponentToWorld = Component->GetComponentTransform();
+		auto Position = [&](const FVector& Local) { return CSRoadNetworkActor_ToUnity(NetworkToWorld.InverseTransformPosition(ComponentToWorld.TransformPosition(Local))); };
+		auto Direction = [&](const FVector& Local) { return CSRoadNetworkActor_ToUnity(NetworkToWorld.InverseTransformVector(ComponentToWorld.TransformVector(Local))); };
+		CSRoad::FSplineRoad& Out = Splines.AddDefaulted_GetRef();
+		Out.Name = Component->GetOwner() ? Component->GetOwner()->GetActorNameOrLabel() : Component->GetName();
+		Out.Prefab = Road ? Road->Prefab : DefaultSplinePrefab;
+		Out.Upgrade = Road ? CSRoadNetworkActor_Flags(Road->Upgrade) : CSRoad::CompositionFlags{};
+		Out.bAdjust = Road ? Road->bAdjustSegments : true;
+		Out.bClosed = Component->IsClosedLoop();
+		for (int32 I = 0; I < Count; I++)
+		{
+			Out.Points.Add(Position(Component->GetLocationAtSplinePoint(I, ESplineCoordinateSpace::Local)));
+			Out.Arrive.Add(Direction(Component->GetArriveTangentAtSplinePoint(I, ESplineCoordinateSpace::Local)));
+			Out.Leave.Add(Direction(Component->GetLeaveTangentAtSplinePoint(I, ESplineCoordinateSpace::Local)));
+			const ESplinePointType::Type Type = Component->GetSplinePointType(I);
+			Out.Linear.Add(Type == ESplinePointType::Linear || Type == ESplinePointType::Constant);
+			CSRoad::FSplinePointData& Data = Out.Data.AddDefaulted_GetRef();
+			if (!Road || !Road->RoadMetadata || !Road->RoadMetadata->Points.IsValidIndex(I)) continue;
+			const FCSRoadSplinePoint& Point = Road->RoadMetadata->Points[I];
+			Data.NodeOffset = Direction(Point.NodeOffset);
+			Data.NodePrefab = Point.NodePrefab;
+			Data.bNodeElevation = Point.bNodeElevation;
+			Data.NodeElevation = CSRoad::float2(static_cast<float>(Point.NodeElevation.X), static_cast<float>(Point.NodeElevation.Y));
+			Data.NodeUpgrade = CSRoadNetworkActor_Flags(Point.NodeUpgrade);
+			Data.bSegmentElevation = Point.bSegmentElevation;
+			Data.SegmentElevation = CSRoad::float2(static_cast<float>(Point.SegmentElevation.X), static_cast<float>(Point.SegmentElevation.Y));
+			Data.SegmentOrder = Point.SegmentOrder;
+			Data.bOutside = Point.bOutsideConnection;
+			Data.NodeOwner = Point.NodeOwner;
+			Data.SegmentOwner = Point.SegmentOwner;
+		}
+	}
+	return Splines;
+}
+
+void ACSRoadNetworkActor::ConvertToSplines()
+{
+#if WITH_EDITOR
+	UWorld* World = GetWorld();
+	if (!World) return;
+	FString Error;
+	const TSharedPtr<FCSRoadNetworkActor_Library> Library = CSRoadNetworkActor_Library(ResolveAssetDirectory(), Error);
+	const TSharedPtr<const CSRoad::FSavedNetwork> Network = Library ? CSRoadNetworkActor_Network(NetworkFile.FilePath, Library->Assets, false, Error) : nullptr;
+	if (!Network)
+	{
+		LastError = Error;
+		UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %s"), *GetName(), *Error);
+		return;
+	}
+	for (ACSRoadSplineActor* Road : TActorRange<ACSRoadSplineActor>(World))
+	{
+		if (Road->GetAttachParentActor() != this) continue;
+		LastError = TEXT("Spline roads already hang under this network; delete them before converting again");
+		UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %s"), *GetName(), *LastError);
+		return;
+	}
+	TArray<CSRoad::FSplineRoad> Splines;
+	CSRoad::ChainNetwork(Network->Nodes, Network->Roads, Splines);
+
+	const FScopedTransaction Transaction(NSLOCTEXT("CSRoadNet", "ConvertToSplines", "Convert Road Network to Splines"));
+	Modify();
+	FActorSpawnParameters Parameters;
+	Parameters.OverrideLevel = GetLevel();
+	for (const CSRoad::FSplineRoad& Road : Splines)
+	{
+		ACSRoadSplineActor* Actor = World->SpawnActor<ACSRoadSplineActor>(ACSRoadSplineActor::StaticClass(), FTransform::Identity, Parameters);
+		if (!Actor || !Actor->Spline) continue;
+		// The actor sits on the road's first point; its points are relative to it.
+		const FVector First = CSRoadNetworkActor_ToUnreal(Road.Points[0]);
+		Actor->AttachToActor(this, FAttachmentTransformRules::KeepRelativeTransform);
+		Actor->SetActorRelativeTransform(FTransform(First));
+		Actor->SetActorLabel(Road.Name);
+		UCSRoadSplineComponent* Spline = Actor->Spline;
+		Spline->Prefab = Road.Prefab;
+		Spline->Upgrade = CSRoadNetworkActor_Flags(Road.Upgrade);
+		Spline->bAdjustSegments = Road.bAdjust;
+		Spline->ClearSplinePoints(false);
+		for (int32 I = 0; I < Road.Points.Num(); I++) Spline->AddSplinePoint(CSRoadNetworkActor_ToUnreal(Road.Points[I]) - First, ESplineCoordinateSpace::Local, false);
+		for (int32 I = 0; I < Road.Points.Num(); I++) Spline->SetTangentsAtSplinePoint(I, CSRoadNetworkActor_ToUnreal(Road.Arrive[I]), CSRoadNetworkActor_ToUnreal(Road.Leave[I]), ESplineCoordinateSpace::Local, false);
+		Spline->SetClosedLoop(Road.bClosed, false);
+		Spline->UpdateSpline();
+		TArray<FCSRoadSplinePoint>& Points = Spline->RoadMetadata->Points;
+		Points.SetNum(Road.Points.Num());
+		for (int32 I = 0; I < Road.Points.Num(); I++)
+		{
+			const CSRoad::FSplinePointData& Data = Road.Data[I];
+			Points[I].NodeOffset = CSRoadNetworkActor_ToUnreal(Data.NodeOffset);
+			Points[I].NodePrefab = Data.NodePrefab;
+			Points[I].bNodeElevation = Data.bNodeElevation;
+			Points[I].NodeElevation = FVector2D(Data.NodeElevation.x, Data.NodeElevation.y);
+			Points[I].NodeUpgrade = CSRoadNetworkActor_Flags(Data.NodeUpgrade);
+			Points[I].bSegmentElevation = Data.bSegmentElevation;
+			Points[I].SegmentElevation = FVector2D(Data.SegmentElevation.x, Data.SegmentElevation.y);
+			Points[I].SegmentOrder = Data.SegmentOrder;
+			Points[I].bOutsideConnection = Data.bOutside;
+			Points[I].NodeOwner = Data.NodeOwner;
+			Points[I].SegmentOwner = Data.SegmentOwner;
+		}
+	}
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d edges of %s converted to %d spline roads"), *GetName(), Network->Roads.Num(), *NetworkFile.FilePath, Splines.Num());
+	Source = ECSRoadNetworkSource::Splines;
+	bLeftHandTraffic = Network->bLeftHandTraffic;
+	Rebuild();
+#endif
 }
 
 #if WITH_EDITOR
 void ACSRoadNetworkActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
-	if (!NetworkFile.FilePath.IsEmpty()) Rebuild();
+	if (Source == ECSRoadNetworkSource::Splines || !NetworkFile.FilePath.IsEmpty()) Rebuild();
 }
 
 void ACSRoadNetworkActor::PostEditMove(bool bFinished)
 {
 	Super::PostEditMove(bFinished);
 	// The resident streams are world space, so the geometry follows the actor only by rebuilding.
-	if (bFinished && !NetworkFile.FilePath.IsEmpty()) Rebuild();
+	if (bFinished && (Source == ECSRoadNetworkSource::Splines || !NetworkFile.FilePath.IsEmpty())) Rebuild();
 }
 #endif
 
 void ACSRoadNetworkActor::Rebuild()
 {
 	const double StartTime = FPlatformTime::Seconds();
+	// What spline roads asked for until now is in this build.
+	bRebuildRequested = false;
 	FString Error;
 	if (BuildRoads(Error)) LastError.Reset();
 	else
@@ -144,15 +361,45 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	TSharedPtr<FCSRoadNetworkActor_Library> Library = CSRoadNetworkActor_Library(ResolveAssetDirectory(), OutError);
 	if (!Library) return false;
 	const double LibraryMs = Lap();
-	CSRoad::FSavedNetwork Network;
-	if (!Network.Load(NetworkFile.FilePath, &Library->Assets, bUseTerrain, OutError)) return false;
+	// The snapshot: the roads, or building from splines only its terrain.
+	const bool bSplines = Source == ECSRoadNetworkSource::Splines;
+	TSharedPtr<const CSRoad::FSavedNetwork> Snapshot;
+	if (!NetworkFile.FilePath.IsEmpty() && (!bSplines || bUseTerrain))
+	{
+		Snapshot = CSRoadNetworkActor_Network(NetworkFile.FilePath, Library->Assets, bUseTerrain, OutError);
+		if (!Snapshot) return false;
+	}
+	else if (!bSplines)
+	{
+		OutError = TEXT("No network file");
+		return false;
+	}
+	const CSRoad::FSavedTerrain* Terrain = bUseTerrain && Snapshot && Snapshot->Terrain.IsValid() ? &Snapshot->Terrain : nullptr;
+	CSRoad::FSavedNetwork FromSplines;
+	NumSplines = 0;
+	if (bSplines)
+	{
+		const TArray<CSRoad::FSplineRoad> Splines = GatherSplines();
+		NumSplines = Splines.Num();
+		CSRoad::FSplineNetworkSettings Settings;
+		Settings.MaxEdgeLength = SplineSettings.MaxSegmentLength;
+		Settings.MaxEdgeTurn = FMath::DegreesToRadians(static_cast<double>(SplineSettings.MaxSegmentTurn));
+		Settings.MinEdgeLength = SplineSettings.MinSegmentLength;
+		Settings.SnapDistance = SplineSettings.SnapDistance;
+		Settings.JunctionHeight = SplineSettings.JunctionHeight;
+		CSRoad::FSplineNetworkStats Stats;
+		if (!CSRoad::BuildSplineNetwork(Library->Assets, Splines, Settings, Terrain, FromSplines.Nodes, FromSplines.Roads, Stats, OutError)) return false;
+		UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d splines make %d nodes and %d edges; %d junctions joined, %d segments split, %d merged, %d too short left out"),
+			*GetName(), NumSplines, FromSplines.Nodes.Num(), FromSplines.Roads.Num(), Stats.Junctions, Stats.Splits, Stats.Merges, Stats.Dropped);
+	}
+	const TArray<CSRoad::FSavedNode>& Nodes = bSplines ? FromSplines.Nodes : Snapshot->Nodes;
+	const TArray<CSRoad::FRoadSpec>& Specs = bSplines ? FromSplines.Roads : Snapshot->Roads;
 	const double NetworkMs = Lap();
 	CSRoad::FGraph Graph;
-	Graph.bLeftHandTraffic = Network.bLeftHandTraffic;
+	Graph.bLeftHandTraffic = bSplines ? bLeftHandTraffic : Snapshot->bLeftHandTraffic;
 	CSRoad::FGpuGeometryInput Geometry;
 	CSRoad::FGpuRoadMeshInput MeshInput;
-	const CSRoad::FSavedTerrain* Terrain = bUseTerrain && Network.Terrain.IsValid() ? &Network.Terrain : nullptr;
-	if (!Graph.Build(Library->Assets, Network.Roads, Network.Nodes, OutError) || !Geometry.Build(Graph, Library->Assets, Terrain, OutError)) return false;
+	if (!Graph.Build(Library->Assets, Specs, Nodes, OutError) || !Geometry.Build(Graph, Library->Assets, Terrain, OutError)) return false;
 	const double GraphMs = Lap();
 	if (!MeshInput.Build(Graph, Library->Assets, OutError)) return false;
 	const double MeshMs = Lap();
