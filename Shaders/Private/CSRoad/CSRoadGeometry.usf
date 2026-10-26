@@ -1,0 +1,67 @@
+// Compute kernels of the CS2 road geometry build, one per GeometrySystem job, dispatched in the
+// order of GeometrySystem's job graph: InitializeNode -> CalculateEdge -> FlattenNode -> FinishEdge
+// -> CalculateNode (IterationIndex 0, 1) -> CalculateIntersection -> CopyNode -> UpdateNode.
+// Node kernels run one thread per NodeList entry, edge kernels one per EdgeList entry.
+
+#include "CSRoadEdgeGeometry.ush"
+#include "CSRoadNodeGeometry.ush"
+
+#ifndef THREADGROUP_SIZE
+#define THREADGROUP_SIZE 64
+#endif
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void InitializeNodeGeometryCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.x >= NumNodes) return;
+	InitializeNodeGeometry(NodeList[DispatchThreadId.x]);
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void CalculateEdgeGeometryCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.x >= NumEdges) return;
+	CalculateEdgeGeometry(EdgeList[DispatchThreadId.x]);
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void FlattenNodeGeometryCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.x >= NumNodes) return;
+	FlattenNodeGeometry(NodeList[DispatchThreadId.x]);
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void FinishEdgeGeometryCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.x >= NumEdges) return;
+	FinishEdgeGeometry(EdgeList[DispatchThreadId.x]);
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void CalculateNodeGeometryCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.x >= NumEdges) return;
+	CalculateNodeGeometry(EdgeList[DispatchThreadId.x]);
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void CalculateIntersectionGeometryCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.x >= NumEdges) return;
+	CalculateIntersectionGeometry(EdgeList[DispatchThreadId.x]);
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void CopyNodeGeometryCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.x >= NumEdges) return;
+	CopyNodeGeometry(EdgeList[DispatchThreadId.x]);
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void UpdateNodeGeometryCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.x >= NumNodes) return;
+	UpdateNodeGeometry(NodeList[DispatchThreadId.x]);
+}

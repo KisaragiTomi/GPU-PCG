@@ -28,6 +28,12 @@
       "PlatformAllowList": ["Win64"]
     },
     {
+      "Name": "CSRoadNet",
+      "Type": "Runtime",
+      "LoadingPhase": "PostConfigInit",
+      "PlatformAllowList": ["Win64"]
+    },
+    {
       "Name": "PCGEditorProcess",
       "Type": "Editor",
       "LoadingPhase": "PostConfigInit",

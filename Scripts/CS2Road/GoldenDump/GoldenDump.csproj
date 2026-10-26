@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>12.0</LangVersion>
+    <CS2RoadLab Condition="'$(CS2RoadLab)' == ''">D:\MyProject\CitiesSkylines-Road2-C#</CS2RoadLab>
+    <GameRoot Condition="'$(GameRoot)' == ''">D:\CS2</GameRoot>
+    <NoWarn>CS8981;CS9113</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(CS2RoadLab)\Port\RoadPort.csproj" />
+    <Reference Include="Unity.Mathematics"><HintPath>$(GameRoot)\Cities2_Data\Managed\Unity.Mathematics.dll</HintPath><Private>true</Private></Reference>
+  </ItemGroup>
+</Project>

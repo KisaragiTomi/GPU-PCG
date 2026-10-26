@@ -1,0 +1,949 @@
+// HLSL port of the Unity.Mathematics semantics and the Colossal.Mathematics subset that the
+// Cities: Skylines II road geometry uses (MathUtils, Bezier4x1/2/3, Bounds, Line2/Line3).
+// Functions keep the original evaluation order. Unity's min/max/clamp return values differ
+// from the HLSL intrinsics on NaN, so the U_ variants are used wherever the C# calls math.*.
+#pragma once
+
+#define CS_FLT_MAX 3.402823466e+38f
+#define CS_FLT_MIN_NORMAL 1.1754944e-38f
+#define CS_PI 3.14159265358979f
+
+// ---------------------------------------------------------------------------------------------
+// Unity.Mathematics semantics
+// ---------------------------------------------------------------------------------------------
+
+bool U_isnan(float x) { return (asuint(x) & 0x7fffffffu) > 0x7f800000u; }
+bool2 U_isnan(float2 x) { return bool2(U_isnan(x.x), U_isnan(x.y)); }
+bool3 U_isnan(float3 x) { return bool3(U_isnan(x.x), U_isnan(x.y), U_isnan(x.z)); }
+
+// math.min(x, y) = isnan(y) || x < y ? x : y (same as the D3D min); spelled out for clarity.
+float U_min(float x, float y) { return (U_isnan(y) || x < y) ? x : y; }
+float U_max(float x, float y) { return (U_isnan(y) || x > y) ? x : y; }
+float2 U_min(float2 x, float2 y) { return float2(U_min(x.x, y.x), U_min(x.y, y.y)); }
+float2 U_max(float2 x, float2 y) { return float2(U_max(x.x, y.x), U_max(x.y, y.y)); }
+float3 U_min(float3 x, float3 y) { return float3(U_min(x.x, y.x), U_min(x.y, y.y), U_min(x.z, y.z)); }
+float3 U_max(float3 x, float3 y) { return float3(U_max(x.x, y.x), U_max(x.y, y.y), U_max(x.z, y.z)); }
+float4 U_min(float4 x, float4 y) { return float4(U_min(x.x, y.x), U_min(x.y, y.y), U_min(x.z, y.z), U_min(x.w, y.w)); }
+float4 U_max(float4 x, float4 y) { return float4(U_max(x.x, y.x), U_max(x.y, y.y), U_max(x.z, y.z), U_max(x.w, y.w)); }
+int U_min(int x, int y) { return x < y ? x : y; }
+int U_max(int x, int y) { return x > y ? x : y; }
+
+// math.clamp(x, a, b) = max(a, min(b, x)); NaN clamps to b (HLSL clamp gives a).
+float U_clamp(float x, float a, float b) { return U_max(a, U_min(b, x)); }
+float2 U_clamp(float2 x, float2 a, float2 b) { return U_max(a, U_min(b, x)); }
+float3 U_clamp(float3 x, float3 a, float3 b) { return U_max(a, U_min(b, x)); }
+int U_clamp(int x, int a, int b) { return U_max(a, U_min(b, x)); }
+float U_saturate(float x) { return U_clamp(x, 0.0f, 1.0f); }
+float2 U_saturate(float2 x) { return U_clamp(x, (float2)0.0f, (float2)1.0f); }
+float3 U_saturate(float3 x) { return U_clamp(x, (float3)0.0f, (float3)1.0f); }
+float4 U_saturate(float4 x) { return float4(U_saturate(x.x), U_saturate(x.y), U_saturate(x.z), U_saturate(x.w)); }
+
+// math.lerp(x, y, s) = x + s * (y - x).
+float U_lerp(float x, float y, float s) { return x + s * (y - x); }
+float2 U_lerp(float2 x, float2 y, float s) { return x + s * (y - x); }
+float3 U_lerp(float3 x, float3 y, float s) { return x + s * (y - x); }
+float4 U_lerp(float4 x, float4 y, float s) { return x + s * (y - x); }
+float2 U_lerp(float2 x, float2 y, float2 s) { return x + s * (y - x); }
+float3 U_lerp(float3 x, float3 y, float3 s) { return x + s * (y - x); }
+float4 U_lerp(float4 x, float4 y, float4 s) { return x + s * (y - x); }
+float4 U_lerp(float x, float y, float4 s) { return x + s * (y - x); }
+
+float cmin(float2 v) { return U_min(v.x, v.y); }
+float cmin(float3 v) { return U_min(U_min(v.x, v.y), v.z); }
+float cmin(float4 v) { return U_min(U_min(v.x, v.y), U_min(v.z, v.w)); }
+float cmax(float2 v) { return U_max(v.x, v.y); }
+float cmax(float3 v) { return U_max(U_max(v.x, v.y), v.z); }
+float cmax(float4 v) { return U_max(U_max(v.x, v.y), U_max(v.z, v.w)); }
+float csum(float2 v) { return v.x + v.y; }
+float csum(float3 v) { return v.x + v.y + v.z; }
+float csum(float4 v) { return v.x + v.y + v.z + v.w; }
+
+float U_rsqrt(float x) { return 1.0f / sqrt(x); }
+float lengthsq(float2 v) { return dot(v, v); }
+float lengthsq(float3 v) { return dot(v, v); }
+float distancesq(float2 a, float2 b) { return lengthsq(b - a); }
+float distancesq(float3 a, float3 b) { return lengthsq(b - a); }
+float U_distance(float a, float b) { return abs(b - a); }
+float U_distance(float2 a, float2 b) { return sqrt(dot(b - a, b - a)); }
+float U_distance(float3 a, float3 b) { return sqrt(dot(b - a, b - a)); }
+float U_length(float2 v) { return sqrt(dot(v, v)); }
+float U_length(float3 v) { return sqrt(dot(v, v)); }
+
+float2 normalizesafe(float2 x, float2 defaultValue) { float l = dot(x, x); return l > CS_FLT_MIN_NORMAL ? x * U_rsqrt(l) : defaultValue; }
+float3 normalizesafe(float3 x, float3 defaultValue) { float l = dot(x, x); return l > CS_FLT_MIN_NORMAL ? x * U_rsqrt(l) : defaultValue; }
+float2 normalizesafe(float2 x) { return normalizesafe(x, (float2)0.0f); }
+float3 normalizesafe(float3 x) { return normalizesafe(x, (float3)0.0f); }
+
+// Transcendentals. Unity.Mathematics rounds System.Math (double) results to float, i.e. they are
+// correct to the last bit. GPU intrinsics only bound the absolute error and lose most digits for
+// small arguments (FitCurve's tan(x / 4) / tan(x / 2) on near-straight curves), so these are the
+// Cephes single-precision versions with a relative error of 1-2 ulp.
+static const float CS_DP1 = 0.78515625f;
+static const float CS_DP2 = 2.4187564849853515625e-4f;
+static const float CS_DP3 = 3.77489497744594108e-8f;
+static const float CS_FOPI = 1.27323954473516f;
+
+// Octant j (made even) and x reduced to [-pi/4, pi/4] (sinf / cosf / tanf range reduction).
+float CS_ReduceOctant(float x, out uint j)
+{
+	j = (uint)(CS_FOPI * x);
+	float y = (float)j;
+	if ((j & 1u) != 0u)
+	{
+		j += 1u;
+		y += 1.0f;
+	}
+	return ((x - y * CS_DP1) - y * CS_DP2) - y * CS_DP3;
+}
+
+float CS_SinPoly(float x, float z) { return ((-1.9515295891e-4f * z + 8.3321608736e-3f) * z - 1.6666654611e-1f) * z * x + x; }
+float CS_CosPoly(float z) { return ((2.443315711809948e-5f * z - 1.388731625493765e-3f) * z + 4.166664568298827e-2f) * z * z - 0.5f * z + 1.0f; }
+
+float U_sin(float xx)
+{
+	float sign = xx < 0.0f ? -1.0f : 1.0f;
+	uint j;
+	float x = CS_ReduceOctant(abs(xx), j);
+	j &= 7u;
+	if (j > 3u)
+	{
+		sign = -sign;
+		j -= 4u;
+	}
+	float z = x * x;
+	float y = (j == 1u || j == 2u) ? CS_CosPoly(z) : CS_SinPoly(x, z);
+	return sign < 0.0f ? -y : y;
+}
+
+float U_cos(float xx)
+{
+	float sign = 1.0f;
+	uint j;
+	float x = CS_ReduceOctant(abs(xx), j);
+	j &= 7u;
+	if (j > 3u)
+	{
+		j -= 4u;
+		sign = -sign;
+	}
+	if (j > 1u) sign = -sign;
+	float z = x * x;
+	float y = (j == 1u || j == 2u) ? CS_SinPoly(x, z) : CS_CosPoly(z);
+	return sign < 0.0f ? -y : y;
+}
+
+float U_tan(float xx)
+{
+	float x = abs(xx);
+	uint j;
+	float z = CS_ReduceOctant(x, j);
+	float zz = z * z;
+	float y = z;
+	if (x > 1.0e-4f)
+	{
+		y = (((((9.38540185543e-3f * zz + 3.11992232697e-3f) * zz + 2.44301354525e-2f) * zz + 5.34112807005e-2f) * zz + 1.33387994085e-1f) * zz
+			+ 3.33331568548e-1f) * zz * z + z;
+	}
+	if ((j & 2u) != 0u) y = -1.0f / y;
+	return xx < 0.0f ? -y : y;
+}
+
+float U_asin(float xx)
+{
+	float a = abs(xx);
+	if (a > 1.0f) return 0.0f;
+	float z;
+	if (a < 1.0e-4f)
+	{
+		z = a;
+	}
+	else
+	{
+		bool flag = a > 0.5f;
+		float x = a;
+		float zz = x * x;
+		if (flag)
+		{
+			zz = 0.5f * (1.0f - a);
+			x = sqrt(zz);
+		}
+		z = ((((4.2163199048e-2f * zz + 2.4181311049e-2f) * zz + 4.5470025998e-2f) * zz + 7.4953002686e-2f) * zz + 1.6666752422e-1f) * zz * x + x;
+		if (flag) z = 1.5707963267948966192f - (z + z);
+	}
+	return xx < 0.0f ? -z : z;
+}
+
+float U_acos(float x)
+{
+	if (x < -1.0f) return 0.0f;
+	if (x < -0.5f) return 3.141592653589793238f - 2.0f * U_asin(sqrt(0.5f * (1.0f + x)));
+	if (x > 1.0f) return 0.0f;
+	if (x > 0.5f) return 2.0f * U_asin(sqrt(0.5f * (1.0f - x)));
+	return 1.5707963267948966192f - U_asin(x);
+}
+
+float U_smoothstep(float xMin, float xMax, float x)
+{
+	float t = U_saturate((x - xMin) / (xMax - xMin));
+	return t * t * (3.0f - (2.0f * t));
+}
+
+void CS_Swap(inout float a, inout float b) { float t = a; a = b; b = t; }
+void CS_Swap(inout float2 a, inout float2 b) { float2 t = a; a = b; b = t; }
+
+// ---------------------------------------------------------------------------------------------
+// Colossal.Mathematics types
+// ---------------------------------------------------------------------------------------------
+
+struct Bounds1 { float min; float max; };
+struct Bounds2 { float2 min; float2 max; };
+struct Bounds3 { float3 min; float3 max; };
+struct Bezier4x1 { float a; float b; float c; float d; };
+struct Bezier4x2 { float2 a; float2 b; float2 c; float2 d; };
+struct Bezier4x3 { float3 a; float3 b; float3 c; float3 d; };
+struct Line2 { float2 a; float2 b; };
+struct Line2_Segment { float2 a; float2 b; };
+struct Line3 { float3 a; float3 b; };
+struct Line3_Segment { float3 a; float3 b; };
+struct Float3x4 { float3 c0; float3 c1; float3 c2; float3 c3; };
+struct Float4x4 { float4 c0; float4 c1; float4 c2; float4 c3; };
+
+Bounds1 Bounds1_Make(float mn, float mx) { Bounds1 r; r.min = mn; r.max = mx; return r; }
+Bounds2 Bounds2_Make(float2 mn, float2 mx) { Bounds2 r; r.min = mn; r.max = mx; return r; }
+Bounds3 Bounds3_Make(float3 mn, float3 mx) { Bounds3 r; r.min = mn; r.max = mx; return r; }
+Bezier4x1 Bezier4x1_Make(float a, float b, float c, float d) { Bezier4x1 r; r.a = a; r.b = b; r.c = c; r.d = d; return r; }
+Bezier4x2 Bezier4x2_Make(float2 a, float2 b, float2 c, float2 d) { Bezier4x2 r; r.a = a; r.b = b; r.c = c; r.d = d; return r; }
+Bezier4x3 Bezier4x3_Make(float3 a, float3 b, float3 c, float3 d) { Bezier4x3 r; r.a = a; r.b = b; r.c = c; r.d = d; return r; }
+Line2 Line2_Make(float2 a, float2 b) { Line2 r; r.a = a; r.b = b; return r; }
+Line2_Segment Line2_Segment_Make(float2 a, float2 b) { Line2_Segment r; r.a = a; r.b = b; return r; }
+Line3 Line3_Make(float3 a, float3 b) { Line3 r; r.a = a; r.b = b; return r; }
+Line3_Segment Line3_Segment_Make(float3 a, float3 b) { Line3_Segment r; r.a = a; r.b = b; return r; }
+
+// Bezier swizzle properties.
+Bezier4x1 Bezier_x(Bezier4x3 c) { return Bezier4x1_Make(c.a.x, c.b.x, c.c.x, c.d.x); }
+Bezier4x1 Bezier_y(Bezier4x3 c) { return Bezier4x1_Make(c.a.y, c.b.y, c.c.y, c.d.y); }
+Bezier4x1 Bezier_z(Bezier4x3 c) { return Bezier4x1_Make(c.a.z, c.b.z, c.c.z, c.d.z); }
+Bezier4x2 Bezier_xz(Bezier4x3 c) { return Bezier4x2_Make(c.a.xz, c.b.xz, c.c.xz, c.d.xz); }
+Bezier4x2 Bezier_xy(Bezier4x3 c) { return Bezier4x2_Make(c.a.xy, c.b.xy, c.c.xy, c.d.xy); }
+Bezier4x1 Bezier_x(Bezier4x2 c) { return Bezier4x1_Make(c.a.x, c.b.x, c.c.x, c.d.x); }
+Bezier4x1 Bezier_y(Bezier4x2 c) { return Bezier4x1_Make(c.a.y, c.b.y, c.c.y, c.d.y); }
+float4 Bezier_abcd(Bezier4x1 c) { return float4(c.a, c.b, c.c, c.d); }
+float4 Bezier_ab(Bezier4x2 c) { return float4(c.a, c.b); }
+float4 Bezier_cd(Bezier4x2 c) { return float4(c.c, c.d); }
+void Bezier_set_xz(inout Bezier4x3 c, Bezier4x2 v) { c.a.xz = v.a; c.b.xz = v.b; c.c.xz = v.c; c.d.xz = v.d; }
+
+// Bounds operators.
+Bounds1 Bounds_Or(Bounds1 l, Bounds1 r) { return Bounds1_Make(U_min(l.min, r.min), U_max(l.max, r.max)); }
+Bounds1 Bounds_Or(Bounds1 l, float r) { return Bounds1_Make(U_min(l.min, r), U_max(l.max, r)); }
+Bounds2 Bounds_Or(Bounds2 l, Bounds2 r) { return Bounds2_Make(U_min(l.min, r.min), U_max(l.max, r.max)); }
+Bounds3 Bounds_Or(Bounds3 l, Bounds3 r) { return Bounds3_Make(U_min(l.min, r.min), U_max(l.max, r.max)); }
+Bounds3 Bounds_Or(Bounds3 l, float3 r) { return Bounds3_Make(U_min(l.min, r), U_max(l.max, r)); }
+Bounds1 Bounds_Add(Bounds1 l, float r) { return Bounds1_Make(l.min + r, l.max + r); }
+Bounds3 Bounds_Add(Bounds3 l, float3 r) { return Bounds3_Make(l.min + r, l.max + r); }
+
+// ---------------------------------------------------------------------------------------------
+// MathUtils
+// ---------------------------------------------------------------------------------------------
+
+Bezier4x1 MU_Invert(Bezier4x1 c) { return Bezier4x1_Make(c.d, c.c, c.b, c.a); }
+Bezier4x2 MU_Invert(Bezier4x2 c) { return Bezier4x2_Make(c.d, c.c, c.b, c.a); }
+Bezier4x3 MU_Invert(Bezier4x3 c) { return Bezier4x3_Make(c.d, c.c, c.b, c.a); }
+Bounds1 MU_Invert(Bounds1 b) { return Bounds1_Make(b.max, b.min); }
+
+float MU_Position(Bezier4x1 curve, float t)
+{
+	float3 f = float3(t, 1.0f - t, 3.0f * t);
+	float4 y = f.yzzx * f.yyxx * f.yyyx;
+	return dot(Bezier_abcd(curve), y);
+}
+
+float2 MU_Position(Bezier4x2 curve, float t)
+{
+	float3 f = float3(t, 1.0f - t, 3.0f * t);
+	float4 f2 = f.yzzx * f.yyxx * f.yyyx;
+	float4 f3 = Bezier_ab(curve) * f2.xxyy + Bezier_cd(curve) * f2.zzww;
+	return f3.xy + f3.zw;
+}
+
+float3 MU_Position(Bezier4x3 curve, float t)
+{
+	float3 f = float3(t, 1.0f - t, 3.0f * t);
+	float4 f2 = f.yzzx * f.yyxx * f.yyyx;
+	return curve.a * f2.x + curve.b * f2.y + curve.c * f2.z + curve.d * f2.w;
+}
+
+float MU_Tangent(Bezier4x1 curve, float t)
+{
+	float4 f = float4(t, 1.0f - t, 3.0f * t, -t);
+	float4 y = f.yyxx * (float4(-1.0f, 1.0f, 2.0f, 0.0f) - f.wzzw) * 3.0f;
+	return dot(Bezier_abcd(curve), y);
+}
+
+float2 MU_Tangent(Bezier4x2 curve, float t)
+{
+	float4 f = float4(t, 1.0f - t, 3.0f * t, -t);
+	float4 f2 = f.yyxx * (float4(-1.0f, 1.0f, 2.0f, 0.0f) - f.wzzw) * 3.0f;
+	float4 f3 = Bezier_ab(curve) * f2.xxyy + Bezier_cd(curve) * f2.zzww;
+	return f3.xy + f3.zw;
+}
+
+float3 MU_Tangent(Bezier4x3 curve, float t)
+{
+	float4 f = float4(t, 1.0f - t, 3.0f * t, -t);
+	float4 f2 = f.yyxx * (float4(-1.0f, 1.0f, 2.0f, 0.0f) - f.wzzw) * 3.0f;
+	return curve.a * f2.x + curve.b * f2.y + curve.c * f2.z + curve.d * f2.w;
+}
+
+float2 MU_StartTangent(Bezier4x2 c) { return c.b - c.a; }
+float3 MU_StartTangent(Bezier4x3 c) { return c.b - c.a; }
+float2 MU_EndTangent(Bezier4x2 c) { return c.d - c.c; }
+float3 MU_EndTangent(Bezier4x3 c) { return c.d - c.c; }
+
+Bezier4x3 MU_StartReflect(Bezier4x3 curve)
+{
+	float3 f = curve.a * 2.0f;
+	return Bezier4x3_Make(curve.a, f - curve.b, f - curve.c, f - curve.d);
+}
+
+float MU_Length(Bezier4x2 curve)
+{
+	float num = 0.0f;
+	float2 x = curve.a;
+	for (int i = 1; i <= 16; i++)
+	{
+		float2 p = MU_Position(curve, (float)i / 16.0f);
+		num += U_distance(x, p);
+		x = p;
+	}
+	return num;
+}
+
+float MU_Length(Bezier4x3 curve)
+{
+	float num = 0.0f;
+	float3 x = curve.a;
+	for (int i = 1; i <= 16; i++)
+	{
+		float3 p = MU_Position(curve, (float)i / 16.0f);
+		num += U_distance(x, p);
+		x = p;
+	}
+	return num;
+}
+
+float MU_Length(Bezier4x2 curve, Bounds1 t)
+{
+	float num = (t.max - t.min) / 16.0f;
+	float num2 = 0.0f;
+	float2 x = MU_Position(curve, t.min);
+	for (int i = 1; i <= 16; i++)
+	{
+		float2 p = MU_Position(curve, t.min + (float)i * num);
+		num2 += U_distance(x, p);
+		x = p;
+	}
+	return num2;
+}
+
+float MU_Length(Bezier4x3 curve, Bounds1 t)
+{
+	float num = (t.max - t.min) / 16.0f;
+	float num2 = 0.0f;
+	float3 x = MU_Position(curve, t.min);
+	for (int i = 1; i <= 16; i++)
+	{
+		float3 p = MU_Position(curve, t.min + (float)i * num);
+		num2 += U_distance(x, p);
+		x = p;
+	}
+	return num2;
+}
+
+Bounds1 MU_Bounds(float a, float b) { return Bounds1_Make(U_min(a, b), U_max(a, b)); }
+Bounds2 MU_Bounds(float2 a, float2 b) { return Bounds2_Make(U_min(a, b), U_max(a, b)); }
+Bounds3 MU_Bounds(float3 a, float3 b) { return Bounds3_Make(U_min(a, b), U_max(a, b)); }
+Bounds2 MU_Bounds(Line2_Segment ln) { return Bounds2_Make(U_min(ln.a, ln.b), U_max(ln.a, ln.b)); }
+float MU_Clamp(float position, Bounds1 bounds) { return U_clamp(position, bounds.min, bounds.max); }
+float MU_Center(Bounds1 b) { return U_lerp(b.min, b.max, 0.5f); }
+float2 MU_Center(Bounds2 b) { return U_lerp(b.min, b.max, 0.5f); }
+float3 MU_Center(Bounds3 b) { return U_lerp(b.min, b.max, 0.5f); }
+float MU_Size(Bounds1 b) { return b.max - b.min; }
+float2 MU_Size(Bounds2 b) { return b.max - b.min; }
+float3 MU_Size(Bounds3 b) { return b.max - b.min; }
+bool MU_Intersect(Bounds2 b1, Bounds2 b2) { return all(float4(b1.min, b2.min) <= float4(b2.max, b1.max)); }
+bool MU_Intersect(Bounds3 b1, Bounds3 b2) { return all(b1.min <= b2.max) && all(b2.min <= b1.max); }
+
+float2 MU_Min(Bezier4x2 c) { return U_min(U_min(c.a, c.b), U_min(c.c, c.d)); }
+float2 MU_Max(Bezier4x2 c) { return U_max(U_max(c.a, c.b), U_max(c.c, c.d)); }
+float3 MU_Min(Bezier4x3 c) { return U_min(U_min(c.a, c.b), U_min(c.c, c.d)); }
+float3 MU_Max(Bezier4x3 c) { return U_max(U_max(c.a, c.b), U_max(c.c, c.d)); }
+Bounds2 MU_Bounds(Bezier4x2 c) { return Bounds2_Make(MU_Min(c), MU_Max(c)); }
+Bounds3 MU_Bounds(Bezier4x3 c) { return Bounds3_Make(MU_Min(c), MU_Max(c)); }
+
+// ClampLength(curve, ref t, ref length): length becomes the measured length when it falls short.
+bool MU_ClampLength(Bezier4x2 curve, inout Bounds1 t, inout float length)
+{
+	if (length == 0.0f)
+	{
+		t.max = t.min;
+		return true;
+	}
+	Bounds1 bounds = t;
+	float num = (t.max - t.min) / 16.0f;
+	float num2 = 0.0f;
+	float2 x = MU_Position(curve, t.min);
+	for (int i = 1; i <= 16; i++)
+	{
+		bounds.max = bounds.min + num;
+		float2 p = MU_Position(curve, bounds.max);
+		float num3 = num2 + U_distance(x, p);
+		if (num3 >= length)
+		{
+			bounds.max = U_lerp(bounds.min, bounds.max, (length - num2) / (num3 - num2));
+			t.max = MU_Clamp(bounds.max, MU_Bounds(t.min, t.max));
+			return true;
+		}
+		bounds.min = bounds.max;
+		x = p;
+		num2 = num3;
+	}
+	length = num2;
+	return false;
+}
+
+bool MU_ClampLength(Bezier4x3 curve, inout Bounds1 t, inout float length)
+{
+	if (length == 0.0f)
+	{
+		t.max = t.min;
+		return true;
+	}
+	Bounds1 bounds = t;
+	float num = (t.max - t.min) / 16.0f;
+	float num2 = 0.0f;
+	float3 x = MU_Position(curve, t.min);
+	for (int i = 1; i <= 16; i++)
+	{
+		bounds.max = bounds.min + num;
+		float3 p = MU_Position(curve, bounds.max);
+		float num3 = num2 + U_distance(x, p);
+		if (num3 >= length)
+		{
+			bounds.max = U_lerp(bounds.min, bounds.max, (length - num2) / (num3 - num2));
+			t.max = MU_Clamp(bounds.max, MU_Bounds(t.min, t.max));
+			return true;
+		}
+		bounds.min = bounds.max;
+		x = p;
+		num2 = num3;
+	}
+	length = num2;
+	return false;
+}
+
+// ClampLength(curve, ref t, float length): the by-value overload discards the measured length.
+bool MU_ClampLengthValue(Bezier4x2 curve, inout Bounds1 t, float length) { return MU_ClampLength(curve, t, length); }
+bool MU_ClampLengthValue(Bezier4x3 curve, inout Bounds1 t, float length) { return MU_ClampLength(curve, t, length); }
+
+bool MU_ClampLengthInverse(Bezier4x2 curve, inout Bounds1 t, inout float length)
+{
+	t = Bounds1_Make(t.max, t.min);
+	bool result = MU_ClampLength(curve, t, length);
+	t = Bounds1_Make(t.max, t.min);
+	return result;
+}
+
+bool MU_ClampLengthInverse(Bezier4x3 curve, inout Bounds1 t, inout float length)
+{
+	t = Bounds1_Make(t.max, t.min);
+	bool result = MU_ClampLength(curve, t, length);
+	t = Bounds1_Make(t.max, t.min);
+	return result;
+}
+
+bool MU_ClampLengthInverseValue(Bezier4x2 curve, inout Bounds1 t, float length) { return MU_ClampLengthInverse(curve, t, length); }
+bool MU_ClampLengthInverseValue(Bezier4x3 curve, inout Bounds1 t, float length) { return MU_ClampLengthInverse(curve, t, length); }
+
+Bezier4x3 MU_Lerp(Bezier4x3 c1, Bezier4x3 c2, float t)
+{
+	return Bezier4x3_Make(U_lerp(c1.a, c2.a, t), U_lerp(c1.b, c2.b, t), U_lerp(c1.c, c2.c, t), U_lerp(c1.d, c2.d, t));
+}
+
+Bezier4x3 MU_Lerp(Bezier4x3 c1, Bezier4x3 c2, Bezier4x1 t)
+{
+	return Bezier4x3_Make(U_lerp(c1.a, c2.a, t.a), U_lerp(c1.b, c2.b, t.b), U_lerp(c1.c, c2.c, t.c), U_lerp(c1.d, c2.d, t.d));
+}
+
+Bezier4x2 MU_Lerp(Bezier4x2 c1, Bezier4x2 c2, float t)
+{
+	return Bezier4x2_Make(U_lerp(c1.a, c2.a, t), U_lerp(c1.b, c2.b, t), U_lerp(c1.c, c2.c, t), U_lerp(c1.d, c2.d, t));
+}
+
+void MU_Divide(Bezier4x1 input, out Bezier4x1 output1, out Bezier4x1 output2, float t)
+{
+	float num = U_lerp(input.b, input.c, t);
+	output1.a = input.a;
+	output2.d = input.d;
+	output1.b = U_lerp(input.a, input.b, t);
+	output2.c = U_lerp(input.c, input.d, t);
+	output1.c = U_lerp(output1.b, num, t);
+	output2.b = U_lerp(num, output2.c, t);
+	output1.d = U_lerp(output1.c, output2.b, t);
+	output2.a = output1.d;
+}
+
+void MU_Divide(Bezier4x2 input, out Bezier4x2 output1, out Bezier4x2 output2, float t)
+{
+	float2 f = U_lerp(input.b, input.c, t);
+	output1.a = input.a;
+	output2.d = input.d;
+	output1.b = U_lerp(input.a, input.b, t);
+	output2.c = U_lerp(input.c, input.d, t);
+	output1.c = U_lerp(output1.b, f, t);
+	output2.b = U_lerp(f, output2.c, t);
+	output1.d = U_lerp(output1.c, output2.b, t);
+	output2.a = output1.d;
+}
+
+void MU_Divide(Bezier4x3 input, out Bezier4x3 output1, out Bezier4x3 output2, float t)
+{
+	float3 f = U_lerp(input.b, input.c, t);
+	output1.a = input.a;
+	output2.d = input.d;
+	output1.b = U_lerp(input.a, input.b, t);
+	output2.c = U_lerp(input.c, input.d, t);
+	output1.c = U_lerp(output1.b, f, t);
+	output2.b = U_lerp(f, output2.c, t);
+	output1.d = U_lerp(output1.c, output2.b, t);
+	output2.a = output1.d;
+}
+
+void MU_CutWeights(float2 t, out float4 f2, out float4 f3, out float4 f4, out float4 f5)
+{
+	float4 f = float4(t, 1.0f - t);
+	f2 = f.zzzw * f.zzww * f.zwww;
+	f3 = f.xxxy * f.zzww * f.zwww + f.zzzw * f.xxyy * f.zwww + f.zzzw * f.zzww * f.xyyy;
+	f4 = f.xxxy * f.xxyy * f.zwww + f.zzzw * f.xxyy * f.xyyy + f.xxxy * f.zzww * f.xyyy;
+	f5 = f.xxxy * f.xxyy * f.xyyy;
+}
+
+Bezier4x2 MU_Cut(Bezier4x2 curve, float2 t)
+{
+	float4 f2, f3, f4, f5;
+	MU_CutWeights(t, f2, f3, f4, f5);
+	float4 ab = Bezier_ab(curve);
+	float4 cd = Bezier_cd(curve);
+	float4 rab = float4(f2.xx, f3.yy) * ab + float4(f4.xx, f5.yy) * cd + float4(f3.xx, f2.yy) * ab.zwxy + float4(f5.xx, f4.yy) * cd.zwxy;
+	float4 rcd = float4(f2.zz, f3.ww) * ab + float4(f4.zz, f5.ww) * cd + float4(f3.zz, f2.ww) * ab.zwxy + float4(f5.zz, f4.ww) * cd.zwxy;
+	return Bezier4x2_Make(rab.xy, rab.zw, rcd.xy, rcd.zw);
+}
+
+Bezier4x3 MU_Cut(Bezier4x3 curve, float2 t)
+{
+	float4 f2, f3, f4, f5;
+	MU_CutWeights(t, f2, f3, f4, f5);
+	Bezier4x3 result;
+	result.a = f2.x * curve.a + f3.x * curve.b + f4.x * curve.c + f5.x * curve.d;
+	result.b = f2.y * curve.a + f3.y * curve.b + f4.y * curve.c + f5.y * curve.d;
+	result.c = f2.z * curve.a + f3.z * curve.b + f4.z * curve.c + f5.z * curve.d;
+	result.d = f2.w * curve.a + f3.w * curve.b + f4.w * curve.c + f5.w * curve.d;
+	return result;
+}
+
+Bezier4x3 MU_Cut(Bezier4x3 curve, Bounds1 bounds) { return MU_Cut(curve, float2(bounds.min, bounds.max)); }
+
+Line3_Segment MU_Cut(Line3 ln, float2 t)
+{
+	return Line3_Segment_Make(U_lerp(ln.a, ln.b, t.x), U_lerp(ln.a, ln.b, t.y));
+}
+
+// Line distance and intersection.
+float MU_Distance(Line2_Segment ln, float2 position, out float t)
+{
+	float2 f = ln.b - ln.a;
+	float2 y = position - ln.a;
+	float num = dot(f, f);
+	t = num != 0.0f ? U_saturate(dot(f, y) / num) : 0.0f;
+	return U_distance(f * t, y);
+}
+
+float MU_Distance(Line3_Segment ln, float3 position, out float t)
+{
+	float3 f = ln.b - ln.a;
+	float3 y = position - ln.a;
+	float num = dot(f, f);
+	t = num != 0.0f ? U_saturate(dot(f, y) / num) : 0.0f;
+	return U_distance(f * t, y);
+}
+
+bool MU_Intersect(Line2 line1, Line2 line2, out float2 t)
+{
+	float2 f = line1.b - line1.a;
+	float2 xy = line2.b - line2.a;
+	float2 f2 = line1.a - line2.a;
+	float2 f3 = f * xy.yx;
+	float4 f4 = f2.yxyx * float4(xy, f);
+	float num = f3.x - f3.y;
+	t = (f4.xz - f4.yw) / num;
+	return num != 0.0f;
+}
+
+bool MU_Intersect(Line2_Segment line1, Line2_Segment line2, out float2 t)
+{
+	float2 f = line1.b - line1.a;
+	float2 xy = line2.b - line2.a;
+	float2 f2 = line1.a - line2.a;
+	float2 f3 = f * xy.yx;
+	float4 f4 = f2.yxyx * float4(xy, f);
+	float num = f3.x - f3.y;
+	t = (f4.xz - f4.yw) / num;
+	return all(t >= 0.0f) && all(t <= 1.0f) && MU_Intersect(MU_Bounds(line1), MU_Bounds(line2));
+}
+
+bool MU_Intersect(Line2_Segment line1, Line2 line2, out float2 t)
+{
+	float2 f = line1.b - line1.a;
+	float2 xy = line2.b - line2.a;
+	float2 f2 = line1.a - line2.a;
+	float2 x = f * xy.yx;
+	float4 f3 = f2.yxyx * float4(xy, f);
+	float num = x.x - x.y;
+	t = (f3.xz - f3.yw) / num;
+	return (t.x >= 0.0f) && (t.x <= 1.0f) && (abs(num) >= csum(abs(x)) * 1.1920929e-07f);
+}
+
+// Intersect(Line1, position): t = (position - a) / (b - a).
+bool MU_IntersectLine1(float a, float b, float position, out float t)
+{
+	float num = b - a;
+	t = (position - a) / num;
+	return num != 0.0f;
+}
+
+// Intersect(Bezier4x1, position, out t, iterations): the original binary subdivision recursion,
+// walked iteratively in the same depth-first order (first hit wins).
+bool MU_Intersect(Bezier4x1 curve, float position, out float t, int iterations)
+{
+	Bezier4x1 stackCurve[16];
+	int stackDepth[16];
+	float stackOffset[16];
+	float stackScale[16];
+	int top = 0;
+	stackCurve[0] = curve;
+	stackDepth[0] = iterations;
+	stackOffset[0] = 0.0f;
+	stackScale[0] = 1.0f;
+	top = 1;
+	while (top > 0)
+	{
+		top--;
+		Bezier4x1 c = stackCurve[top];
+		int depth = stackDepth[top];
+		float offset = stackOffset[top];
+		float scale = stackScale[top];
+		float4 abcd = Bezier_abcd(c);
+		if (any(abcd <= position) && any(abcd >= position))
+		{
+			if (depth <= 0)
+			{
+				float lt;
+				if (MU_IntersectLine1(c.a, c.d, position, lt))
+				{
+					t = offset + U_saturate(lt) * scale;
+					return true;
+				}
+			}
+			else
+			{
+				Bezier4x1 o1, o2;
+				MU_Divide(c, o1, o2, 0.5f);
+				// Push the second half first so the first half is examined first.
+				stackCurve[top] = o2; stackDepth[top] = depth - 1; stackOffset[top] = offset + 0.5f * scale; stackScale[top] = 0.5f * scale; top++;
+				stackCurve[top] = o1; stackDepth[top] = depth - 1; stackOffset[top] = offset; stackScale[top] = 0.5f * scale; top++;
+			}
+		}
+	}
+	t = 0.0f;
+	return false;
+}
+
+// Intersect(Bezier4x2, Line2.Segment, out t, iterations), iterative depth-first.
+bool MU_Intersect(Bezier4x2 curve, Line2_Segment ln, out float2 t, int iterations)
+{
+	Bezier4x2 stackCurve[16];
+	int stackDepth[16];
+	float stackOffset[16];
+	float stackScale[16];
+	int top = 1;
+	stackCurve[0] = curve;
+	stackDepth[0] = iterations;
+	stackOffset[0] = 0.0f;
+	stackScale[0] = 1.0f;
+	while (top > 0)
+	{
+		top--;
+		Bezier4x2 c = stackCurve[top];
+		int depth = stackDepth[top];
+		float offset = stackOffset[top];
+		float scale = stackScale[top];
+		float4 x = float4(c.a, ln.a);
+		float4 y = float4(c.b, ln.b);
+		float4 x2 = float4(c.c, ln.a);
+		float4 y2 = float4(c.d, ln.b);
+		float4 f = U_min(U_min(x, y), U_min(x2, y2));
+		float4 f2 = U_max(U_max(x, y), U_max(x2, y2));
+		if (all(f <= f2.zwxy))
+		{
+			if (depth <= 0)
+			{
+				float2 lt;
+				if (MU_Intersect(Line2_Make(c.a, c.d), Line2_Make(ln.a, ln.b), lt))
+				{
+					float2 f3 = U_lerp(c.a, c.d, lt.x);
+					if (all(f3.xyxy >= f) && all(f3.xyxy <= f2))
+					{
+						lt = U_saturate(lt);
+						t = float2(offset + lt.x * scale, lt.y);
+						return true;
+					}
+				}
+			}
+			else
+			{
+				Bezier4x2 o1, o2;
+				MU_Divide(c, o1, o2, 0.5f);
+				stackCurve[top] = o2; stackDepth[top] = depth - 1; stackOffset[top] = offset + 0.5f * scale; stackScale[top] = 0.5f * scale; top++;
+				stackCurve[top] = o1; stackDepth[top] = depth - 1; stackOffset[top] = offset; stackScale[top] = 0.5f * scale; top++;
+			}
+		}
+	}
+	t = (float2)0.0f;
+	return false;
+}
+
+// Intersect(Bezier4x2, Bezier4x2, out t, iterations): four-way subdivision, children visited
+// (1,3) (1,4) (2,3) (2,4) as in the recursion.
+bool MU_Intersect(Bezier4x2 curve1, Bezier4x2 curve2, out float2 t, int iterations)
+{
+	Bezier4x2 stackA[24];
+	Bezier4x2 stackB[24];
+	int stackDepth[24];
+	float2 stackOffset[24];
+	float stackScale[24];
+	int top = 1;
+	stackA[0] = curve1;
+	stackB[0] = curve2;
+	stackDepth[0] = iterations;
+	stackOffset[0] = (float2)0.0f;
+	stackScale[0] = 1.0f;
+	while (top > 0)
+	{
+		top--;
+		Bezier4x2 c1 = stackA[top];
+		Bezier4x2 c2 = stackB[top];
+		int depth = stackDepth[top];
+		float2 offset = stackOffset[top];
+		float scale = stackScale[top];
+		float4 x = float4(c1.a, c2.a);
+		float4 y = float4(c1.b, c2.b);
+		float4 x2 = float4(c1.c, c2.c);
+		float4 y2 = float4(c1.d, c2.d);
+		float4 f = U_min(U_min(x, y), U_min(x2, y2));
+		float4 f2 = U_max(U_max(x, y), U_max(x2, y2));
+		if (all(f <= f2.zwxy))
+		{
+			if (depth <= 0)
+			{
+				float2 lt;
+				if (MU_Intersect(Line2_Make(c1.a, c1.d), Line2_Make(c2.a, c2.d), lt))
+				{
+					float2 f3 = U_lerp(c1.a, c1.d, lt.x);
+					if (all(f3.xyxy >= f) && all(f3.xyxy <= f2))
+					{
+						t = offset + U_saturate(lt) * scale;
+						return true;
+					}
+				}
+			}
+			else
+			{
+				Bezier4x2 o1, o2, o3, o4;
+				MU_Divide(c1, o1, o2, 0.5f);
+				MU_Divide(c2, o3, o4, 0.5f);
+				float h = 0.5f * scale;
+				stackA[top] = o2; stackB[top] = o4; stackDepth[top] = depth - 1; stackOffset[top] = offset + float2(h, h); stackScale[top] = h; top++;
+				stackA[top] = o2; stackB[top] = o3; stackDepth[top] = depth - 1; stackOffset[top] = offset + float2(h, 0.0f); stackScale[top] = h; top++;
+				stackA[top] = o1; stackB[top] = o4; stackDepth[top] = depth - 1; stackOffset[top] = offset + float2(0.0f, h); stackScale[top] = h; top++;
+				stackA[top] = o1; stackB[top] = o3; stackDepth[top] = depth - 1; stackOffset[top] = offset; stackScale[top] = h; top++;
+			}
+		}
+	}
+	t = (float2)0.0f;
+	return false;
+}
+
+float MU_Distance(Bezier4x2 curve, float2 position, out float t)
+{
+	float num = CS_FLT_MAX;
+	t = 0.0f;
+	float start = 0.0f;
+	float2 a = curve.a;
+	for (int i = 1; i <= 16; i++)
+	{
+		float num2 = (float)i / 16.0f;
+		float2 p = MU_Position(curve, num2);
+		float t2;
+		float num3 = MU_Distance(Line2_Segment_Make(a, p), position, t2);
+		if (num3 < num)
+		{
+			num = num3;
+			t = U_lerp(start, num2, t2);
+		}
+		start = num2;
+		a = p;
+	}
+	float num4 = 1.0f / 32.0f;
+	for (int j = 0; j < 4; j++)
+	{
+		float2 b = MU_Position(curve, U_max(0.0f, t - num4));
+		float2 a2 = MU_Position(curve, t);
+		float2 b2 = MU_Position(curve, U_min(1.0f, t + num4));
+		float t3;
+		float num5 = MU_Distance(Line2_Segment_Make(a2, b), position, t3);
+		float t4;
+		float num6 = MU_Distance(Line2_Segment_Make(a2, b2), position, t4);
+		if (num5 < num6)
+		{
+			t = U_max(0.0f, t - num4 * t3);
+			num = num5;
+		}
+		else
+		{
+			t = U_min(1.0f, t + num4 * t4);
+			num = num6;
+		}
+		num4 *= 0.5f;
+	}
+	return num;
+}
+
+float MU_Distance(Bezier4x3 curve, float3 position, float2 range, out float t)
+{
+	float num = CS_FLT_MAX;
+	t = range.x;
+	float start = range.x;
+	float3 a = curve.a;
+	for (int i = 1; i <= 16; i++)
+	{
+		float num2 = U_lerp(range.x, range.y, (float)i / 16.0f);
+		float3 p = MU_Position(curve, num2);
+		float t2;
+		float num3 = MU_Distance(Line3_Segment_Make(a, p), position, t2);
+		if (num3 < num)
+		{
+			num = num3;
+			t = U_lerp(start, num2, t2);
+		}
+		start = num2;
+		a = p;
+	}
+	float num4 = cmin(range);
+	float num5 = cmax(range);
+	float num6 = (num5 - num4) * (1.0f / 32.0f);
+	for (int j = 0; j < 4; j++)
+	{
+		float3 b = MU_Position(curve, U_max(num4, t - num6));
+		float3 a2 = MU_Position(curve, t);
+		float3 b2 = MU_Position(curve, U_min(num5, t + num6));
+		float t3;
+		float num7 = MU_Distance(Line3_Segment_Make(a2, b), position, t3);
+		float t4;
+		float num8 = MU_Distance(Line3_Segment_Make(a2, b2), position, t4);
+		if (num7 < num8)
+		{
+			t = U_max(num4, t - num6 * t3);
+			num = num7;
+		}
+		else
+		{
+			t = U_min(num5, t + num6 * t4);
+			num = num8;
+		}
+		num6 *= 0.5f;
+	}
+	return num;
+}
+
+float MU_Distance(Bezier4x3 curve, float3 position, out float t) { return MU_Distance(curve, position, float2(0.0f, 1.0f), t); }
+
+Bounds3 MU_TightBounds(Bezier4x3 curve)
+{
+	float3 f = -6.0f * curve.a;
+	float3 f2 = f + 18.0f * curve.b - 18.0f * curve.c + 6.0f * curve.d;
+	float3 f3 = f + 12.0f * curve.b - 6.0f * curve.c;
+	float3 f4 = f + 6.0f * curve.b;
+	float3 f5 = sqrt(f3 * f3 - f2 * f4);
+	float3 f6 = U_saturate((f3 + f5) / f2);
+	float3 f7 = U_saturate((f3 - f5) / f2);
+	// A symmetric curve (b = c, a = d) has f2 = 0 in exact arithmetic. The C# reference rounds it to a
+	// few ulps and still lands on the extremum f4 / (2 f3), the limit of the formula; computed exactly
+	// it is 0 / 0 and the bulge is lost. Use the limit when f2 is exactly zero.
+	float3 linearRoot = U_saturate(f4 / (2.0f * f3));
+	f6 = select(f2 == 0.0f, linearRoot, f6);
+	f7 = select(f2 == 0.0f, linearRoot, f7);
+	f2 = float3(MU_Position(Bezier_x(curve), f6.x), MU_Position(Bezier_y(curve), f6.y), MU_Position(Bezier_z(curve), f6.z));
+	f3 = float3(MU_Position(Bezier_x(curve), f7.x), MU_Position(Bezier_y(curve), f7.y), MU_Position(Bezier_z(curve), f7.z));
+	float3 mn = U_min(U_min(curve.a, curve.d), U_min(f2, f3));
+	float3 mx = U_max(U_max(curve.a, curve.d), U_max(f2, f3));
+	return Bounds3_Make(mn, mx);
+}
+
+float3 MU_Normalize(float3 value1, float2 value2)
+{
+	float num = dot(value2, value2);
+	return num > CS_FLT_MIN_NORMAL ? value1 * U_rsqrt(num) : (float3)0.0f;
+}
+
+bool MU_TryNormalize(inout float2 value)
+{
+	float num = dot(value, value);
+	bool flag = num > CS_FLT_MIN_NORMAL;
+	value = flag ? value * U_rsqrt(num) : (float2)0.0f;
+	return flag;
+}
+
+bool MU_TryNormalize(inout float3 value)
+{
+	float num = dot(value, value);
+	bool flag = num > CS_FLT_MIN_NORMAL;
+	value = flag ? value * U_rsqrt(num) : (float3)0.0f;
+	return flag;
+}
+
+bool MU_TryNormalize(inout float2 value, float newLength)
+{
+	float num = dot(value, value);
+	bool flag = num > CS_FLT_MIN_NORMAL;
+	value = flag ? value * (newLength * U_rsqrt(num)) : (float2)0.0f;
+	return flag;
+}
+
+float2 MU_Left(float2 forward) { return float2(-forward.y, forward.x); }
+float2 MU_Right(float2 forward) { return float2(forward.y, -forward.x); }
+
+float MU_RotationAngleRight(float2 fromVector, float2 toVector)
+{
+	float num = U_acos(U_clamp(dot(fromVector, toVector), -1.0f, 1.0f));
+	return dot(MU_Right(fromVector), toVector) < 0.0f ? CS_PI * 2.0f - num : num;
+}
+
+float MU_RotationAngleLeft(float2 fromVector, float2 toVector)
+{
+	float num = U_acos(U_clamp(dot(fromVector, toVector), -1.0f, 1.0f));
+	return dot(MU_Left(fromVector), toVector) < 0.0f ? CS_PI * 2.0f - num : num;
+}
+
+float2 MU_RotateRight(float2 v, float angle) { return v * U_cos(angle) + MU_Right(v) * U_sin(angle); }
+float2 MU_RotateLeft(float2 v, float angle) { return v * U_cos(angle) + MU_Left(v) * U_sin(angle); }
+
+float3 MU_Tangent(Line3_Segment ln) { return ln.b - ln.a; }

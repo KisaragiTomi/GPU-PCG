@@ -1,0 +1,138 @@
+// HLSL port of Game.Net.NetUtils curve construction (Cities: Skylines II, decompiled).
+#pragma once
+
+#include "CSRoadMath.ush"
+
+Line2 Line3_xz(Line3 ln) { return Line2_Make(ln.a.xz, ln.b.xz); }
+
+Bezier4x3 NetUtils_StraightCurve(float3 startPos, float3 endPos)
+{
+	Bezier4x3 r;
+	r.a = startPos;
+	r.b = U_lerp(startPos, endPos, 1.0f / 3.0f);
+	r.c = U_lerp(startPos, endPos, 2.0f / 3.0f);
+	r.d = endPos;
+	return r;
+}
+
+Bezier4x3 NetUtils_FitCurve(Line3_Segment startLine, Line3_Segment endLine)
+{
+	float3 f = MU_Tangent(startLine);
+	float3 f2 = MU_Tangent(endLine);
+	float num = U_length(f.xz);
+	float num2 = U_length(f2.xz);
+	if (num != 0.0f)
+	{
+		f /= num;
+	}
+	else
+	{
+		f.xz = endLine.b.xz - startLine.a.xz;
+		num = U_length(f.xz);
+		if (num != 0.0f) f /= num;
+	}
+	if (num2 != 0.0f)
+	{
+		f2 /= num2;
+	}
+	else
+	{
+		f2.xz = startLine.b.xz - endLine.a.xz;
+		num2 = U_length(f2.xz);
+		if (num2 != 0.0f) f2 /= num2;
+	}
+	f.y = U_clamp(f.y, -1.0f, 1.0f);
+	f2.y = U_clamp(f2.y, -1.0f, 1.0f);
+	float num3 = U_acos(U_saturate(-dot(f.xz, f2.xz)));
+	float num4 = U_tan(num3 / 2.0f);
+	float num5 = (num + num2) * (1.0f / 6.0f);
+	num5 = !(num4 >= 0.0001f) ? num5 * 2.0f : num5 * (4.0f * U_tan(num3 / 4.0f) / num4);
+	Bezier4x3 r;
+	r.a = startLine.a;
+	r.b = startLine.a + f * U_min(num, num5);
+	r.c = endLine.a + f2 * U_min(num2, num5);
+	r.d = endLine.a;
+	return r;
+}
+
+Bezier4x3 NetUtils_FitCurve(float3 startPos, float3 startTangent, float3 endTangent, float3 endPos)
+{
+	float num = U_distance(startPos.xz, endPos.xz);
+	Line3 ln = Line3_Make(startPos, startPos + startTangent);
+	Line3 line2 = Line3_Make(endPos, endPos - endTangent);
+	float2 start;
+	bool bHit = MU_Intersect(Line3_xz(ln), Line3_xz(line2), start);
+	start = !bHit ? (float2)(num * 0.75f) : U_clamp(start, (float2)(num * 0.01f), (float2)num);
+	float num2 = dot(startTangent.xz, endTangent.xz);
+	if (num2 > 0.0f)
+	{
+		start = U_lerp(start, (float2)(num / sqrt(2.0f * num2 + 2.0f)), U_min(1.0f, num2 * num2));
+	}
+	else if (num2 < 0.0f)
+	{
+		start = U_lerp(start, (float2)(num * 1.2071068f), U_min(1.0f, num2 * num2));
+	}
+	return NetUtils_FitCurve(MU_Cut(ln, float2(0.0f, start.x)), MU_Cut(line2, float2(0.0f, start.y)));
+}
+
+Bezier4x3 NetUtils_FitCurve(float3 startPos, float3 startTangent, float3 middlePos, float3 endTangent, float3 endPos)
+{
+	Bezier4x3 b = NetUtils_FitCurve(startPos, startTangent, endTangent, endPos);
+	float3 f = middlePos - MU_Position(b, 0.5f);
+	float2 f2 = float2(dot(startTangent.xz, f.xz), dot(endTangent.xz, f.xz));
+	float2 f3 = f2 * dot(startTangent.xz, endTangent.xz);
+	f2 *= abs(f2) / U_max((float2)1e-06f, 0.375f * (abs(f2) + abs(f3.yx)));
+	b.b += startTangent * U_max(f2.x, U_min(0.0f, 1.0f - U_distance(b.a.xz, b.b.xz)));
+	b.c += endTangent * U_min(f2.y, U_max(0.0f, U_distance(b.d.xz, b.c.xz) - 1.0f));
+	return b;
+}
+
+Bezier4x3 NetUtils_OffsetCurveLeftSmooth(Bezier4x3 curve, float2 offset)
+{
+	float3 value = MU_StartTangent(curve);
+	float3 value2 = MU_Tangent(curve, 0.5f);
+	float3 value3 = MU_EndTangent(curve);
+	value = MU_Normalize(value, value.xz);
+	value2 = MU_Normalize(value2, value2.xz);
+	value3 = MU_Normalize(value3, value3.xz);
+	value.y = U_clamp(value.y, -1.0f, 1.0f);
+	value3.y = U_clamp(value3.y, -1.0f, 1.0f);
+	float3 a = curve.a;
+	float3 middlePos = MU_Position(curve, 0.5f);
+	float3 d = curve.d;
+	float4 f = float4(-offset, offset);
+	a.xz += value.zx * f.xz;
+	middlePos.xz += value2.zx * (f.xz + f.yw) * 0.5f;
+	d.xz += value3.zx * f.yw;
+	return NetUtils_FitCurve(a, value, middlePos, value3, d);
+}
+
+Bezier4x3 NetUtils_OffsetCurveLeftSmooth(Bezier4x3 curve, float offset) { return NetUtils_OffsetCurveLeftSmooth(curve, (float2)offset); }
+
+float NetUtils_FindMiddleTangentPos(Bezier4x2 curve, float2 offset)
+{
+	float num = U_lerp(offset.x, offset.y, 0.5f);
+	float num2 = num;
+	float2 value = MU_Tangent(curve, offset.x);
+	float2 value2 = MU_Tangent(curve, offset.y);
+	if (!MU_TryNormalize(value) || !MU_TryNormalize(value2)) return num;
+	float2 f = offset;
+	for (int i = 0; i < 24; i++)
+	{
+		float2 value3 = MU_Tangent(curve, num2);
+		if (!MU_TryNormalize(value3)) break;
+		float num3 = distancesq(value, value3);
+		float num4 = distancesq(value2, value3);
+		if (num3 < num4)
+		{
+			f.x = num2;
+		}
+		else
+		{
+			if (!(num3 > num4)) break;
+			f.y = num2;
+		}
+		num2 = U_lerp(f.x, f.y, 0.5f);
+	}
+	return U_lerp(num2, num, U_saturate(0.5f + dot(value, value2) * 0.5f));
+}

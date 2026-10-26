@@ -1,0 +1,1356 @@
+// HLSL port of the node side of GeometrySystem (Cities: Skylines II, decompiled):
+// InitializeNodeGeometryJob, FlattenNodeGeometryJob, FinishEdgeGeometryJob, CalculateNodeGeometryJob,
+// CalculateIntersectionGeometryJob, CopyNodeGeometryJob and UpdateNodeGeometryJob.
+// A built network has no Temp / Hidden / Orphan entities and no sub-objects, so those branches
+// are reduced to what the C# port (RoadWorld.Build) executes.
+#pragma once
+
+#include "CSRoadGeometryCommon.ush"
+
+// FlattenNodeGeometryJob keeps the merging edges of one node in a NativeList.
+#define CSROAD_MAX_NODE_EDGES 16
+
+Bounds1 SampleTerrainCurve(Bezier4x3 curve)
+{
+	Bounds1 result = Bounds1_Make(CS_FLT_MAX, -CS_FLT_MAX);
+	for (int i = 0; i <= 8; i++) result = Bounds_Or(result, TerrainUtils_SampleHeight(MU_Position(curve, (float)i * 0.125f)));
+	return result;
+}
+
+// ---------------------------------------------------------------------------------------------
+// InitializeNodeGeometryJob (per node)
+// ---------------------------------------------------------------------------------------------
+
+void InitializeNodeGeometry(int node)
+{
+	Node node2 = NodeData[node];
+	precise NodeGeometry value = NodeGeometryRW[node];
+	NetGeometryData netGeometryData = GetPrefabGeometry(node);
+	float2 f = 0.0f;
+	int num = 0;
+	float2 f2 = 0.0f;
+	int num2 = 0;
+	bool flag2 = false;
+	bool flag3 = false;
+	bool flag4 = false;
+	// m_Loaded is set for a built network, so flag5 (keep the heights of a node whose edges did not update) stays false.
+	bool flag5 = false;
+	EdgeIterator edgeIterator = EdgeIterator_Create(Entity_Null, node, false);
+	EdgeIteratorValue value2;
+	while (EdgeIterator_GetNext(edgeIterator, value2))
+	{
+		NetGeometryData netGeometryData2 = GetPrefabGeometry(value2.m_Edge);
+		if ((netGeometryData.m_MergeLayers & netGeometryData2.m_MergeLayers) == 0u) continue;
+		Composition composition = CompositionData[value2.m_Edge];
+		NetCompositionData netCompositionData = GetComposition(value2.m_End ? composition.m_EndNode : composition.m_StartNode);
+		flag2 = flag2 || (netCompositionData.m_Flags.m_General & CompositionFlags_General_Roundabout) != 0u;
+		flag3 = flag3 || (netCompositionData.m_Flags.m_General & CompositionFlags_General_LevelCrossing) != 0u;
+		flag4 = flag4 || (netCompositionData.m_Flags.m_General & CompositionFlags_General_FixedNodeSize) != 0u;
+		bool flag6 = false;
+		if ((netGeometryData2.m_Flags & GeometryFlags_SmoothElevation) == 0u)
+		{
+			NetCompositionData netCompositionData2 = GetComposition(composition.m_Edge);
+			uint sideMask = CompositionFlags_Side_Raised | CompositionFlags_Side_Lowered;
+			flag6 = (netCompositionData2.m_Flags.m_General & (CompositionFlags_General_Elevated | CompositionFlags_General_Tunnel)) == 0u;
+			flag6 = flag6 && ((netCompositionData2.m_Flags.m_Left & sideMask) == 0u || (netCompositionData2.m_Flags.m_Right & sideMask) == 0u);
+			flag6 = flag6 && !HasComponent(value2.m_Edge, COMPONENT_OWNER);
+			if (!flag6) continue;
+		}
+		Curve curve = CurveData[value2.m_Edge];
+		if (value2.m_End) curve.m_Bezier = MU_Invert(curve.m_Bezier);
+		float num3 = U_distance(curve.m_Bezier.b.xz, curve.m_Bezier.a.xz);
+		if (num3 >= 0.1f)
+		{
+			if (flag6)
+			{
+				f2 += float2(curve.m_Bezier.b.y, 1.0f) / num3;
+				num2++;
+			}
+			else
+			{
+				f += float2(curve.m_Bezier.b.y, 1.0f) / num3;
+				num++;
+			}
+		}
+	}
+	if (flag2 || flag3 || flag4)
+	{
+		value.m_Position = node2.m_Position.y;
+		value.m_Flatness = 1.0f;
+		value.m_Offset = 0.0f;
+	}
+	else if (num >= 2)
+	{
+		value.m_Position = U_lerp(node2.m_Position.y, f.x / f.y, 0.5f);
+		value.m_Flatness = 0.0f;
+		value.m_Offset = 0.0f;
+	}
+	else if (num2 >= 2)
+	{
+		value.m_Position = node2.m_Position.y;
+		value.m_Flatness = 0.0f;
+		value.m_Offset = node2.m_Position.y - U_lerp(node2.m_Position.y, f2.x / f2.y, 0.5f);
+	}
+	else
+	{
+		value.m_Position = node2.m_Position.y;
+		value.m_Flatness = 0.0f;
+		value.m_Offset = 0.0f;
+	}
+	value.m_Bounds.min.x = flag5 ? 1.0f : 0.0f;
+	NodeGeometryRW[node] = value;
+}
+
+// ---------------------------------------------------------------------------------------------
+// FlattenNodeGeometryJob (per node)
+// ---------------------------------------------------------------------------------------------
+
+void FlattenNodeGeometry(int node)
+{
+	NodeGeometry nodeGeometry = NodeGeometryRW[node];
+	if (nodeGeometry.m_Bounds.min.x != 0.0f) return;
+	precise GeometrySystem_EdgeData nativeList[CSROAD_MAX_NODE_EDGES];
+	int count = 0;
+	EdgeIterator edgeIterator = EdgeIterator_Create(Entity_Null, node, false);
+	EdgeIteratorValue value;
+	while (EdgeIterator_GetNext(edgeIterator, value))
+	{
+		NetGeometryData netGeometryData = GetPrefabGeometry(value.m_Edge);
+		if (netGeometryData.m_MergeLayers != Layer_None && count < CSROAD_MAX_NODE_EDGES)
+		{
+			EdgeGeometry edgeGeometry = EdgeGeometryRW[value.m_Edge];
+			GeometrySystem_EdgeData value2 = (GeometrySystem_EdgeData)0;
+			value2.m_Left = value.m_End ? edgeGeometry.m_End.m_Left.d : edgeGeometry.m_Start.m_Right.a;
+			value2.m_Right = value.m_End ? edgeGeometry.m_End.m_Right.d : edgeGeometry.m_Start.m_Left.a;
+			value2.m_Layers = netGeometryData.m_MergeLayers;
+			value2.m_Entity = value.m_Edge;
+			value2.m_MaxSlope = netGeometryData.m_MaxSlopeSteepness;
+			value2.m_IsEnd = value.m_End ? 1u : 0u;
+			value2.m_IsTemp = 0u;
+			nativeList[count] = value2;
+			count++;
+		}
+	}
+	// The chunk is never Temp, so only the permanent branch runs and math.select(float7, 0, flag != isTemp) keeps float7.
+	bool flag4 = false;
+	for (int k = 0; k < 100; k++)
+	{
+		bool flag5 = false;
+		for (int l = 1; l < count; l++)
+		{
+			for (int m = 0; m < l; m++)
+			{
+				if ((nativeList[l].m_Layers & nativeList[m].m_Layers) == 0u) continue;
+				float3 f = nativeList[m].m_Right - nativeList[l].m_Left;
+				float3 f2 = nativeList[m].m_Left - nativeList[l].m_Right;
+				float2 f3 = float2(lengthsq(f.xz), lengthsq(f2.xz));
+				float2 f4 = float2(f.y, f2.y);
+				float num = nativeList[l].m_MaxSlope + nativeList[m].m_MaxSlope;
+				if (any(f4 * f4 > f3 * (num * num * 1.0001f)))
+				{
+					f3 = sqrt(f3);
+					float2 f5 = abs(f4);
+					float2 f6 = U_max((float2)0.0f, f5 - f3 * num);
+					bool2 test = f4 >= 0.0f;
+					float num2;
+					if (test.x != test.y)
+					{
+						f6 = select(test, f6, -f6);
+						num2 = csum(f6) * 0.5f;
+					}
+					else
+					{
+						num2 = U_max(f6.x, f6.y);
+						num2 = test.x ? num2 : 0.0f - num2;
+					}
+					float2 f7;
+					if (num2 >= 0.0f)
+					{
+						f7.x = U_max(nativeList[l].m_Left.y, nativeList[l].m_Right.y);
+						f7.y = U_min(nativeList[m].m_Left.y, nativeList[m].m_Right.y);
+						f7 = nodeGeometry.m_Position - f7;
+						f7.x = U_max(0.0f, f7.x);
+						f7.y = U_min(0.0f, f7.y);
+					}
+					else
+					{
+						f7.x = U_min(nativeList[l].m_Left.y, nativeList[l].m_Right.y);
+						f7.y = U_max(nativeList[m].m_Left.y, nativeList[m].m_Right.y);
+						f7 = nodeGeometry.m_Position - f7;
+						f7.x = U_min(0.0f, f7.x);
+						f7.y = U_max(0.0f, f7.y);
+					}
+					f6 = f7 * U_min(1.0f, abs(num2) / U_max(0.001f, csum(abs(f7))));
+					nativeList[l].m_Changes.x = U_min(nativeList[l].m_Changes.x, f6.x);
+					nativeList[l].m_Changes.y = U_max(nativeList[l].m_Changes.y, f6.x);
+					nativeList[m].m_Changes.x = U_min(nativeList[m].m_Changes.x, f6.y);
+					nativeList[m].m_Changes.y = U_max(nativeList[m].m_Changes.y, f6.y);
+					flag5 = true;
+				}
+			}
+		}
+		if (!flag5) break;
+		for (int n = 0; n < count; n++)
+		{
+			float num3 = csum(nativeList[n].m_Changes);
+			nativeList[n].m_Left.y += num3;
+			nativeList[n].m_Right.y += num3;
+			nativeList[n].m_Changes = 0.0f;
+		}
+		flag4 = true;
+	}
+	if (flag4)
+	{
+		for (int num4 = 0; num4 < count; num4++)
+		{
+			GeometrySystem_EdgeData edgeData2 = nativeList[num4];
+			EdgeGeometry edgeGeometry3 = EdgeGeometryRW[edgeData2.m_Entity];
+			uint key2 = (uint)edgeData2.m_Entity * 2u + edgeData2.m_IsEnd;
+			precise float4 item2 = float4(edgeData2.m_Left.yy, edgeData2.m_Right.yy);
+			if (edgeData2.m_IsEnd != 0u)
+			{
+				item2.x += edgeGeometry3.m_End.m_Left.c.y - edgeGeometry3.m_End.m_Left.d.y;
+				item2.z += edgeGeometry3.m_End.m_Right.c.y - edgeGeometry3.m_End.m_Right.d.y;
+			}
+			else
+			{
+				item2.x += edgeGeometry3.m_Start.m_Right.b.y - edgeGeometry3.m_Start.m_Right.a.y;
+				item2.z += edgeGeometry3.m_Start.m_Left.b.y - edgeGeometry3.m_Start.m_Left.a.y;
+			}
+			// TryAdd: every (edge, end) key belongs to exactly one node, so there is never an earlier entry.
+			EdgeHeightMap[key2] = item2;
+			EdgeHeightMapValid[key2] = 1u;
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// FinishEdgeGeometryJob (per edge)
+// ---------------------------------------------------------------------------------------------
+
+void FEG_StraightenMiddleHeights(inout Bezier4x3 start, inout Bezier4x3 end)
+{
+	float4 f;
+	f.x = U_distance(start.b.xz, start.c.xz);
+	f.y = f.x + U_distance(start.c.xz, start.d.xz);
+	f.z = f.y + U_distance(end.a.xz, end.b.xz);
+	f.w = f.z + U_distance(end.b.xz, end.c.xz);
+	f = (f.w == 0.0f) ? (float4)0.0f : f / f.w;
+	float3 f2 = U_lerp((float3)start.b.y, (float3)end.c.y, f.xyz);
+	start.c.y = f2.x;
+	start.d.y = f2.y;
+	end.a.y = f2.y;
+	end.b.y = f2.z;
+}
+
+void FEG_LimitMiddleHeights(inout Bezier4x3 start, inout Bezier4x3 end, float maxSlope, float width)
+{
+	float num = MU_Length(Bezier_xz(start));
+	float num2 = MU_Length(Bezier_xz(end));
+	float num3 = num * maxSlope;
+	float num4 = num2 * maxSlope;
+	Bounds1 bounds = Bounds1_Make(U_max(start.a.y - num3, end.d.y - num4), U_min(start.a.y + num3, end.d.y + num4));
+	if (bounds.max < bounds.min)
+	{
+		float center = (bounds.min + bounds.max) * 0.5f;
+		bounds = Bounds1_Make(center, center);
+	}
+	else
+	{
+		float end2 = (bounds.min + bounds.max) * 0.5f;
+		float t = 1.0f / (0.5f * (num + num2) / U_max(0.01f, width) + 1.0f);
+		bounds.min = U_lerp(bounds.min, end2, t);
+		bounds.max = U_lerp(bounds.max, end2, t);
+	}
+	float num5 = MU_Clamp(start.d.y, bounds) - start.d.y;
+	start.c.y += num5;
+	start.d.y += num5;
+	end.a.y += num5;
+	end.b.y += num5;
+}
+
+void FinishEdgeGeometry(int entity)
+{
+	Composition composition = CompositionData[entity];
+	NetGeometryData netGeometryData = GetPrefabGeometry(entity);
+	NetCompositionData netCompositionData = GetComposition(composition.m_Edge);
+	precise EdgeGeometry value = EdgeGeometryRW[entity];
+	uint key = (uint)entity * 2u;
+	if (EdgeHeightMapValid[key] != 0u)
+	{
+		float4 item = EdgeHeightMap[key];
+		value.m_Start.m_Right.b.y = item.x;
+		value.m_Start.m_Right.a.y = item.y;
+		value.m_Start.m_Left.b.y = item.z;
+		value.m_Start.m_Left.a.y = item.w;
+	}
+	if (EdgeHeightMapValid[key + 1u] != 0u)
+	{
+		float4 item2 = EdgeHeightMap[key + 1u];
+		value.m_End.m_Left.c.y = item2.x;
+		value.m_End.m_Left.d.y = item2.y;
+		value.m_End.m_Right.c.y = item2.z;
+		value.m_End.m_Right.d.y = item2.w;
+	}
+	bool bStraighten = false;
+	if ((netGeometryData.m_Flags & GeometryFlags_SmoothSlopes) == 0u)
+	{
+		uint sideMask = CompositionFlags_Side_Raised | CompositionFlags_Side_Lowered;
+		bool bFlat = (netCompositionData.m_Flags.m_General & (CompositionFlags_General_Elevated | CompositionFlags_General_Tunnel)) == 0u;
+		bFlat = bFlat && ((netCompositionData.m_Flags.m_Left & sideMask) == 0u || (netCompositionData.m_Flags.m_Right & sideMask) == 0u);
+		bFlat = bFlat && !HasComponent(entity, COMPONENT_OWNER);
+		bStraighten = !bFlat;
+	}
+	if (bStraighten)
+	{
+		FEG_StraightenMiddleHeights(value.m_Start.m_Left, value.m_End.m_Left);
+		FEG_StraightenMiddleHeights(value.m_Start.m_Right, value.m_End.m_Right);
+	}
+	else
+	{
+		FEG_LimitMiddleHeights(value.m_Start.m_Left, value.m_End.m_Left, netGeometryData.m_MaxSlopeSteepness, netCompositionData.m_Width);
+		FEG_LimitMiddleHeights(value.m_Start.m_Right, value.m_End.m_Right, netGeometryData.m_MaxSlopeSteepness, netCompositionData.m_Width);
+	}
+	value.m_Start.m_Length.x = MU_Length(value.m_Start.m_Left);
+	value.m_Start.m_Length.y = MU_Length(value.m_Start.m_Right);
+	value.m_End.m_Length.x = MU_Length(value.m_End.m_Left);
+	value.m_End.m_Length.y = MU_Length(value.m_End.m_Right);
+	value.m_Bounds = Bounds_Or(Bounds_Or(Bounds_Or(MU_TightBounds(value.m_Start.m_Left), MU_TightBounds(value.m_Start.m_Right)), MU_TightBounds(value.m_End.m_Left)),
+		MU_TightBounds(value.m_End.m_Right));
+	value.m_Bounds.min.y += netCompositionData.m_HeightRange.min;
+	value.m_Bounds.max.y += netCompositionData.m_HeightRange.max;
+	if ((netCompositionData.m_State & (CompositionState_LowerToTerrain | CompositionState_RaiseToTerrain)) != 0u)
+	{
+		Bounds1 bounds = Bounds_Or(Bounds_Or(Bounds_Or(SampleTerrainCurve(value.m_Start.m_Left), SampleTerrainCurve(value.m_Start.m_Right)), SampleTerrainCurve(value.m_End.m_Left)),
+			SampleTerrainCurve(value.m_End.m_Right));
+		if ((netCompositionData.m_State & CompositionState_LowerToTerrain) != 0u) value.m_Bounds.min.y = U_min(value.m_Bounds.min.y, bounds.min);
+		if ((netCompositionData.m_State & CompositionState_RaiseToTerrain) != 0u) value.m_Bounds.max.y = U_max(value.m_Bounds.max.y, bounds.max);
+	}
+	EdgeGeometryRW[entity] = value;
+}
+
+// ---------------------------------------------------------------------------------------------
+// CalculateNodeGeometryJob (per edge, two iterations)
+// ---------------------------------------------------------------------------------------------
+
+// Road-node sub-objects are not imported, so the placement offset search finds none.
+float CNG_GetStraightNodeLength(int node, NetGeometryData netGeometryData)
+{
+	float num = -1.0f;
+	return (num < 0.0f) ? netGeometryData.m_DefaultWidth * 0.5f : num;
+}
+
+Segment CNG_CalculateStraightSegment(Segment segment, float length, out float2 divPos)
+{
+	float3 value = MU_EndTangent(segment.m_Left);
+	float3 value2 = MU_EndTangent(segment.m_Right);
+	value = MU_Normalize(value, value.xz) * length;
+	value2 = MU_Normalize(value2, value2.xz) * length;
+	Segment result = (Segment)0;
+	result.m_Left = NetUtils_StraightCurve(segment.m_Left.d, segment.m_Left.d + value);
+	result.m_Right = NetUtils_StraightCurve(segment.m_Right.d, segment.m_Right.d + value2);
+	result.m_Length.x = MU_Length(result.m_Left);
+	result.m_Length.y = MU_Length(result.m_Right);
+	divPos = 0.0f;
+	return result;
+}
+
+Segment CNG_Invert(Segment segment)
+{
+	Segment result = (Segment)0;
+	result.m_Left = MU_Invert(segment.m_Right);
+	result.m_Right = MU_Invert(segment.m_Left);
+	result.m_Length = segment.m_Length.yx;
+	return result;
+}
+
+float4 CNG_CalculateVertexSyncTargetRoundabout(inout Segment roundaboutSegment, float3 middlePos, float radius, bool isRight, float startDistance, float endDistance, float4 a, float4 b, float t)
+{
+	float2 f;
+	float num2;
+	if (isRight)
+	{
+		f = 1.0f - float2(a.w, b.w);
+		float3 value = middlePos - roundaboutSegment.m_Right.d;
+		float num = (f.y * endDistance - f.x * startDistance) * 0.5f;
+		value = MU_Normalize(value, value.xz) * num;
+		roundaboutSegment.m_Right.c += value * 0.5f;
+		roundaboutSegment.m_Right.d += value;
+		a = U_saturate(1.0f - (1.0f - a - f.x) / (1.0f - f.x));
+		b = U_saturate(1.0f - (1.0f - b - f.y) / (1.0f - f.y));
+		num2 = U_distance(middlePos.xz, roundaboutSegment.m_Right.d.xz);
+	}
+	else
+	{
+		f = float2(a.x, b.x);
+		float3 value2 = middlePos - roundaboutSegment.m_Left.d;
+		float num3 = (f.y * endDistance - f.x * startDistance) * 0.5f;
+		value2 = MU_Normalize(value2, value2.xz) * num3;
+		roundaboutSegment.m_Left.c += value2 * 0.5f;
+		roundaboutSegment.m_Left.d += value2;
+		a = U_saturate((a - f.x) / (1.0f - f.x));
+		b = U_saturate((b - f.y) / (1.0f - f.y));
+		num2 = U_distance(middlePos.xz, roundaboutSegment.m_Left.d.xz);
+	}
+	float num4 = f.x * startDistance / num2;
+	startDistance -= f.x * startDistance;
+	endDistance -= f.y * endDistance;
+	float4 f2 = float4(a.xw, b.xw);
+	float4 f3 = float4(a.yz, b.yz);
+	f2 = select((f2 == f3).zwxy, f3, f2);
+	a.xw = f2.xy;
+	b.xw = f2.zw;
+	float num5 = U_lerp(startDistance, endDistance, t);
+	// num5 >= float.Epsilon (the smallest denormal): a GPU flushes that constant to 0, so compare against 0 instead.
+	float4 f4 = (num5 > 0.0f) ? U_lerp(a * startDistance, b * endDistance, t) / num5 : a;
+	if (isRight)
+	{
+		f4 = U_saturate((1.0f - f4) * num5 / radius);
+		return U_saturate(1.0f - num4 - f4 * (1.0f - num4));
+	}
+	f4 = U_saturate(f4 * num5 / radius);
+	return U_saturate(num4 + f4 * (1.0f - num4));
+}
+
+float4 CNG_CalculateVertexSyncTarget(inout Segment startSegment, float startDistance, float endDistance, float4 a, float4 b, float t, bool isRight)
+{
+	float num = (startDistance + endDistance) * 0.5f;
+	float2 f;
+	if (isRight)
+	{
+		f = 1.0f - float2(a.w, b.w);
+		float3 f2 = startSegment.m_Left.d - startSegment.m_Right.d;
+		float num2 = (f.y * endDistance - f.x * startDistance) * 0.5f;
+		num -= num2;
+		f2 *= num2 / U_max(0.01f, startDistance);
+		startSegment.m_Right.c += f2 * 0.5f;
+		startSegment.m_Right.d += f2;
+		a = U_saturate(1.0f - (1.0f - a - f.x) / (1.0f - f.x));
+		b = U_saturate(1.0f - (1.0f - b - f.y) / (1.0f - f.y));
+	}
+	else
+	{
+		f = float2(a.x, b.x);
+		float3 f3 = startSegment.m_Right.d - startSegment.m_Left.d;
+		float num3 = (f.y * endDistance - f.x * startDistance) * 0.5f;
+		num -= num3;
+		f3 *= num3 / U_max(0.01f, startDistance);
+		startSegment.m_Left.c += f3 * 0.5f;
+		startSegment.m_Left.d += f3;
+		a = U_saturate((a - f.x) / (1.0f - f.x));
+		b = U_saturate((b - f.y) / (1.0f - f.y));
+	}
+	float num4 = f.x * startDistance / U_max(0.01f, num);
+	startDistance -= f.x * startDistance;
+	endDistance -= f.y * endDistance;
+	float4 f4 = float4(a.xw, b.xw);
+	float4 f5 = float4(a.yz, b.yz);
+	f4 = select((f4 == f5).zwxy, f5, f4);
+	a.xw = f4.xy;
+	b.xw = f4.zw;
+	float num5 = U_lerp(startDistance, endDistance, t);
+	float4 f6 = (num5 > 0.0f) ? U_lerp(a * startDistance, b * endDistance, t) / num5 : a;
+	if (isRight) return U_saturate(1.0f - num4 - (1.0f - f6) * (1.0f - num4));
+	return U_saturate(num4 + f6 * (1.0f - num4));
+}
+
+float3 CNG_FindMiddleNodePos(int edge, int node)
+{
+	float3 f = float3(1e9f, 1e9f, 1e9f);
+	float3 f2 = float3(-1e9f, -1e9f, -1e9f);
+	EdgeIterator edgeIterator = EdgeIterator_Create(edge, node, false);
+	EdgeIteratorValue value;
+	while (EdgeIterator_GetNext(edgeIterator, value))
+	{
+		EdgeGeometry edgeGeometry = EdgeGeometryRW[value.m_Edge];
+		Composition composition = CompositionData[value.m_Edge];
+		NetCompositionData netCompositionData = GetComposition(composition.m_Edge);
+		float3 y;
+		if (value.m_End)
+		{
+			float t = 0.5f + netCompositionData.m_MiddleOffset / U_max(0.01f, netCompositionData.m_Width);
+			y = U_lerp(edgeGeometry.m_End.m_Left.d, edgeGeometry.m_End.m_Right.d, t);
+		}
+		else
+		{
+			float t2 = 0.5f + netCompositionData.m_MiddleOffset / U_max(0.01f, netCompositionData.m_Width);
+			y = U_lerp(edgeGeometry.m_Start.m_Left.a, edgeGeometry.m_Start.m_Right.a, t2);
+		}
+		f = U_min(f, y);
+		f2 = U_max(f2, y);
+	}
+	return U_lerp(f, f2, 0.5f);
+}
+
+float2 CNG_StartOffset(Segment segment, float2 nodePos)
+{
+	return normalizesafe(U_lerp(segment.m_Left.a.xz, segment.m_Right.a.xz, 0.5f) - nodePos + normalizesafe(MU_StartTangent(segment.m_Left).xz + MU_StartTangent(segment.m_Right).xz),
+		float2(0.0f, 1.0f));
+}
+
+float2 CNG_EndOffset(Segment segment, float2 nodePos)
+{
+	return normalizesafe(U_lerp(segment.m_Left.d.xz, segment.m_Right.d.xz, 0.5f) - nodePos - normalizesafe(MU_EndTangent(segment.m_Left).xz + MU_EndTangent(segment.m_Right).xz),
+		float2(0.0f, 1.0f));
+}
+
+void CNG_AdjustSegmentWidth(inout Segment segment, NetCompositionData edgeCompositionData, NetCompositionData nodeCompositionData, bool invertEdge)
+{
+	Segment segment2 = segment;
+	float num = invertEdge ? 0.0f - edgeCompositionData.m_MiddleOffset : edgeCompositionData.m_MiddleOffset;
+	float2 f = edgeCompositionData.m_Width * 0.5f + num - nodeCompositionData.m_MiddleOffset + nodeCompositionData.m_Width * float2(-0.5f, 0.5f);
+	f /= U_max(0.01f, edgeCompositionData.m_Width);
+	f.y -= 1.0f;
+	if (abs(f.x) > 0.001f) segment.m_Left = MU_Lerp(segment2.m_Left, segment2.m_Right, f.x);
+	if (abs(f.y) > 0.001f) segment.m_Right = MU_Lerp(segment2.m_Right, segment2.m_Left, 0.0f - f.y);
+}
+
+void CNG_CheckBestCurve(Bezier4x3 curve, float2 position, bool isRight, bool isEnd, inout Bezier4x3 bestCurve, inout float bestDistance, inout float bestT, inout bool2 bestStartEnd)
+{
+	float t;
+	float num = MU_Distance(Bezier_xz(curve), position, t);
+	if (num < bestDistance)
+	{
+		bestDistance = num;
+		bestStartEnd = and(bool2(!isEnd, isEnd), bool2(t < 0.001f, t > 0.999f));
+		if (isRight)
+		{
+			bestCurve = curve;
+			bestT = t;
+		}
+		else
+		{
+			bestCurve = MU_Invert(curve);
+			bestT = 1.0f - t;
+		}
+	}
+}
+
+void CNG_OffsetCurveHeight(inout Bezier4x3 curve, float2 heights, float2 heightDelta)
+{
+	float4 f = U_lerp(heights.x, heights.y, float4(heightDelta.x, U_lerp(heightDelta.x, heightDelta.y, 1.0f / 3.0f), U_lerp(heightDelta.x, heightDelta.y, 2.0f / 3.0f), heightDelta.y));
+	curve.a.y += f.x;
+	curve.b.y += f.y;
+	curve.c.y += f.z;
+	curve.d.y += f.w;
+}
+
+// Iteration 1 only. Reads the other edges' node geometry from the copy taken before the
+// iteration (the C# job runs edges in sequence and would see the ones already recomputed).
+void CNG_CheckNodeCurves(int node, float2 middlePos, NetGeometryData edgePrefabGeometryData, bool isEnd, inout Bezier4x3 bestCurve, inout float bestDistance, inout float bestT,
+	inout bool2 bestStartEnd)
+{
+	Bezier4x3 bestCurve2 = bestCurve;
+	float bestDistance2 = bestDistance;
+	float bestT2 = bestT;
+	bool2 bestStartEnd2 = bestStartEnd;
+	EdgeIterator edgeIterator = EdgeIterator_Create(Entity_Null, node, true);
+	EdgeIteratorValue value;
+	while (EdgeIterator_GetNext(edgeIterator, value))
+	{
+		if (value.m_Middle) return;
+		NetGeometryData netGeometryData = GetPrefabGeometry(value.m_Edge);
+		if ((edgePrefabGeometryData.m_MergeLayers & netGeometryData.m_MergeLayers) == 0u) continue;
+		Composition composition = CompositionData[value.m_Edge];
+		EdgeNodeGeometry geometry;
+		NetCompositionData netCompositionData;
+		if (value.m_End)
+		{
+			geometry = PrevEndNodeGeometry[value.m_Edge];
+			netCompositionData = GetComposition(composition.m_EndNode);
+		}
+		else
+		{
+			geometry = PrevStartNodeGeometry[value.m_Edge];
+			netCompositionData = GetComposition(composition.m_StartNode);
+		}
+		if (!(any(geometry.m_Left.m_Length > 0.05f) || any(geometry.m_Right.m_Length > 0.05f))) continue;
+		if (geometry.m_MiddleRadius > 0.0f)
+		{
+			if (netCompositionData.m_SideConnectionOffset.x != 0.0f)
+			{
+				geometry.m_Left.m_Left = NetUtils_OffsetCurveLeftSmooth(geometry.m_Left.m_Left, netCompositionData.m_SideConnectionOffset.x);
+				geometry.m_Right.m_Left = NetUtils_OffsetCurveLeftSmooth(geometry.m_Right.m_Left, netCompositionData.m_SideConnectionOffset.x);
+			}
+			if (netCompositionData.m_SideConnectionOffset.y != 0.0f)
+			{
+				geometry.m_Left.m_Right = NetUtils_OffsetCurveLeftSmooth(geometry.m_Left.m_Right, 0.0f - netCompositionData.m_SideConnectionOffset.y);
+				geometry.m_Right.m_Right = NetUtils_OffsetCurveLeftSmooth(geometry.m_Right.m_Right, 0.0f - netCompositionData.m_SideConnectionOffset.y);
+			}
+			CNG_OffsetCurveHeight(geometry.m_Left.m_Left, netCompositionData.m_EdgeHeights.xz, float2(0.0f, 0.5f));
+			CNG_OffsetCurveHeight(geometry.m_Left.m_Right, netCompositionData.m_EdgeHeights.yw, float2(0.0f, 0.5f));
+			CNG_OffsetCurveHeight(geometry.m_Right.m_Left, netCompositionData.m_EdgeHeights.xz, float2(0.5f, 1.0f));
+			CNG_OffsetCurveHeight(geometry.m_Right.m_Right, netCompositionData.m_EdgeHeights.yw, float2(0.5f, 1.0f));
+			CNG_CheckBestCurve(geometry.m_Left.m_Left, middlePos, false, isEnd, bestCurve2, bestDistance2, bestT2, bestStartEnd2);
+			CNG_CheckBestCurve(geometry.m_Left.m_Right, middlePos, true, isEnd, bestCurve2, bestDistance2, bestT2, bestStartEnd2);
+			CNG_CheckBestCurve(geometry.m_Right.m_Left, middlePos, false, isEnd, bestCurve2, bestDistance2, bestT2, bestStartEnd2);
+			CNG_CheckBestCurve(geometry.m_Right.m_Right, middlePos, true, isEnd, bestCurve2, bestDistance2, bestT2, bestStartEnd2);
+		}
+		else
+		{
+			if (netCompositionData.m_SideConnectionOffset.x != 0.0f)
+			{
+				geometry.m_Left.m_Left = NetUtils_OffsetCurveLeftSmooth(geometry.m_Left.m_Left, netCompositionData.m_SideConnectionOffset.x);
+			}
+			if (netCompositionData.m_SideConnectionOffset.y != 0.0f)
+			{
+				geometry.m_Right.m_Right = NetUtils_OffsetCurveLeftSmooth(geometry.m_Right.m_Right, 0.0f - netCompositionData.m_SideConnectionOffset.y);
+			}
+			CNG_OffsetCurveHeight(geometry.m_Left.m_Left, netCompositionData.m_EdgeHeights.xz, float2(0.0f, 1.0f));
+			CNG_OffsetCurveHeight(geometry.m_Right.m_Right, netCompositionData.m_EdgeHeights.yw, float2(0.0f, 1.0f));
+			CNG_CheckBestCurve(geometry.m_Left.m_Left, middlePos, false, isEnd, bestCurve2, bestDistance2, bestT2, bestStartEnd2);
+			CNG_CheckBestCurve(geometry.m_Right.m_Right, middlePos, true, isEnd, bestCurve2, bestDistance2, bestT2, bestStartEnd2);
+		}
+	}
+	bestCurve = bestCurve2;
+	bestDistance = bestDistance2;
+	bestT = bestT2;
+	bestStartEnd = bestStartEnd2;
+}
+
+void CNG_AddCurveHeight(inout Bezier4x3 curve, float height)
+{
+	curve.a.y += height;
+	curve.b.y += height;
+	curve.c.y += height;
+	curve.d.y += height;
+}
+
+void CNG_FindTargetSegments(int edge, int node, float2 offset, float2 middlePos, NetGeometryData prefabGeometryData, NetCompositionData compositionData,
+	out Segment leftSegment, out Segment rightSegment, out float2 distances, out float4 syncVertexOffsetsLeft, out float4 syncVertexOffsetsRight, out float roundaboutSize,
+	out bool2 sideConnect, out bool2 middleConnect)
+{
+	float2 x = float2(offset.y, 0.0f - offset.x);
+	float num = -2.0f;
+	float num2 = 2.0f;
+	float num3 = CS_FLT_MAX;
+	leftSegment = (Segment)0;
+	rightSegment = (Segment)0;
+	EdgeIteratorValue edgeIteratorValue = (EdgeIteratorValue)0;
+	EdgeIteratorValue edgeIteratorValue2 = (EdgeIteratorValue)0;
+	distances = 0.0f;
+	roundaboutSize = 0.0f;
+	sideConnect = false;
+	bool flag = HasComponent(node, COMPONENT_OUTSIDE_CONNECTION);
+	EdgeIterator edgeIterator = EdgeIterator_Create(edge, node, true);
+	EdgeIteratorValue value;
+	while (EdgeIterator_GetNext(edgeIterator, value))
+	{
+		if (value.m_Middle)
+		{
+			if ((prefabGeometryData.m_MergeLayers & (Layer_Pathway | Layer_MarkerPathway)) == 0u) continue;
+			NetGeometryData edgePrefabGeometryData = GetPrefabGeometry(value.m_Edge);
+			EdgeGeometry edgeGeometry = EdgeGeometryRW[value.m_Edge];
+			Composition composition = CompositionData[value.m_Edge];
+			NetCompositionData netCompositionData = GetComposition(composition.m_Edge);
+			if (netCompositionData.m_SideConnectionOffset.x != 0.0f)
+			{
+				edgeGeometry.m_Start.m_Left = NetUtils_OffsetCurveLeftSmooth(edgeGeometry.m_Start.m_Left, netCompositionData.m_SideConnectionOffset.x);
+				edgeGeometry.m_End.m_Left = NetUtils_OffsetCurveLeftSmooth(edgeGeometry.m_End.m_Left, netCompositionData.m_SideConnectionOffset.x);
+			}
+			if (netCompositionData.m_SideConnectionOffset.y != 0.0f)
+			{
+				edgeGeometry.m_Start.m_Right = NetUtils_OffsetCurveLeftSmooth(edgeGeometry.m_Start.m_Right, 0.0f - netCompositionData.m_SideConnectionOffset.y);
+				edgeGeometry.m_End.m_Right = NetUtils_OffsetCurveLeftSmooth(edgeGeometry.m_End.m_Right, 0.0f - netCompositionData.m_SideConnectionOffset.y);
+			}
+			CNG_OffsetCurveHeight(edgeGeometry.m_Start.m_Left, netCompositionData.m_EdgeHeights.xz, float2(0.0f, 0.5f));
+			CNG_OffsetCurveHeight(edgeGeometry.m_Start.m_Right, netCompositionData.m_EdgeHeights.yw, float2(0.0f, 0.5f));
+			CNG_OffsetCurveHeight(edgeGeometry.m_End.m_Left, netCompositionData.m_EdgeHeights.xz, float2(0.5f, 1.0f));
+			CNG_OffsetCurveHeight(edgeGeometry.m_End.m_Right, netCompositionData.m_EdgeHeights.yw, float2(0.5f, 1.0f));
+			Bezier4x3 bestCurve = (Bezier4x3)0;
+			float bestDistance = CS_FLT_MAX;
+			float bestT = 0.0f;
+			bool2 bestStartEnd = false;
+			CNG_CheckBestCurve(edgeGeometry.m_Start.m_Left, middlePos, false, false, bestCurve, bestDistance, bestT, bestStartEnd);
+			CNG_CheckBestCurve(edgeGeometry.m_Start.m_Right, middlePos, true, false, bestCurve, bestDistance, bestT, bestStartEnd);
+			CNG_CheckBestCurve(edgeGeometry.m_End.m_Left, middlePos, false, true, bestCurve, bestDistance, bestT, bestStartEnd);
+			CNG_CheckBestCurve(edgeGeometry.m_End.m_Right, middlePos, true, true, bestCurve, bestDistance, bestT, bestStartEnd);
+			if (IterationIndex == 1u && any(bestStartEnd))
+			{
+				Edge edge2 = EdgeData[value.m_Edge];
+				if (bestStartEnd.x) CNG_CheckNodeCurves(edge2.m_Start, middlePos, edgePrefabGeometryData, false, bestCurve, bestDistance, bestT, bestStartEnd);
+				if (bestStartEnd.y) CNG_CheckNodeCurves(edge2.m_End, middlePos, edgePrefabGeometryData, true, bestCurve, bestDistance, bestT, bestStartEnd);
+			}
+			if (bestDistance < num3)
+			{
+				num3 = bestDistance;
+				float3 f = MU_Position(bestCurve, bestT);
+				float3 f2 = 0.0f;
+				f2.xz = normalizesafe(MU_Left(MU_Tangent(bestCurve, bestT).xz));
+				float3 f3 = f;
+				f3.xz += MU_Left(f2.xz) * (compositionData.m_Width * 0.5f);
+				leftSegment.m_Left = NetUtils_StraightCurve(f3, f3 + f2);
+				leftSegment.m_Right = NetUtils_StraightCurve(f, f + f2);
+				edgeIteratorValue = value;
+				distances.x = compositionData.m_Width * 0.5f;
+				float3 f4 = f;
+				f4.xz += MU_Right(f2.xz) * (compositionData.m_Width * 0.5f);
+				rightSegment.m_Left = NetUtils_StraightCurve(f, f + f2);
+				rightSegment.m_Right = NetUtils_StraightCurve(f4, f4 + f2);
+				edgeIteratorValue2 = value;
+				distances.y = compositionData.m_Width * 0.5f;
+			}
+		}
+		else
+		{
+			if (edgeIteratorValue.m_Middle) continue;
+			Composition composition2 = CompositionData[value.m_Edge];
+			EdgeGeometry edgeGeometry2 = EdgeGeometryRW[value.m_Edge];
+			NetCompositionData edgeCompositionData = GetComposition(composition2.m_Edge);
+			Segment segment;
+			NetCompositionData netCompositionData2;
+			if (value.m_End)
+			{
+				segment = CNG_Invert(edgeGeometry2.m_End);
+				netCompositionData2 = GetComposition(composition2.m_EndNode);
+			}
+			else
+			{
+				segment = edgeGeometry2.m_Start;
+				netCompositionData2 = GetComposition(composition2.m_StartNode);
+			}
+			netCompositionData2.m_MiddleOffset = 0.0f - netCompositionData2.m_MiddleOffset;
+			CNG_AdjustSegmentWidth(segment, edgeCompositionData, netCompositionData2, value.m_End);
+			float num4 = 0.5f + netCompositionData2.m_MiddleOffset / U_max(0.01f, netCompositionData2.m_Width);
+			float2 y = CNG_StartOffset(segment, middlePos);
+			if (value.m_Edge == edge)
+			{
+				if (num < -1.0f)
+				{
+					if (prefabGeometryData.m_MergeLayers == Layer_None || flag)
+					{
+						leftSegment.m_Left = MU_StartReflect(segment.m_Right);
+						leftSegment.m_Right = MU_StartReflect(segment.m_Left);
+						num4 = 1.0f - num4;
+					}
+					else
+					{
+						leftSegment = segment;
+					}
+					leftSegment.m_Right = MU_Lerp(leftSegment.m_Left, leftSegment.m_Right, num4);
+					edgeIteratorValue = value;
+					distances.x = netCompositionData2.m_Width * 0.5f + netCompositionData2.m_MiddleOffset;
+				}
+				if (num2 > 1.0f)
+				{
+					if (prefabGeometryData.m_MergeLayers == Layer_None || flag)
+					{
+						rightSegment.m_Left = MU_StartReflect(segment.m_Right);
+						rightSegment.m_Right = MU_StartReflect(segment.m_Left);
+						num4 = 1.0f - num4;
+					}
+					else
+					{
+						rightSegment = segment;
+					}
+					rightSegment.m_Left = MU_Lerp(rightSegment.m_Left, rightSegment.m_Right, num4);
+					edgeIteratorValue2 = value;
+					distances.y = netCompositionData2.m_Width * 0.5f - netCompositionData2.m_MiddleOffset;
+				}
+			}
+			else
+			{
+				NetGeometryData netGeometryData = GetPrefabGeometry(value.m_Edge);
+				if ((netGeometryData.m_MergeLayers & prefabGeometryData.m_MergeLayers) == 0u)
+				{
+					if ((prefabGeometryData.m_MergeLayers & (Layer_Pathway | Layer_MarkerPathway)) == 0u || (netGeometryData.m_MergeLayers & Layer_Road) == 0u) continue;
+					sideConnect = true;
+					if (netCompositionData2.m_SideConnectionOffset.y != 0.0f)
+					{
+						segment.m_Left = NetUtils_OffsetCurveLeftSmooth(segment.m_Left, netCompositionData2.m_SideConnectionOffset.y);
+					}
+					if (netCompositionData2.m_SideConnectionOffset.x != 0.0f)
+					{
+						segment.m_Right = NetUtils_OffsetCurveLeftSmooth(segment.m_Right, 0.0f - netCompositionData2.m_SideConnectionOffset.x);
+					}
+					// Bezier4x3.y += float adds to all four control points.
+					CNG_AddCurveHeight(segment.m_Left, netCompositionData2.m_EdgeHeights.y);
+					CNG_AddCurveHeight(segment.m_Right, netCompositionData2.m_EdgeHeights.x);
+				}
+				float num5;
+				if (dot(offset, y) < 0.0f)
+				{
+					num5 = dot(x, y) * 0.5f;
+				}
+				else
+				{
+					float num6 = dot(x, y);
+					num5 = (num6 >= 0.0f ? 1.0f : -1.0f) - num6 * 0.5f;
+				}
+				if (num5 > num)
+				{
+					num = num5;
+					leftSegment = segment;
+					leftSegment.m_Right = MU_Lerp(leftSegment.m_Left, leftSegment.m_Right, num4);
+					edgeIteratorValue = value;
+					distances.x = netCompositionData2.m_Width * 0.5f + netCompositionData2.m_MiddleOffset;
+				}
+				if (num5 < num2)
+				{
+					num2 = num5;
+					rightSegment = segment;
+					rightSegment.m_Left = MU_Lerp(rightSegment.m_Left, rightSegment.m_Right, num4);
+					edgeIteratorValue2 = value;
+					distances.y = netCompositionData2.m_Width * 0.5f - netCompositionData2.m_MiddleOffset;
+				}
+			}
+			float2 f5 = NetCompositionHelpers_CalculateRoundaboutSize(netCompositionData2, CompositionPieces(composition2.m_Edge));
+			roundaboutSize = U_max(roundaboutSize, value.m_End ? f5.y : f5.x);
+		}
+	}
+	middleConnect = bool2(edgeIteratorValue.m_Middle, edgeIteratorValue2.m_Middle);
+	if (edgeIteratorValue.m_Edge != Entity_Null && !sideConnect.x && !edgeIteratorValue.m_Middle)
+	{
+		Composition composition3 = CompositionData[edgeIteratorValue.m_Edge];
+		int entity = edgeIteratorValue.m_End ? composition3.m_EndNode : composition3.m_StartNode;
+		syncVertexOffsetsLeft = 1.0f - GetComposition(entity).m_SyncVertexOffsetsRight.wzyx;
+	}
+	else
+	{
+		syncVertexOffsetsLeft = float4(0.0f, 1.0f / 3.0f, 2.0f / 3.0f, 1.0f);
+	}
+	if (edgeIteratorValue2.m_Edge != Entity_Null && !sideConnect.y && !edgeIteratorValue2.m_Middle)
+	{
+		Composition composition4 = CompositionData[edgeIteratorValue2.m_Edge];
+		int entity2 = edgeIteratorValue2.m_End ? composition4.m_EndNode : composition4.m_StartNode;
+		syncVertexOffsetsRight = 1.0f - GetComposition(entity2).m_SyncVertexOffsetsLeft.wzyx;
+	}
+	else
+	{
+		syncVertexOffsetsRight = float4(0.0f, 1.0f / 3.0f, 2.0f / 3.0f, 1.0f);
+	}
+}
+
+Bezier4x3 CNG_CalculateMiddleCurveDiv(Bezier4x3 startCurve, Bezier4x3 endCurve, out float divPos)
+{
+	float3 value = MU_EndTangent(startCurve);
+	float3 value2 = MU_StartTangent(endCurve);
+	value = MU_Normalize(value, value.xz);
+	value2 = MU_Normalize(value2, value2.xz);
+	value.y = U_clamp(value.y, -1.0f, 1.0f);
+	value2.y = U_clamp(value2.y, -1.0f, 1.0f);
+	Bezier4x3 curve = NetUtils_FitCurve(startCurve.d, value, value2, endCurve.a);
+	divPos = NetUtils_FindMiddleTangentPos(Bezier_xz(curve), float2(0.0f, 1.0f));
+	float3 endPos = MU_Position(curve, divPos);
+	value2 = MU_Tangent(curve, divPos);
+	value2 = MU_Normalize(value2, value2.xz);
+	value2.y = U_clamp(value2.y, -1.0f, 1.0f);
+	return NetUtils_FitCurve(startCurve.d, value, value2, endPos);
+}
+
+Bezier4x3 CNG_CalculateMiddleCurveAround(Bezier4x3 startCurve, Bezier4x3 endCurve, float3 middlePosition, out float middleDistance, out float divPos)
+{
+	float3 value = MU_EndTangent(startCurve);
+	float3 value2 = MU_StartTangent(endCurve);
+	value = MU_Normalize(value, value.xz);
+	value2 = MU_Normalize(value2, value2.xz);
+	value.y = U_clamp(value.y, -1.0f, 1.0f);
+	value2.y = U_clamp(value2.y, -1.0f, 1.0f);
+	Bezier4x3 curve = NetUtils_FitCurve(startCurve.d, value, value2, endCurve.a);
+	float unusedT;
+	middleDistance = MU_Distance(Bezier_xz(curve), middlePosition.xz, unusedT);
+	divPos = NetUtils_FindMiddleTangentPos(Bezier_xz(curve), float2(0.0f, 1.0f));
+	float3 endPos = MU_Position(curve, divPos);
+	value2 = MU_Tangent(curve, divPos);
+	value2 = MU_Normalize(value2, value2.xz);
+	value2.y = U_clamp(value2.y, -1.0f, 1.0f);
+	return NetUtils_FitCurve(startCurve.d, value, value2, endPos);
+}
+
+void CNG_CalculateMiddleCurves(Bezier4x3 startCurve, Bezier4x3 endCurve, float3 nodePosition, inout float radius, bool right, out Bezier4x3 startMiddleCurve,
+	out Bezier4x3 endMiddleCurve, out float divPos)
+{
+	float2 f = normalizesafe(startCurve.d.xz - nodePosition.xz);
+	float2 toVector = normalizesafe(endCurve.a.xz - nodePosition.xz);
+	float3 endTangent = 0.0f;
+	float3 f2 = 0.0f;
+	float num2;
+	float2 f3;
+	float2 f4;
+	if (right)
+	{
+		float num = MU_RotationAngleLeft(f, toVector) * 0.5f;
+		num2 = U_max(U_min(num * 0.5f, CS_PI / 8.0f), num - CS_PI / 2.0f);
+		f3 = MU_RotateLeft(f, num);
+		f4 = MU_RotateLeft(f, num2);
+		endTangent.xz = MU_Left(f3);
+		f2.xz = MU_Left(f4);
+	}
+	else
+	{
+		float num3 = MU_RotationAngleRight(f, toVector) * 0.5f;
+		num2 = U_max(U_min(num3 * 0.5f, CS_PI / 8.0f), num3 - CS_PI / 2.0f);
+		f3 = MU_RotateRight(f, num3);
+		f4 = MU_RotateRight(f, num2);
+		endTangent.xz = MU_Right(f3);
+		f2.xz = MU_Right(f4);
+	}
+	float3 value = MU_EndTangent(startCurve);
+	value = MU_Normalize(value, value.xz);
+	float divPos2;
+	float middleDistance;
+	Bezier4x3 input = CNG_CalculateMiddleCurveAround(startCurve, endCurve, nodePosition, middleDistance, divPos2);
+	Bezier4x3 output, output2;
+	MU_Divide(input, output, output2, 0.5f);
+	output.c.y = output2.d.y;
+	output.d.y = output2.d.y;
+	output2.a.y = output2.d.y;
+	output2.b.y = output2.d.y;
+	output2.c.y = output2.d.y;
+	middleDistance = (dot(input.d.xz - nodePosition.xz, f3) <= 0.0f) ? 0.0f : middleDistance;
+	float t = U_smoothstep(radius, radius * 1.2f, middleDistance);
+	float num4 = U_max(radius, middleDistance);
+	float3 d = startCurve.d;
+	float3 endPos = nodePosition;
+	float3 f5 = nodePosition;
+	endPos.xz += f3 * num4;
+	f5.xz += f4 * num4;
+	startMiddleCurve = NetUtils_FitCurve(d, value, f2, f5);
+	endMiddleCurve = NetUtils_FitCurve(f5, f2, endTangent, endPos);
+	divPos = 0.5f;
+	float num5 = U_max(0.0f, (num2 - CS_PI / 8.0f) * 0.84882635f);
+	startMiddleCurve.b += (startMiddleCurve.a - startMiddleCurve.b) * (num5 * 0.5f);
+	startMiddleCurve.c += (startMiddleCurve.c - startMiddleCurve.d) * num5;
+	startMiddleCurve = MU_Lerp(startMiddleCurve, output, t);
+	endMiddleCurve = MU_Lerp(endMiddleCurve, output2, t);
+	divPos = U_lerp(divPos, divPos2, t);
+}
+
+void CNG_CalculateSegments(Segment startLeftSegment, Segment startRightSegment, Segment endLeftSegment, Segment endRightSegment, float3 nodePosition, inout float leftRadius,
+	inout float rightRadius, out Segment startSegment, out Segment endSegment, out float2 leftDivPos, out float2 rightDivPos)
+{
+	startSegment = (Segment)0;
+	endSegment = (Segment)0;
+	float divPos, divPos2;
+	CNG_CalculateMiddleCurves(startLeftSegment.m_Left, endLeftSegment.m_Left, nodePosition, leftRadius, false, startSegment.m_Left, endSegment.m_Left, divPos);
+	CNG_CalculateMiddleCurves(startRightSegment.m_Right, endRightSegment.m_Right, nodePosition, rightRadius, true, startSegment.m_Right, endSegment.m_Right, divPos2);
+	if (distancesq(endSegment.m_Left.d, endSegment.m_Right.d) < 0.1f)
+	{
+		endSegment.m_Left.d = U_lerp(endSegment.m_Left.d, endSegment.m_Right.d, 0.5f);
+		endSegment.m_Right.d = endSegment.m_Left.d;
+	}
+	startSegment.m_Length.x = MU_Length(startSegment.m_Left);
+	startSegment.m_Length.y = MU_Length(startSegment.m_Right);
+	endSegment.m_Length.x = MU_Length(endSegment.m_Left);
+	endSegment.m_Length.y = MU_Length(endSegment.m_Right);
+	leftDivPos = divPos;
+	rightDivPos = divPos2;
+}
+
+Segment CNG_CalculateSideConnection(Segment startSegment, Segment endLeftSegment, Segment endRightSegment, NetCompositionData edgeCompositionData,
+	NetCompositionData nodeCompositionData, bool right, out float2 divPos)
+{
+	float3 value = -MU_StartTangent(endLeftSegment.m_Left);
+	float3 value2 = MU_StartTangent(endRightSegment.m_Right);
+	value = MU_Normalize(value, value.xz);
+	value2 = MU_Normalize(value2, value2.xz);
+	value.y = U_clamp(value.y, -1.0f, 1.0f);
+	value2.y = U_clamp(value2.y, -1.0f, 1.0f);
+	Bezier4x3 curve = NetUtils_FitCurve(endLeftSegment.m_Left.a, value, value2, endRightSegment.m_Right.a);
+	float t;
+	MU_Distance(curve, startSegment.m_Left.d, t);
+	float t2;
+	MU_Distance(curve, startSegment.m_Right.d, t2);
+	float num = U_max(edgeCompositionData.m_NodeOffset, nodeCompositionData.m_NodeOffset);
+	if (right)
+	{
+		Bounds1 t3 = Bounds1_Make(t2, 1.0f);
+		MU_ClampLengthValue(curve, t3, num * 0.5f);
+		t2 = t3.min;
+		value = MU_Tangent(curve, t);
+		value.xz = normalizesafe(MU_Left(value.xz));
+		value.y = 0.0f;
+		value2 = MU_Tangent(curve, t2);
+		value2.xz = normalizesafe(MU_Left(value2.xz) + value2.xz);
+		value2.y = U_clamp(value2.y * 0.5f, -1.0f, 1.0f);
+	}
+	else
+	{
+		Bounds1 t4 = Bounds1_Make(0.0f, t);
+		MU_ClampLengthInverseValue(curve, t4, num * 0.5f);
+		t = t4.max;
+		value = MU_Tangent(curve, t2);
+		value.xz = normalizesafe(MU_Left(value.xz) - value.xz);
+		value.y = U_clamp(value.y * 0.5f, -1.0f, 1.0f);
+		value2 = MU_Tangent(curve, t2);
+		value2.xz = normalizesafe(MU_Left(value2.xz));
+		value2.y = 0.0f;
+	}
+	float3 endPos = MU_Position(curve, t);
+	float3 endPos2 = MU_Position(curve, t2);
+	float3 value3 = MU_EndTangent(startSegment.m_Left);
+	float3 value4 = MU_EndTangent(startSegment.m_Right);
+	value3 = MU_Normalize(value3, value3.xz);
+	value4 = MU_Normalize(value4, value4.xz);
+	value3.y = U_clamp(value3.y, -1.0f, 1.0f);
+	value4.y = U_clamp(value4.y, -1.0f, 1.0f);
+	Segment result = (Segment)0;
+	result.m_Left = NetUtils_FitCurve(startSegment.m_Left.d, value3, value, endPos);
+	result.m_Right = NetUtils_FitCurve(startSegment.m_Right.d, value4, value2, endPos2);
+	result.m_Length.x = MU_Length(result.m_Left);
+	result.m_Length.y = MU_Length(result.m_Right);
+	divPos = 0.0f;
+	return result;
+}
+
+Bezier4x3 CNG_CalculateMiddleConnectionCurve(Bezier4x3 startCurve, Bezier4x3 endCurve, out float divPos)
+{
+	float3 value = MU_EndTangent(startCurve);
+	float3 value2 = MU_StartTangent(endCurve);
+	value = MU_Normalize(value, value.xz);
+	value2 = MU_Normalize(value2, value2.xz);
+	value.y = U_clamp(value.y, -1.0f, 1.0f);
+	value2.y = U_clamp(value2.y, -1.0f, 1.0f);
+	divPos = 0.0f;
+	return NetUtils_FitCurve(startCurve.d, value, value2, endCurve.a);
+}
+
+Segment CNG_CalculateMiddleConnection(Segment startSegment, Segment endSegment, out float2 divPos)
+{
+	Segment result = (Segment)0;
+	result.m_Left = CNG_CalculateMiddleConnectionCurve(startSegment.m_Left, endSegment.m_Left, divPos.x);
+	result.m_Right = CNG_CalculateMiddleConnectionCurve(startSegment.m_Right, endSegment.m_Right, divPos.y);
+	result.m_Length.x = MU_Length(result.m_Left);
+	result.m_Length.y = MU_Length(result.m_Right);
+	return result;
+}
+
+Segment CNG_CalculateMiddleSegment(Segment startSegment, Segment endSegment, out float2 divPos)
+{
+	Segment result = (Segment)0;
+	result.m_Left = CNG_CalculateMiddleCurveDiv(startSegment.m_Left, endSegment.m_Left, divPos.x);
+	result.m_Right = CNG_CalculateMiddleCurveDiv(startSegment.m_Right, endSegment.m_Right, divPos.y);
+	result.m_Length.x = MU_Length(result.m_Left);
+	result.m_Length.y = MU_Length(result.m_Right);
+	return result;
+}
+
+// One node end (start or end) of CalculateNodeGeometryJob.Execute.
+void CNG_CalculateEnd(inout EdgeNodeGeometry value, int node, NodeGeometry nodeGeometry, Segment segment, Segment segmentRight, Segment leftSegment, Segment rightSegment,
+	float roundaboutSize, bool2 sideConnect, bool2 middleConnect, NetGeometryData netGeometryData, NetCompositionData edgeCompositionData, NetCompositionData netCompositionData,
+	out float leftRadius, out float rightRadius, out float2 divPos, out float2 divPos2)
+{
+	leftRadius = 0.0f;
+	rightRadius = 0.0f;
+	divPos = 0.0f;
+	divPos2 = 0.0f;
+	if (value.m_MiddleRadius > 0.0f)
+	{
+		float3 position = NodeData[node].m_Position;
+		position.y = nodeGeometry.m_Position;
+		leftRadius = value.m_MiddleRadius + roundaboutSize;
+		rightRadius = leftRadius;
+		CNG_CalculateSegments(segment, segmentRight, leftSegment, rightSegment, position, leftRadius, rightRadius, value.m_Left, value.m_Right, divPos, divPos2);
+	}
+	else if ((netCompositionData.m_Flags.m_General & CompositionFlags_General_StraightNodeEnd) != 0u)
+	{
+		float straightNodeLength = CNG_GetStraightNodeLength(node, netGeometryData);
+		value.m_Left = CNG_CalculateStraightSegment(segment, straightNodeLength, divPos);
+		value.m_Right = CNG_CalculateStraightSegment(segmentRight, straightNodeLength, divPos2);
+		value.m_Middle.d.xy = 1.0f;
+	}
+	else
+	{
+		if (sideConnect.x)
+		{
+			value.m_Left = CNG_CalculateSideConnection(segment, leftSegment, rightSegment, edgeCompositionData, netCompositionData, false, divPos);
+			value.m_Middle.d.x = 1.0f;
+		}
+		else if (middleConnect.x)
+		{
+			if (IterationIndex == 0u)
+			{
+				value.m_Left.m_Length = -1.0f;
+				divPos = -1.0f;
+			}
+			else
+			{
+				value.m_Left = CNG_CalculateMiddleConnection(segment, leftSegment, divPos);
+				value.m_Middle.d.x = 1.0f;
+			}
+		}
+		else
+		{
+			value.m_Left = CNG_CalculateMiddleSegment(segment, leftSegment, divPos);
+		}
+		if (sideConnect.y)
+		{
+			value.m_Right = CNG_CalculateSideConnection(segmentRight, leftSegment, rightSegment, edgeCompositionData, netCompositionData, true, divPos2);
+			value.m_Middle.d.y = 1.0f;
+		}
+		else if (middleConnect.y)
+		{
+			if (IterationIndex == 0u)
+			{
+				value.m_Right.m_Length = -1.0f;
+				divPos2 = -1.0f;
+			}
+			else
+			{
+				value.m_Right = CNG_CalculateMiddleConnection(segmentRight, rightSegment, divPos2);
+				value.m_Middle.d.y = 1.0f;
+			}
+		}
+		else
+		{
+			value.m_Right = CNG_CalculateMiddleSegment(segmentRight, rightSegment, divPos2);
+		}
+	}
+}
+
+void CNG_CalculateSyncTargets(inout EdgeNodeGeometry value, int node, NodeGeometry nodeGeometry, NetCompositionData netCompositionData, float leftRadius, float rightRadius,
+	float2 distances, float4 syncVertexOffsetsLeft, float4 syncVertexOffsetsRight, bool2 middleConnect, float2 divPos, float2 divPos2)
+{
+	float2 f = netCompositionData.m_Width * 0.5f + float2(netCompositionData.m_MiddleOffset, 0.0f - netCompositionData.m_MiddleOffset);
+	if (value.m_MiddleRadius > 0.0f)
+	{
+		float3 position = NodeData[node].m_Position;
+		position.y = nodeGeometry.m_Position;
+		value.m_SyncVertexTargetsLeft = CNG_CalculateVertexSyncTargetRoundabout(value.m_Right, position, leftRadius, false, f.x, distances.x, netCompositionData.m_SyncVertexOffsetsLeft,
+			syncVertexOffsetsLeft, divPos.y);
+		value.m_SyncVertexTargetsRight = CNG_CalculateVertexSyncTargetRoundabout(value.m_Right, position, rightRadius, true, f.y, distances.y, netCompositionData.m_SyncVertexOffsetsRight,
+			syncVertexOffsetsRight, divPos2.x);
+	}
+	else if (!any(middleConnect) || IterationIndex != 0u)
+	{
+		value.m_SyncVertexTargetsLeft = CNG_CalculateVertexSyncTarget(value.m_Left, f.x, distances.x, netCompositionData.m_SyncVertexOffsetsLeft, syncVertexOffsetsLeft, divPos.y, false);
+		value.m_SyncVertexTargetsRight = CNG_CalculateVertexSyncTarget(value.m_Right, f.y, distances.y, netCompositionData.m_SyncVertexOffsetsRight, syncVertexOffsetsRight, divPos2.x, true);
+	}
+}
+
+void CalculateNodeGeometry(int entity)
+{
+	precise EdgeNodeGeometry value = StartNodeGeometryRW[entity];
+	precise EdgeNodeGeometry value2 = EndNodeGeometryRW[entity];
+	if (IterationIndex == 1u && value.m_Left.m_Length.x >= 0.0f && value.m_Right.m_Length.x >= 0.0f && value2.m_Left.m_Length.x >= 0.0f && value2.m_Right.m_Length.x >= 0.0f) return;
+	Edge edge = EdgeData[entity];
+	Composition composition = CompositionData[entity];
+	EdgeGeometry edgeGeometry = EdgeGeometryRW[entity];
+	NetGeometryData netGeometryData = GetPrefabGeometry(entity);
+	NetCompositionData edgeCompositionData = GetComposition(composition.m_Edge);
+	// The original handles the start and the end interleaved; every step of one end reads only that
+	// end's data, so one loop over the two ends gives the same result with one inlined copy.
+	[loop]
+	for (int side = 0; side < 2; side++)
+	{
+		bool isEnd = side != 0;
+		int node = isEnd ? edge.m_End : edge.m_Start;
+		NetCompositionData netCompositionData = GetComposition(isEnd ? composition.m_EndNode : composition.m_StartNode);
+		NodeGeometry nodeGeometry = NodeGeometryRW[node];
+		EdgeNodeGeometry geometry = value;
+		if (isEnd) geometry = value2;
+		float3 f = CNG_FindMiddleNodePos(entity, node);
+		f.y = nodeGeometry.m_Position;
+		float2 offset = isEnd ? CNG_EndOffset(edgeGeometry.m_End, f.xz) : CNG_StartOffset(edgeGeometry.m_Start, f.xz);
+		Segment leftSegment, rightSegment;
+		float2 distances;
+		float4 syncVertexOffsetsLeft, syncVertexOffsetsRight;
+		float roundaboutSize;
+		bool2 sideConnect, middleConnect;
+		CNG_FindTargetSegments(entity, node, offset, f.xz, netGeometryData, netCompositionData, leftSegment, rightSegment, distances, syncVertexOffsetsLeft,
+			syncVertexOffsetsRight, roundaboutSize, sideConnect, middleConnect);
+		Segment segment = edgeGeometry.m_End;
+		if (!isEnd) segment = CNG_Invert(edgeGeometry.m_Start);
+		CNG_AdjustSegmentWidth(segment, edgeCompositionData, netCompositionData, !isEnd);
+		Segment segment3 = segment;
+		float t = netCompositionData.m_MiddleOffset / U_max(0.01f, netCompositionData.m_Width) + 0.5f;
+		segment.m_Right = MU_Lerp(segment.m_Left, segment.m_Right, t);
+		segment3.m_Left = MU_Lerp(segment3.m_Left, segment3.m_Right, t);
+		geometry.m_Middle = (Bezier4x3)0;
+		float leftRadius, rightRadius;
+		float2 divPos, divPos2;
+		CNG_CalculateEnd(geometry, node, nodeGeometry, segment, segment3, leftSegment, rightSegment, roundaboutSize, sideConnect, middleConnect, netGeometryData,
+			edgeCompositionData, netCompositionData, leftRadius, rightRadius, divPos, divPos2);
+		CNG_CalculateSyncTargets(geometry, node, nodeGeometry, netCompositionData, leftRadius, rightRadius, distances, syncVertexOffsetsLeft, syncVertexOffsetsRight,
+			middleConnect, divPos, divPos2);
+		if (isEnd) value2 = geometry;
+		else value = geometry;
+	}
+	StartNodeGeometryRW[entity] = value;
+	EndNodeGeometryRW[entity] = value2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// CalculateIntersectionGeometryJob / CopyNodeGeometryJob (per edge)
+// ---------------------------------------------------------------------------------------------
+
+void CIG_MoveEndTo(inout Bezier4x3 curve, float3 pos)
+{
+	float num = U_distance(curve.d, pos);
+	curve.b += normalizesafe(curve.b - curve.a) * (num * (1.0f / 3.0f));
+	curve.c = pos + (curve.c - curve.d) + normalizesafe(curve.c - curve.d) * (num * (1.0f / 3.0f));
+	curve.d = pos;
+}
+
+float3 CIG_FindIntersectionPos(int edge, int node, NetGeometryData prefabGeometryData)
+{
+	float3 result = 0.0f;
+	float num = 0.0f;
+	EdgeIterator edgeIterator = EdgeIterator_Create(edge, node, false);
+	EdgeIteratorValue value;
+	while (EdgeIterator_GetNext(edgeIterator, value))
+	{
+		EdgeNodeGeometry edgeNodeGeometry;
+		if (!value.m_End) edgeNodeGeometry = StartNodeGeometryRW[value.m_Edge];
+		else edgeNodeGeometry = EndNodeGeometryRW[value.m_Edge];
+		if (value.m_Edge != edge)
+		{
+			NetGeometryData netGeometryData = GetPrefabGeometry(value.m_Edge);
+			if ((prefabGeometryData.m_MergeLayers & netGeometryData.m_MergeLayers) == 0u) continue;
+		}
+		result += U_lerp(edgeNodeGeometry.m_Left.m_Right.d, edgeNodeGeometry.m_Right.m_Left.d, 0.5f);
+		num += 1.0f;
+	}
+	if (num != 0.0f) result /= num;
+	return result;
+}
+
+void CIG_FlattenCurve(inout Bezier4x3 curve, float middleHeight)
+{
+	curve.c.y += middleHeight - curve.d.y;
+	curve.d.y = middleHeight;
+}
+
+void CIG_Flatten(inout EdgeNodeGeometry geometry, float3 middlePos, bool edges)
+{
+	if (edges)
+	{
+		CIG_FlattenCurve(geometry.m_Left.m_Left, middlePos.y);
+		CIG_FlattenCurve(geometry.m_Left.m_Right, middlePos.y);
+		CIG_FlattenCurve(geometry.m_Right.m_Left, middlePos.y);
+		CIG_FlattenCurve(geometry.m_Right.m_Right, middlePos.y);
+		return;
+	}
+	float num = U_distance(geometry.m_Left.m_Left.d.xz, middlePos.xz);
+	float num2 = U_distance(geometry.m_Left.m_Right.d.xz, middlePos.xz);
+	float num3 = U_distance(geometry.m_Right.m_Left.d.xz, middlePos.xz);
+	float num4 = U_distance(geometry.m_Right.m_Right.d.xz, middlePos.xz);
+	float middleHeight = U_lerp(middlePos.y, geometry.m_Left.m_Left.d.y, U_saturate(num2 / num));
+	float middleHeight2 = U_lerp(middlePos.y, geometry.m_Right.m_Right.d.y, U_saturate(num3 / num4));
+	CIG_FlattenCurve(geometry.m_Left.m_Right, middleHeight);
+	CIG_FlattenCurve(geometry.m_Right.m_Left, middleHeight2);
+}
+
+void CIG_CalculateEnd(inout EdgeNodeGeometry geometry, int node, NodeGeometry nodeGeometry, NetGeometryData prefabGeometryData, NetCompositionData netCompositionData,
+	int entity, out float3 position)
+{
+	bool flag = (netCompositionData.m_Flags.m_General & (CompositionFlags_General_Roundabout | CompositionFlags_General_LevelCrossing | CompositionFlags_General_FixedNodeSize)) != 0u;
+	if (geometry.m_MiddleRadius > 0.0f)
+	{
+		position = NodeData[node].m_Position;
+		position.y = nodeGeometry.m_Position;
+	}
+	else
+	{
+		position = CIG_FindIntersectionPos(entity, node, prefabGeometryData);
+		if (flag) position.y = nodeGeometry.m_Position;
+		CIG_Flatten(geometry, position, flag);
+	}
+}
+
+Bezier4x3 CIG_MiddleCurve(EdgeNodeGeometry geometry, NetCompositionData netCompositionData, float3 position)
+{
+	Bezier4x3 middle;
+	if (geometry.m_MiddleRadius > 0.0f)
+	{
+		float t = netCompositionData.m_MiddleOffset / U_max(0.01f, netCompositionData.m_Width) + 0.5f;
+		middle = MU_Lerp(geometry.m_Left.m_Left, geometry.m_Left.m_Right, t);
+		CIG_MoveEndTo(middle, position);
+	}
+	else
+	{
+		bool num = all(geometry.m_Middle.d.xy != 0.0f);
+		middle = MU_Lerp(geometry.m_Left.m_Right, geometry.m_Right.m_Left, 0.5f);
+		if (!num) middle.d = position;
+	}
+	return middle;
+}
+
+Bounds3 CIG_Bounds(EdgeNodeGeometry geometry, Bezier4x3 middle, NetGeometryData prefabGeometryData, NetCompositionData netCompositionData)
+{
+	Bounds3 bounds;
+	if (prefabGeometryData.m_MergeLayers == Layer_None)
+	{
+		float num = netCompositionData.m_Width * 0.5f;
+		float3 f = U_lerp(geometry.m_Left.m_Left.a, geometry.m_Right.m_Right.a, 0.5f);
+		bounds = MU_Bounds(f, f);
+		bounds.min.xz -= num;
+		bounds.max.xz += num;
+	}
+	else
+	{
+		bounds = Bounds_Or(Bounds_Or(Bounds_Or(Bounds_Or(MU_TightBounds(geometry.m_Left.m_Left), MU_TightBounds(geometry.m_Left.m_Right)), MU_TightBounds(geometry.m_Right.m_Left)),
+			MU_TightBounds(geometry.m_Right.m_Right)), MU_TightBounds(middle));
+	}
+	bounds.min.y += netCompositionData.m_HeightRange.min;
+	bounds.max.y += netCompositionData.m_HeightRange.max;
+	if ((netCompositionData.m_State & (CompositionState_LowerToTerrain | CompositionState_RaiseToTerrain)) != 0u)
+	{
+		Bounds1 terrain = Bounds_Or(SampleTerrainCurve(geometry.m_Left.m_Left), SampleTerrainCurve(geometry.m_Right.m_Right));
+		if (geometry.m_MiddleRadius > 0.0f) terrain = Bounds_Or(terrain, Bounds_Or(SampleTerrainCurve(geometry.m_Left.m_Right), SampleTerrainCurve(geometry.m_Right.m_Left)));
+		if ((netCompositionData.m_State & CompositionState_LowerToTerrain) != 0u) bounds.min.y = U_min(bounds.min.y, terrain.min);
+		if ((netCompositionData.m_State & CompositionState_RaiseToTerrain) != 0u) bounds.max.y = U_max(bounds.max.y, terrain.max);
+	}
+	return bounds;
+}
+
+void CalculateIntersectionGeometry(int entity)
+{
+	Edge edge = EdgeData[entity];
+	Composition composition = CompositionData[entity];
+	EdgeNodeGeometry startNodeGeometry = StartNodeGeometryRW[entity];
+	EdgeNodeGeometry endNodeGeometry = EndNodeGeometryRW[entity];
+	NetGeometryData prefabGeometryData = GetPrefabGeometry(entity);
+	NetCompositionData netCompositionData = GetComposition(composition.m_StartNode);
+	NetCompositionData netCompositionData2 = GetComposition(composition.m_EndNode);
+	NodeGeometry nodeGeometry = NodeGeometryRW[edge.m_Start];
+	NodeGeometry nodeGeometry2 = NodeGeometryRW[edge.m_End];
+	float3 f, f2;
+	CIG_CalculateEnd(startNodeGeometry, edge.m_Start, nodeGeometry, prefabGeometryData, netCompositionData, entity, f);
+	CIG_CalculateEnd(endNodeGeometry, edge.m_End, nodeGeometry2, prefabGeometryData, netCompositionData2, entity, f2);
+	precise GeometrySystem_IntersectionData value = (GeometrySystem_IntersectionData)0;
+	value.m_StartMiddle = CIG_MiddleCurve(startNodeGeometry, netCompositionData, f);
+	value.m_EndMiddle = CIG_MiddleCurve(endNodeGeometry, netCompositionData2, f2);
+	value.m_StartBounds = CIG_Bounds(startNodeGeometry, value.m_StartMiddle, prefabGeometryData, netCompositionData);
+	value.m_EndBounds = CIG_Bounds(endNodeGeometry, value.m_EndMiddle, prefabGeometryData, netCompositionData2);
+	IntersectionBuffer[entity] = value;
+}
+
+void CopyNodeGeometry(int entity)
+{
+	GeometrySystem_IntersectionData intersectionData = IntersectionBuffer[entity];
+	EdgeNodeGeometry value = StartNodeGeometryRW[entity];
+	value.m_Middle = intersectionData.m_StartMiddle;
+	value.m_Bounds = intersectionData.m_StartBounds;
+	StartNodeGeometryRW[entity] = value;
+	EdgeNodeGeometry value2 = EndNodeGeometryRW[entity];
+	value2.m_Middle = intersectionData.m_EndMiddle;
+	value2.m_Bounds = intersectionData.m_EndBounds;
+	EndNodeGeometryRW[entity] = value2;
+}
+
+// ---------------------------------------------------------------------------------------------
+// UpdateNodeGeometryJob (per node; a built network has no Orphan nodes)
+// ---------------------------------------------------------------------------------------------
+
+void UpdateNodeGeometry(int node)
+{
+	Node node2 = NodeData[node];
+	NetGeometryData netGeometryData = GetPrefabGeometry(node);
+	float num = netGeometryData.m_DefaultWidth * 0.5f;
+	precise Bounds3 bounds;
+	bounds.min.xz = node2.m_Position.xz - num;
+	bounds.max.xz = node2.m_Position.xz + num;
+	bounds.min.y = node2.m_Position.y + netGeometryData.m_DefaultHeightRange.min;
+	bounds.max.y = node2.m_Position.y + netGeometryData.m_DefaultHeightRange.max;
+	EdgeIterator edgeIterator = EdgeIterator_Create(Entity_Null, node, false);
+	EdgeIteratorValue value;
+	while (EdgeIterator_GetNext(edgeIterator, value))
+	{
+		if (!value.m_End) bounds = Bounds_Or(bounds, StartNodeGeometryRW[value.m_Edge].m_Bounds);
+		else bounds = Bounds_Or(bounds, EndNodeGeometryRW[value.m_Edge].m_Bounds);
+	}
+	NodeGeometry value2 = NodeGeometryRW[node];
+	value2.m_Bounds = bounds;
+	NodeGeometryRW[node] = value2;
+}

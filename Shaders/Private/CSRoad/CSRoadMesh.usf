@@ -1,0 +1,429 @@
+// Road surface meshes from the GPU geometry: BatchDataHelpers.CalculateEdge/NodeParameters per
+// road (the CompositionParameters CS2 hands its deforming vertex shader), then every composition
+// mesh vertex deformed onto those curves (the C# RoadLab RoadMeshes.Deform) and written into a
+// UCSMesh resident stream set. Geometry is computed in Unity metres (y up) and converted at the
+// write: UE = (x, -z, y) * 100, a proper rotation. Unity's front faces have cross(B - A, C - A)
+// along the normal, UE's against it, so the index writer swaps corners 1 and 2.
+
+#include "CSRoadGeometryCommon.ush"
+#include "/Plugin/PCGPlugins/Shaders/Private/CSPackedVertex.ush"
+
+#ifndef THREADGROUP_SIZE
+#define THREADGROUP_SIZE 64
+#endif
+
+// CSRoadCompositionMesh.h FCompositionVertex (BatchMeshHelpers.VertexData with UV0 as float).
+struct FCompositionVertex
+{
+	float3 Position;
+	uint Normal;
+	uint Tangent;
+	uint Color;
+	float4 UV0;
+};
+
+struct FMeshRange
+{
+	uint VertexOffset;
+	uint VertexCount;
+	uint IndexOffset;
+	uint IndexCount;
+};
+
+// One composition mesh drawn with one CompositionParameters: edge, start node or end node of a road.
+struct FMeshInstance
+{
+	uint Mesh;
+	uint Parameters;
+	uint VertexOffset;
+	uint IndexOffset;
+};
+
+uint NumInstances;
+uint InstanceGroupsX;
+// 0: UCSMesh streams. 1: Unity-space position, normal and UV into DebugVertices (golden tests).
+uint OutputMode;
+float4x4 LocalToWorld;
+uint VertexCapacity;
+uint IndexCapacity;
+
+RWStructuredBuffer<CompositionParameters> ParametersRW;
+StructuredBuffer<FCompositionVertex> MeshVertices;
+StructuredBuffer<uint> MeshIndices;
+StructuredBuffer<uint> MeshTriangleMaterials;
+StructuredBuffer<FMeshRange> MeshRanges;
+StructuredBuffer<FMeshInstance> MeshInstances;
+
+RWBuffer<float> RW_Positions;
+RWBuffer<uint> RW_Tangents;
+RWBuffer<float> RW_TexCoords;
+RWBuffer<uint> RW_Colors;
+RWBuffer<uint> RW_Indices;
+RWBuffer<uint> RW_MaterialIds;
+RWStructuredBuffer<float> DebugVertices;
+
+// ---------------------------------------------------------------------------------------------
+// BatchDataHelpers
+// ---------------------------------------------------------------------------------------------
+
+Float3x4 BDH_Translate(float3 v)
+{
+	Float3x4 m;
+	m.c0 = float3(1.0f, 0.0f, 0.0f);
+	m.c1 = float3(0.0f, 1.0f, 0.0f);
+	m.c2 = float3(0.0f, 0.0f, 1.0f);
+	m.c3 = v;
+	return m;
+}
+
+Float4x4 BDH_Identity()
+{
+	Float4x4 m;
+	m.c0 = float4(1.0f, 0.0f, 0.0f, 0.0f);
+	m.c1 = float4(0.0f, 1.0f, 0.0f, 0.0f);
+	m.c2 = float4(0.0f, 0.0f, 1.0f, 0.0f);
+	m.c3 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+	return m;
+}
+
+// UnityEngine.Vector3.Distance(a, b): the same sum of squares as math.distance.
+void BDH_CalculateMappingOffsets(Segment segment, out float4 leftOffsets, out float4 rightOffsets, float2 leftMappingOffset, float2 rightMappingOffset)
+{
+	float2 f;
+	f.x = U_distance(segment.m_Left.a, segment.m_Left.b);
+	f.y = U_distance(segment.m_Left.c, segment.m_Left.d);
+	float2 f2;
+	f2.x = U_distance(segment.m_Right.a, segment.m_Right.b);
+	f2.y = U_distance(segment.m_Right.c, segment.m_Right.d);
+	f *= (leftMappingOffset.y - leftMappingOffset.x) / U_max(1.0f, segment.m_Length.x);
+	f2 *= (rightMappingOffset.y - rightMappingOffset.x) / U_max(1.0f, segment.m_Length.y);
+	leftOffsets = float4(leftMappingOffset.x, leftMappingOffset.x + f.x, leftMappingOffset.y - f.y, leftMappingOffset.y);
+	rightOffsets = float4(rightMappingOffset.x, rightMappingOffset.x + f2.x, rightMappingOffset.y - f2.y, rightMappingOffset.y);
+}
+
+Float4x4 BDH_BuildEdgeMatrix(Bezier4x3 curve, float3 offset, float4 mappingOffsets)
+{
+	Float4x4 m;
+	m.c0 = float4(curve.a - offset, mappingOffsets.x);
+	m.c1 = float4(curve.b - offset, mappingOffsets.y);
+	m.c2 = float4(curve.c - offset, mappingOffsets.z);
+	m.c3 = float4(curve.d - offset, mappingOffsets.w);
+	return m;
+}
+
+Bezier4x3 BDH_BuildCurve(float3 startPos, float3 direction, float length)
+{
+	direction = MU_Normalize(direction, direction.xz);
+	direction.y = U_clamp(direction.y, -1.0f, 1.0f);
+	Bezier4x3 result;
+	result.a = startPos;
+	result.b = startPos + direction * (length * (1.0f / 3.0f));
+	result.c = startPos + direction * (length * (2.0f / 3.0f));
+	result.d = startPos + direction * length;
+	return result;
+}
+
+// isRotated = false: the road renderer never rotates edges.
+CompositionParameters BDH_CalculateEdgeParameters(EdgeGeometry edgeGeometry)
+{
+	CompositionParameters p;
+	float3 f = MU_Center(edgeGeometry.m_Bounds);
+	float2 f2 = edgeGeometry.m_Start.m_Length + edgeGeometry.m_End.m_Length;
+	float4 leftOffsets, rightOffsets, leftOffsets2, rightOffsets2;
+	BDH_CalculateMappingOffsets(edgeGeometry.m_Start, leftOffsets, rightOffsets, float2(0.0f, edgeGeometry.m_Start.m_Length.x), float2(0.0f, edgeGeometry.m_Start.m_Length.y));
+	BDH_CalculateMappingOffsets(edgeGeometry.m_End, leftOffsets2, rightOffsets2, float2(edgeGeometry.m_Start.m_Length.x, f2.x), float2(edgeGeometry.m_Start.m_Length.y, f2.y));
+	p.m_TransformMatrix = BDH_Translate(f);
+	p.m_CompositionMatrix0 = BDH_BuildEdgeMatrix(edgeGeometry.m_Start.m_Left, f, leftOffsets);
+	p.m_CompositionMatrix1 = BDH_BuildEdgeMatrix(edgeGeometry.m_End.m_Left, f, leftOffsets2);
+	p.m_CompositionMatrix2 = BDH_BuildEdgeMatrix(edgeGeometry.m_Start.m_Right, f, rightOffsets);
+	p.m_CompositionMatrix3 = BDH_BuildEdgeMatrix(edgeGeometry.m_End.m_Right, f, rightOffsets2);
+	p.m_CompositionMatrix4 = BDH_Identity();
+	p.m_CompositionMatrix5 = BDH_Identity();
+	p.m_CompositionMatrix6 = BDH_Identity();
+	p.m_CompositionMatrix7 = BDH_Identity();
+	p.m_CompositionSync0 = float4(0.2f, 0.4f, 0.6f, 0.8f);
+	p.m_CompositionSync1 = float4(0.2f, 0.4f, 0.6f, 0.8f);
+	p.m_CompositionSync2 = float4(0.2f, 0.4f, 0.6f, 0.8f);
+	p.m_CompositionSync3 = float4(0.2f, 0.4f, 0.6f, 0.8f);
+	return p;
+}
+
+CompositionParameters BDH_CalculateNodeParameters(EdgeNodeGeometry nodeGeometry, NetCompositionData prefabCompositionData)
+{
+	CompositionParameters p;
+	float3 f = MU_Center(nodeGeometry.m_Bounds);
+	float4 mappingOffsets = float4(0.0f, 1.0f / 3.0f, 2.0f / 3.0f, 1.0f) * prefabCompositionData.m_Width;
+	p.m_TransformMatrix = BDH_Translate(f);
+	p.m_CompositionSync0 = prefabCompositionData.m_SyncVertexOffsetsLeft;
+	p.m_CompositionSync1 = nodeGeometry.m_SyncVertexTargetsLeft;
+	p.m_CompositionSync2 = prefabCompositionData.m_SyncVertexOffsetsRight;
+	p.m_CompositionSync3 = nodeGeometry.m_SyncVertexTargetsRight;
+	if (nodeGeometry.m_MiddleRadius > 0.0f)
+	{
+		float2 f2 = nodeGeometry.m_Left.m_Length + nodeGeometry.m_Right.m_Length;
+		float4 leftOffsets, rightOffsets, leftOffsets2, rightOffsets2;
+		BDH_CalculateMappingOffsets(nodeGeometry.m_Left, leftOffsets, rightOffsets, float2(0.0f, nodeGeometry.m_Left.m_Length.x), float2(0.0f, nodeGeometry.m_Left.m_Length.y));
+		BDH_CalculateMappingOffsets(nodeGeometry.m_Right, leftOffsets2, rightOffsets2, float2(nodeGeometry.m_Left.m_Length.x, f2.x), float2(nodeGeometry.m_Left.m_Length.y, f2.y));
+		float3 direction = MU_StartTangent(nodeGeometry.m_Left.m_Left);
+		float3 direction2 = MU_StartTangent(nodeGeometry.m_Left.m_Right);
+		Bezier4x3 output, output2;
+		MU_Divide(nodeGeometry.m_Middle, output, output2, 0.99f);
+		float4 mappingOffsets2 = U_lerp(leftOffsets, rightOffsets, 0.5f);
+		float4 mappingOffsets3 = U_lerp(leftOffsets2, rightOffsets2, 0.5f);
+		p.m_CompositionMatrix0 = BDH_BuildEdgeMatrix(nodeGeometry.m_Left.m_Left, f, leftOffsets);
+		p.m_CompositionMatrix1 = BDH_BuildEdgeMatrix(nodeGeometry.m_Right.m_Left, f, leftOffsets2);
+		p.m_CompositionMatrix2 = BDH_BuildEdgeMatrix(nodeGeometry.m_Left.m_Right, f, rightOffsets);
+		p.m_CompositionMatrix3 = BDH_BuildEdgeMatrix(nodeGeometry.m_Right.m_Right, f, rightOffsets2);
+		p.m_CompositionMatrix4 = BDH_BuildEdgeMatrix(output, f, mappingOffsets2);
+		p.m_CompositionMatrix5 = BDH_BuildEdgeMatrix(output2, f, mappingOffsets3);
+		p.m_CompositionMatrix6 = BDH_BuildEdgeMatrix(BDH_BuildCurve(nodeGeometry.m_Left.m_Left.a, direction, prefabCompositionData.m_Width), f, mappingOffsets);
+		p.m_CompositionMatrix7 = BDH_BuildEdgeMatrix(BDH_BuildCurve(nodeGeometry.m_Left.m_Right.a, direction2, prefabCompositionData.m_Width), f, mappingOffsets);
+	}
+	else
+	{
+		float4 leftOffsets3, rightOffsets3, leftOffsets4, rightOffsets4;
+		BDH_CalculateMappingOffsets(nodeGeometry.m_Left, leftOffsets3, rightOffsets3, float2(0.0f, nodeGeometry.m_Left.m_Length.x), float2(0.0f, nodeGeometry.m_Left.m_Length.y));
+		BDH_CalculateMappingOffsets(nodeGeometry.m_Right, leftOffsets4, rightOffsets4, float2(0.0f, nodeGeometry.m_Right.m_Length.x), float2(0.0f, nodeGeometry.m_Right.m_Length.y));
+		float3 direction3 = MU_StartTangent(nodeGeometry.m_Left.m_Left);
+		float3 direction4 = MU_StartTangent(nodeGeometry.m_Right.m_Right);
+		p.m_CompositionMatrix0 = BDH_BuildEdgeMatrix(nodeGeometry.m_Left.m_Left, f, leftOffsets3);
+		p.m_CompositionMatrix1 = BDH_BuildEdgeMatrix(nodeGeometry.m_Right.m_Left, f, leftOffsets4);
+		p.m_CompositionMatrix2 = BDH_BuildEdgeMatrix(nodeGeometry.m_Left.m_Right, f, rightOffsets3);
+		p.m_CompositionMatrix3 = BDH_BuildEdgeMatrix(nodeGeometry.m_Right.m_Right, f, rightOffsets4);
+		p.m_CompositionMatrix4 = BDH_BuildEdgeMatrix(nodeGeometry.m_Middle, f, U_lerp(leftOffsets4, rightOffsets3, 0.5f));
+		p.m_CompositionMatrix5 = BDH_Identity();
+		p.m_CompositionMatrix6 = BDH_BuildEdgeMatrix(BDH_BuildCurve(nodeGeometry.m_Left.m_Left.a, direction3, prefabCompositionData.m_Width), f, mappingOffsets);
+		p.m_CompositionMatrix7 = BDH_BuildEdgeMatrix(BDH_BuildCurve(nodeGeometry.m_Right.m_Right.a, direction4, prefabCompositionData.m_Width), f, mappingOffsets);
+	}
+	return p;
+}
+
+// One road per thread: its edge, start node and end node parameters (RoadRenderer.BuildSteps).
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void CalculateParametersCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.x >= NumEdges) return;
+	int entity = EdgeList[DispatchThreadId.x];
+	Composition composition = CompositionData[entity];
+	precise CompositionParameters edge = BDH_CalculateEdgeParameters(EdgeGeometryRW[entity]);
+	precise CompositionParameters start = BDH_CalculateNodeParameters(StartNodeGeometryRW[entity], GetComposition(composition.m_StartNode));
+	precise CompositionParameters end = BDH_CalculateNodeParameters(EndNodeGeometryRW[entity], GetComposition(composition.m_EndNode));
+	ParametersRW[DispatchThreadId.x * 3u + 0u] = edge;
+	ParametersRW[DispatchThreadId.x * 3u + 1u] = start;
+	ParametersRW[DispatchThreadId.x * 3u + 2u] = end;
+}
+
+// ---------------------------------------------------------------------------------------------
+// RoadMeshes.Deform (C# RoadLab stand-in for CS2's composition vertex shader)
+// ---------------------------------------------------------------------------------------------
+
+Float4x4 RM_Matrix(CompositionParameters p, uint i)
+{
+	if (i == 0u) return p.m_CompositionMatrix0;
+	if (i == 1u) return p.m_CompositionMatrix1;
+	if (i == 2u) return p.m_CompositionMatrix2;
+	if (i == 3u) return p.m_CompositionMatrix3;
+	if (i == 4u) return p.m_CompositionMatrix4;
+	if (i == 5u) return p.m_CompositionMatrix5;
+	if (i == 6u) return p.m_CompositionMatrix6;
+	return p.m_CompositionMatrix7;
+}
+
+float RM_Component(float4 v, int i)
+{
+	if (i == 0) return v.x;
+	if (i == 1) return v.y;
+	if (i == 2) return v.z;
+	return v.w;
+}
+
+// Piecewise-linear remap through the sync breakpoints; returns (value, slope).
+float2 RM_Remap(float v, float4 source, float4 target)
+{
+	float previous = 0.0f;
+	float mapped = 0.0f;
+	for (int i = 0; i < 5; i++)
+	{
+		float next = i < 4 ? RM_Component(source, i) : 1.0f;
+		float value = i < 4 ? RM_Component(target, i) : 1.0f;
+		if (v <= next && next - previous > 1e-6f) return float2(U_lerp(mapped, value, (v - previous) / (next - previous)), (value - mapped) / (next - previous));
+		previous = next;
+		mapped = value;
+	}
+	return float2(v, 1.0f);
+}
+
+float4 RM_Lerp(float4 x, float4 y, float s) { return U_lerp(x, y, s); }
+
+void RM_BuildDeformation(FCompositionVertex vertex, CompositionParameters p, out Float4x4 curve, out Float4x4 crossCurve)
+{
+	float x = vertex.Position.x;
+	uint bits = (vertex.Color >> 24) & 0xFFu;
+	Float4x4 left = RM_Matrix(p, vertex.Color & 0xFFu);
+	Float4x4 right = RM_Matrix(p, (vertex.Color >> 8) & 0xFFu);
+	float4 weights = x;
+	float4 slopes = 1.0f;
+	if ((bits & 6u) != 0u)
+	{
+		float4 source = (bits & 2u) != 0u ? p.m_CompositionSync0 : p.m_CompositionSync2;
+		float4 target = (bits & 2u) != 0u ? p.m_CompositionSync1 : p.m_CompositionSync3;
+		float2 end = RM_Remap(x, source, target);
+		// SecondaryObjectSystem.LerpRemap builds a cubic first: A/B keep the source width, C uses a
+		// physical-width-weighted remap, D the target. Bit 128 is LerpRemap2's second half.
+		if ((bits & 128u) != 0u)
+		{
+			weights = end.x;
+			slopes = end.y;
+		}
+		else
+		{
+			float a = U_distance(left.c0.xz, right.c0.xz);
+			float b = U_distance(left.c3.xz, right.c3.xz);
+			float2 middle = RM_Remap(x, source, U_lerp(source * a, target * b, 0.5f) / U_max(1e-6f, U_lerp(a, b, 0.5f)));
+			weights.z = middle.x;
+			weights.w = end.x;
+			slopes.z = middle.y;
+			slopes.w = end.y;
+		}
+	}
+	curve.c0 = RM_Lerp(left.c0, right.c0, weights.x);
+	curve.c1 = RM_Lerp(left.c1, right.c1, weights.y);
+	curve.c2 = RM_Lerp(left.c2, right.c2, weights.z);
+	curve.c3 = RM_Lerp(left.c3, right.c3, weights.w);
+	crossCurve.c0 = (right.c0 - left.c0) * slopes.x;
+	crossCurve.c1 = (right.c1 - left.c1) * slopes.y;
+	crossCurve.c2 = (right.c2 - left.c2) * slopes.z;
+	crossCurve.c3 = (right.c3 - left.c3) * slopes.w;
+}
+
+float4 RM_Curve(Float4x4 m, float t)
+{
+	float s = 1.0f - t;
+	return m.c0 * s * s * s + 3.0f * m.c1 * s * s * t + 3.0f * m.c2 * s * t * t + m.c3 * t * t * t;
+}
+
+float3 RM_Tangent(Float4x4 m, float t)
+{
+	float s = 1.0f - t;
+	return 3.0f * ((m.c1 - m.c0) * s * s + 2.0f * (m.c2 - m.c1) * s * t + (m.c3 - m.c2) * t * t).xyz;
+}
+
+float3 RM_DecodeOctahedral(float2 oct, float3 fallback)
+{
+	float3 n = float3(oct.x, oct.y, 1.0f - abs(oct.x) - abs(oct.y));
+	if (n.z < 0.0f) n.xy = (1.0f - abs(n.yx)) * select(n.xy >= 0.0f, 1.0f, -1.0f);
+	return normalizesafe(n, fallback);
+}
+
+// NormalToOctahedral: two 16-bit snorm halves.
+float3 RM_DecodeNormal(uint packed)
+{
+	float2 oct = float2(U_max(-1.0f, (float)(((int)(packed << 16u)) >> 16) / 32767.0f), U_max(-1.0f, (float)(((int)packed) >> 16) / 32767.0f));
+	return RM_DecodeOctahedral(oct, float3(0.0f, 1.0f, 0.0f));
+}
+
+// TangentToOctahedral: two 15-bit snorm fields (bits 0-14, 16-30) and the bitangent sign in bit 31.
+float4 RM_DecodeTangent(uint packed)
+{
+	float2 oct = float2(U_max(-1.0f, (float)(((int)(packed << 17u)) >> 17) / 16383.0f), U_max(-1.0f, (float)(((int)(packed << 1u)) >> 17) / 16383.0f));
+	return float4(RM_DecodeOctahedral(oct, float3(1.0f, 0.0f, 0.0f)), (packed & 0x80000000u) != 0u ? -1.0f : 1.0f);
+}
+
+struct FDeformedVertex
+{
+	float3 Position;
+	float3 Normal;
+	float4 Tangent;
+	float2 UV;
+};
+
+FDeformedVertex RM_Deform(FCompositionVertex vertex, CompositionParameters p)
+{
+	Float4x4 curve, crossCurve;
+	RM_BuildDeformation(vertex, p, curve, crossCurve);
+	float t = vertex.Position.z;
+	float4 position = RM_Curve(curve, t);
+	float3 along = normalizesafe(RM_Tangent(curve, t), float3(0.0f, 0.0f, 1.0f));
+	float3 lateral = normalizesafe(RM_Curve(crossCurve, t).xyz, float3(along.z, 0.0f, -along.x));
+	float3 up = normalizesafe(cross(along, lateral), float3(0.0f, 1.0f, 0.0f));
+	if (up.y < 0.0f) up = -up;
+	float3 normal = RM_DecodeNormal(vertex.Normal);
+	FDeformedVertex result;
+	result.Position = position.xyz + p.m_TransformMatrix.c3 + float3(0.0f, vertex.Position.y, 0.0f);
+	uint terrain = (vertex.Color >> 16) & 0xFFu;
+	if (terrain == 1u) result.Position.y = U_min(result.Position.y, TerrainUtils_SampleHeight(result.Position));
+	if (terrain == 2u) result.Position.y = U_max(result.Position.y, TerrainUtils_SampleHeight(result.Position));
+	result.UV = float2(vertex.UV0.x, vertex.UV0.y >= 0.0f ? position.w * vertex.UV0.y : vertex.UV0.y);
+	result.Normal = normalizesafe(lateral * normal.x + up * normal.y + along * normal.z, float3(0.0f, 1.0f, 0.0f));
+	// The packed tangent follows the same frame; re-orthogonalised against the deformed normal.
+	float4 tangent = RM_DecodeTangent(vertex.Tangent);
+	float3 tangentWorld = lateral * tangent.x + up * tangent.y + along * tangent.z;
+	tangentWorld = normalizesafe(tangentWorld - result.Normal * dot(tangentWorld, result.Normal), along);
+	result.Tangent = float4(tangentWorld, tangent.w);
+	return result;
+}
+
+uint InstanceIndex(uint3 GroupId) { return GroupId.y * InstanceGroupsX + GroupId.x; }
+
+float3 ToUnreal(float3 v) { return float3(v.x, 0.0f - v.z, v.y); }
+
+// One group per instance; the threads stride over the instance's composition mesh vertices.
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void DeformVerticesCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint instanceIndex = InstanceIndex(GroupId);
+	if (instanceIndex >= NumInstances) return;
+	FMeshInstance instance = MeshInstances[instanceIndex];
+	FMeshRange range = MeshRanges[instance.Mesh];
+	CompositionParameters p = ParametersRW[instance.Parameters];
+	for (uint local = GroupIndex; local < range.VertexCount; local += THREADGROUP_SIZE)
+	{
+		precise FDeformedVertex v = RM_Deform(MeshVertices[range.VertexOffset + local], p);
+		uint dst = instance.VertexOffset + local;
+		if (OutputMode == 1u)
+		{
+			DebugVertices[dst * 8u + 0u] = v.Position.x;
+			DebugVertices[dst * 8u + 1u] = v.Position.y;
+			DebugVertices[dst * 8u + 2u] = v.Position.z;
+			DebugVertices[dst * 8u + 3u] = v.Normal.x;
+			DebugVertices[dst * 8u + 4u] = v.Normal.y;
+			DebugVertices[dst * 8u + 5u] = v.Normal.z;
+			DebugVertices[dst * 8u + 6u] = v.UV.x;
+			DebugVertices[dst * 8u + 7u] = v.UV.y;
+			continue;
+		}
+		if (dst >= VertexCapacity) continue;
+		float3 position = mul(float4(ToUnreal(v.Position) * 100.0f, 1.0f), LocalToWorld).xyz;
+		float3 normal = normalize(mul(float4(ToUnreal(v.Normal), 0.0f), LocalToWorld).xyz);
+		float3 tangent = normalize(mul(float4(ToUnreal(v.Tangent.xyz), 0.0f), LocalToWorld).xyz);
+		RW_Positions[dst * 3u + 0u] = position.x;
+		RW_Positions[dst * 3u + 1u] = position.y;
+		RW_Positions[dst * 3u + 2u] = position.z;
+		RW_Tangents[dst * 2u + 0u] = PackSnorm8888(float4(tangent, 0.0f));
+		RW_Tangents[dst * 2u + 1u] = PackSnorm8888(float4(normal, v.Tangent.w));
+		RW_TexCoords[dst * 2u + 0u] = v.UV.x;
+		RW_TexCoords[dst * 2u + 1u] = v.UV.y;
+		RW_Colors[dst] = 0xFFFFFFFFu;
+	}
+}
+
+// One group per instance: indices offset to the instance's vertices, one material slot per triangle.
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void WriteIndicesCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint instanceIndex = InstanceIndex(GroupId);
+	if (instanceIndex >= NumInstances) return;
+	FMeshInstance instance = MeshInstances[instanceIndex];
+	FMeshRange range = MeshRanges[instance.Mesh];
+	uint numTriangles = range.IndexCount / 3u;
+	for (uint tri = GroupIndex; tri < numTriangles; tri += THREADGROUP_SIZE)
+	{
+		uint dst = instance.IndexOffset + tri * 3u;
+		if (dst + 2u >= IndexCapacity) continue;
+		uint src = range.IndexOffset + tri * 3u;
+		RW_Indices[dst + 0u] = instance.VertexOffset + MeshIndices[src + 0u];
+		RW_Indices[dst + 1u] = instance.VertexOffset + MeshIndices[src + 2u];
+		RW_Indices[dst + 2u] = instance.VertexOffset + MeshIndices[src + 1u];
+		RW_MaterialIds[dst / 3u] = MeshTriangleMaterials[src / 3u];
+	}
+}

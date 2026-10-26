@@ -1,0 +1,302 @@
+// Shared GPU state of the CS2 road geometry passes: the ECS component tables of one network
+// build as structured buffers indexed by 1-based entity id (0 = Entity.Null), plus the
+// accessors the ported jobs use in place of ComponentLookup / BufferLookup.
+#pragma once
+
+#include "/Engine/Private/Common.ush"
+#include "CSRoadNetUtils.ush"
+#include "CSRoadTypes.ush"
+
+#define COMPONENT_NODE 1u
+#define COMPONENT_EDGE 2u
+#define COMPONENT_CURVE 4u
+#define COMPONENT_ELEVATION 8u
+#define COMPONENT_UPGRADED 16u
+#define COMPONENT_OWNER 32u
+#define COMPONENT_OUTSIDE_CONNECTION 64u
+#define COMPONENT_COMPOSITION 128u
+
+uint NumEntities;
+uint NumNodes;
+uint NumEdges;
+uint IterationIndex;
+float3 TerrainBoundsMin;
+float3 TerrainBoundsMax;
+
+StructuredBuffer<uint> EntityMask;
+StructuredBuffer<int> EntityPrefab;
+StructuredBuffer<Node> NodeData;
+StructuredBuffer<Edge> EdgeData;
+StructuredBuffer<Curve> CurveData;
+StructuredBuffer<Elevation> ElevationData;
+StructuredBuffer<Owner> OwnerData;
+StructuredBuffer<Composition> CompositionData;
+StructuredBuffer<uint2> ConnectedEdgeRange;
+StructuredBuffer<int> ConnectedEdgeList;
+StructuredBuffer<int> NodeList;
+StructuredBuffer<int> EdgeList;
+
+StructuredBuffer<NetGeometryData> PrefabGeometryData;
+StructuredBuffer<PlaceableNetData> PrefabPlaceableData;
+StructuredBuffer<NetCompositionData> PrefabCompositionData;
+StructuredBuffer<uint2> CompositionPieceRange;
+StructuredBuffer<NetCompositionPiece> CompositionPieceList;
+StructuredBuffer<uint2> CompositionLaneRange;
+StructuredBuffer<NetCompositionLane> CompositionLaneList;
+StructuredBuffer<uint2> CompositionCrosswalkRange;
+StructuredBuffer<NetCompositionCrosswalk> CompositionCrosswalkList;
+StructuredBuffer<NetLaneData> LaneDataTable;
+
+RWStructuredBuffer<NodeGeometry> NodeGeometryRW;
+RWStructuredBuffer<EdgeGeometry> EdgeGeometryRW;
+RWStructuredBuffer<EdgeNodeGeometry> StartNodeGeometryRW;
+RWStructuredBuffer<EdgeNodeGeometry> EndNodeGeometryRW;
+// Copy of Start/EndNodeGeometry taken before the second CalculateNodeGeometry iteration, so the
+// cross-edge reads of that iteration (CheckNodeCurves) see one consistent state.
+StructuredBuffer<EdgeNodeGeometry> PrevStartNodeGeometry;
+StructuredBuffer<EdgeNodeGeometry> PrevEndNodeGeometry;
+// NativeParallelHashMap<int2(edge, isEnd), float4> as a dense table.
+RWStructuredBuffer<float4> EdgeHeightMap;
+RWStructuredBuffer<uint> EdgeHeightMapValid;
+RWStructuredBuffer<GeometrySystem_IntersectionData> IntersectionBuffer;
+
+// TerrainHeightData: two R16 heightmaps (playable, world), two samples per uint (low half first);
+// bHasTerrain = 0 samples 0.
+uint bHasTerrain;
+float4 TerrainPlayableOffsetSize;
+float4 TerrainWorldOffsetSize;
+int4 TerrainDims;
+float2 TerrainHeightScaleOffset;
+StructuredBuffer<uint> TerrainPlayable;
+StructuredBuffer<uint> TerrainWorld;
+
+bool HasComponent(int e, uint bit) { return e > 0 && (uint)e < NumEntities && (EntityMask[e] & bit) != 0u; }
+int GetPrefab(int e) { return EntityPrefab[e]; }
+NetGeometryData GetPrefabGeometry(int e) { return PrefabGeometryData[EntityPrefab[e]]; }
+NetCompositionData GetComposition(int composition) { return PrefabCompositionData[composition]; }
+
+bool TryGetOwner(int e, out Owner o)
+{
+	o = (Owner)0;
+	if (!HasComponent(e, COMPONENT_OWNER)) return false;
+	o = OwnerData[e];
+	return true;
+}
+
+bool TryGetElevation(int e, out Elevation v)
+{
+	v = (Elevation)0;
+	if (!HasComponent(e, COMPONENT_ELEVATION)) return false;
+	v = ElevationData[e];
+	return true;
+}
+
+bool TryGetNode(int e, out Node v)
+{
+	v = (Node)0;
+	if (!HasComponent(e, COMPONENT_NODE)) return false;
+	v = NodeData[e];
+	return true;
+}
+
+bool TryGetEdge(int e, out Edge v)
+{
+	v = (Edge)0;
+	if (!HasComponent(e, COMPONENT_EDGE)) return false;
+	v = EdgeData[e];
+	return true;
+}
+
+bool TryGetCompositionComponent(int e, out Composition v)
+{
+	v = (Composition)0;
+	if (!HasComponent(e, COMPONENT_COMPOSITION)) return false;
+	v = CompositionData[e];
+	return true;
+}
+
+// DynamicBuffer stand-in: (offset, count) into a flat list.
+struct FBufferRange
+{
+	uint Offset;
+	uint Count;
+};
+
+FBufferRange MakeRange(uint2 r) { FBufferRange b; b.Offset = r.x; b.Count = r.y; return b; }
+FBufferRange CompositionPieces(int composition) { return MakeRange(CompositionPieceRange[composition]); }
+FBufferRange CompositionLanes(int composition) { return MakeRange(CompositionLaneRange[composition]); }
+FBufferRange CompositionCrosswalks(int composition) { return MakeRange(CompositionCrosswalkRange[composition]); }
+
+float TerrainTexel(bool bWorld, int Width, int2 Texel)
+{
+	uint Index = (uint)(Texel.y * Width + Texel.x);
+	uint Word = bWorld ? TerrainWorld[Index >> 1] : TerrainPlayable[Index >> 1];
+	return (float)((Word >> ((Index & 1u) * 16u)) & 0xFFFFu);
+}
+
+// TerrainUtils.SampleHeight over the saved R16 maps (SavedTerrain.Sample).
+float SampleTerrainMap(bool bWorld, float2 Offset, float2 Size, int Width, int Height, float2 PointXZ)
+{
+	float2 P = (PointXZ - Offset) / Size * float2((float)Width, (float)Height) - 0.5f;
+	int2 F = int2((int)floor(P.x), (int)floor(P.y));
+	int2 A = int2(U_clamp(F.x, 0, Width - 1), U_clamp(F.y, 0, Height - 1));
+	int2 B = int2(U_clamp(F.x + 1, 0, Width - 1), U_clamp(F.y + 1, 0, Height - 1));
+	float2 T = U_saturate(P - float2((float)A.x, (float)A.y));
+	float Row0 = U_lerp(TerrainTexel(bWorld, Width, int2(A.x, A.y)), TerrainTexel(bWorld, Width, int2(B.x, A.y)), T.x);
+	float Row1 = U_lerp(TerrainTexel(bWorld, Width, int2(A.x, B.y)), TerrainTexel(bWorld, Width, int2(B.x, B.y)), T.x);
+	return U_lerp(Row0, Row1, T.y) * TerrainHeightScaleOffset.x / 65535.0f + TerrainHeightScaleOffset.y;
+}
+
+float TerrainUtils_SampleHeight(float3 Position)
+{
+	if (bHasTerrain == 0u) return 0.0f;
+	float2 P = (Position.xz - TerrainPlayableOffsetSize.xy) / TerrainPlayableOffsetSize.zw * float2((float)TerrainDims.x, (float)TerrainDims.y) - 0.5f;
+	bool bOutside = any(P < 0.0f) || any(P >= float2((float)(TerrainDims.x - 1), (float)(TerrainDims.y - 1)));
+	if (bOutside) return SampleTerrainMap(true, TerrainWorldOffsetSize.xy, TerrainWorldOffsetSize.zw, TerrainDims.z, TerrainDims.w, Position.xz);
+	return SampleTerrainMap(false, TerrainPlayableOffsetSize.xy, TerrainPlayableOffsetSize.zw, TerrainDims.x, TerrainDims.y, Position.xz);
+}
+
+// EdgeIterator for permanent nodes (no Temp / Hidden entities in a built network).
+struct EdgeIteratorValue
+{
+	int m_Edge;
+	bool m_End;
+	bool m_Middle;
+};
+
+struct EdgeIterator
+{
+	int Node;
+	uint Offset;
+	uint Count;
+	uint Index;
+	bool Middles;
+};
+
+EdgeIterator EdgeIterator_Create(int edge, int node, bool includeMiddleConnections)
+{
+	EdgeIterator it;
+	it.Node = node;
+	uint2 r = ConnectedEdgeRange[node];
+	it.Offset = r.x;
+	it.Count = r.y;
+	it.Index = 0u;
+	it.Middles = includeMiddleConnections;
+	return it;
+}
+
+bool EdgeIterator_GetNext(inout EdgeIterator it, out EdgeIteratorValue value)
+{
+	value = (EdgeIteratorValue)0;
+	while (it.Index < it.Count)
+	{
+		value.m_Edge = ConnectedEdgeList[it.Offset + it.Index];
+		it.Index++;
+		Edge e = EdgeData[value.m_Edge];
+		value.m_End = e.m_End == it.Node;
+		if (value.m_End || e.m_Start == it.Node)
+		{
+			value.m_Middle = false;
+			return true;
+		}
+		if (it.Middles)
+		{
+			value.m_Middle = true;
+			return true;
+		}
+	}
+	value = (EdgeIteratorValue)0;
+	return false;
+}
+
+// NetCompositionHelpers.CalculateRoundaboutSize over a composition's piece list.
+float2 NetCompositionHelpers_CalculateRoundaboutSize(NetCompositionData compositionData, FBufferRange pieces)
+{
+	float2 f = 0.0f;
+	float2 f2 = CS_FLT_MAX;
+	float4 f3 = 0.0f;
+	float2 y = 0.0f;
+	float2 f4 = compositionData.m_Width * 0.5f;
+	int2 road = int2((int)pieces.Count, -1);
+	int2 bicycle = int2((int)pieces.Count, -1);
+	for (int i = 0; i < (int)pieces.Count; i++)
+	{
+		NetCompositionPiece piece = CompositionPieceList[pieces.Offset + i];
+		if ((piece.m_PieceFlags & NetPieceFlags_HasRoadLanes) != 0u)
+		{
+			road.x = U_min(road.x, i);
+			road.y = i;
+		}
+		else if ((piece.m_PieceFlags & NetPieceFlags_HasBicycleLanes) != 0u)
+		{
+			bicycle.x = U_min(bicycle.x, i);
+			bicycle.y = i;
+		}
+	}
+	uint laneFlag = NetPieceFlags_HasRoadLanes;
+	if (road.y < road.x && bicycle.y >= bicycle.x)
+	{
+		road = bicycle;
+		laneFlag = NetPieceFlags_HasBicycleLanes;
+	}
+	for (int j = road.x; j <= road.y; j++)
+	{
+		NetCompositionPiece piece2 = CompositionPieceList[pieces.Offset + j];
+		if (j == road.x || (piece2.m_PieceFlags & (laneFlag | NetPieceFlags_BlockTraffic)) == NetPieceFlags_BlockTraffic)
+		{
+			f4.y = compositionData.m_Width * 0.5f;
+			float num = 0.0f;
+			for (int k = j + 1; k < road.y; k++)
+			{
+				NetCompositionPiece piece3 = CompositionPieceList[pieces.Offset + k];
+				if ((piece3.m_PieceFlags & laneFlag) == 0u)
+				{
+					if ((piece3.m_PieceFlags & NetPieceFlags_BlockTraffic) != 0u)
+					{
+						f4.y = piece3.m_Offset.x - piece3.m_Size.x * 0.5f;
+						break;
+					}
+					num += piece3.m_Size.x;
+				}
+			}
+			f4.y -= num;
+		}
+		if ((piece2.m_PieceFlags & laneFlag) != 0u)
+		{
+			float y2 = (piece2.m_SectionFlags & NetSectionFlags_Invert) == 0u
+				? f4.y + piece2.m_Size.x * 0.5f - piece2.m_Offset.x
+				: f4.x + piece2.m_Size.x * 0.5f + piece2.m_Offset.x;
+			if (((piece2.m_SectionFlags & NetSectionFlags_Invert) != 0u) != ((piece2.m_SectionFlags & NetSectionFlags_FlipLanes) != 0u))
+			{
+				f.x = U_max(f.x, y2);
+				f2.y = U_min(f2.y, y2);
+				y.x += piece2.m_Size.x;
+				f3.w = U_max(f3.w, piece2.m_Size.x);
+			}
+			else
+			{
+				f.y = U_max(f.y, y2);
+				f2.x = U_min(f2.x, y2);
+				y.y += piece2.m_Size.x;
+				f3.z = U_max(f3.z, piece2.m_Size.x);
+			}
+		}
+		else if ((piece2.m_PieceFlags & NetPieceFlags_BlockTraffic) != 0u)
+		{
+			f4.x = piece2.m_Size.x * 0.5f - piece2.m_Offset.x;
+			f3.xy = U_max(f3.xy, y);
+			y = 0.0f;
+		}
+		else
+		{
+			f4.x -= piece2.m_Size.x;
+			f4.y += piece2.m_Size.x;
+		}
+	}
+	f3.xy = U_max(f3.xy, y);
+	float2 f5 = select(f2 < CS_FLT_MAX, U_max(f2, f), f);
+	f5 = select(f5 == 0.0f, (float2)(compositionData.m_Width * 0.5f), f5);
+	f5 += U_max(f3.xy, f3.zw) / 3.0f;
+	if (laneFlag == NetPieceFlags_HasRoadLanes && bicycle.y >= bicycle.x) f5 += 1.5f;
+	return f5;
+}
