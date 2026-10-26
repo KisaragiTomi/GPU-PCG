@@ -11,6 +11,8 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="$(CS2RoadLab)\Port\RoadPort.csproj" />
+    <!-- RoadLab's decal builder, compiled unchanged against GodotShim.cs. -->
+    <Compile Include="$(CS2RoadLab)\App\RoadDecals.cs" Link="RoadDecals.cs" />
     <Reference Include="Unity.Mathematics"><HintPath>$(GameRoot)\Cities2_Data\Managed\Unity.Mathematics.dll</HintPath><Private>true</Private></Reference>
   </ItemGroup>
 </Project>

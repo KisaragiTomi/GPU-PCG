@@ -621,6 +621,59 @@ FString FAssets::AtlasBaseColor(const FString& Atlas) const
 	return Atlas + TEXT("_BaseColor");
 }
 
+FString FAssets::SurfaceBaseColor(const FString& Surface) const
+{
+	const TSharedPtr<FJsonObject>* Bindings = nullptr;
+	const TSharedPtr<FJsonObject>* Binding = nullptr;
+	FString BaseColor;
+	if (Catalog.IsValid() && Catalog->TryGetObjectField(TEXT("material_bindings"), Bindings) && (*Bindings)->TryGetObjectField(Surface, Binding)) (*Binding)->TryGetStringField(TEXT("BaseColor"), BaseColor);
+	return BaseColor;
+}
+
+const TArray<FLaneDecalMesh>& FAssets::LaneDecalMeshes(int32 LanePrefab) const
+{
+	if (const TArray<FLaneDecalMesh>* Cached = LaneDecalCache.Find(LanePrefab)) return *Cached;
+	TArray<FLaneDecalMesh>& Result = LaneDecalCache.Add(LanePrefab);
+	const TSharedPtr<FJsonObject> Lane = RawObject(LanePrefab);
+	const TSharedPtr<FJsonObject> RenderAssets = CSRoadAssets_Obj(Catalog, TEXT("render_assets"));
+	for (const TSharedPtr<FJsonValue>& Value : CSRoadAssets_Arr(Lane, TEXT("m_Meshes")))
+	{
+		const TSharedPtr<FJsonObject> Reference = Value->AsObject();
+		const int32 MeshId = CSRoadAssets_Ref(Reference, TEXT("m_Mesh"));
+		const TSharedPtr<FJsonObject> Info = CSRoadAssets_Obj(RenderAssets, *FString::FromInt(MeshId));
+		if (!Info.IsValid()) continue;
+		TSharedPtr<FJsonObject> Decal;
+		TSharedPtr<FJsonObject> Curve;
+		for (const TSharedPtr<FJsonObject>& Component : Components(RawObject(MeshId)))
+		{
+			FString Type;
+			Component->TryGetStringField(TEXT("_type"), Type);
+			if (Type == TEXT("DecalProperties") && !Decal.IsValid()) Decal = Component;
+			if (Type == TEXT("CurveProperties") && !Curve.IsValid()) Curve = Component;
+		}
+		if (!Decal.IsValid()) continue;
+		FLaneDecalMesh& Mesh = Result.AddDefaulted_GetRef();
+		Mesh.bRequireEditor = CSRoadAssets_B(Reference, TEXT("m_RequireEditor"));
+		Mesh.bRequireLeftHandTraffic = CSRoadAssets_B(Reference, TEXT("m_RequireLeftHandTraffic"));
+		Mesh.bRequireRightHandTraffic = CSRoadAssets_B(Reference, TEXT("m_RequireRightHandTraffic"));
+		Mesh.bRequireLevelCrossing = CSRoadAssets_B(Reference, TEXT("m_RequireLevelCrossing"));
+		Mesh.bRequireTrackCrossing = CSRoadAssets_B(Reference, TEXT("m_RequireTrackCrossing"));
+		const TArray<TSharedPtr<FJsonValue>>& Bounds = CSRoadAssets_Arr(Info, TEXT("bounds"));
+		if (Bounds.Num() >= 2) Mesh.Size = CSRoadAssets_V(Bounds[1]) - CSRoadAssets_V(Bounds[0]);
+		const TSharedPtr<FJsonObject> Area = CSRoadAssets_Obj(Decal, TEXT("m_TextureArea"));
+		const TSharedPtr<FJsonObject> Min = CSRoadAssets_Obj(Area, TEXT("min"));
+		const TSharedPtr<FJsonObject> Max = CSRoadAssets_Obj(Area, TEXT("max"));
+		Mesh.UVMin = float2(CSRoadAssets_F(Min, TEXT("x")), CSRoadAssets_F(Min, TEXT("y")));
+		Mesh.UVMax = float2(CSRoadAssets_F(Max, TEXT("x")), CSRoadAssets_F(Max, TEXT("y")));
+		Mesh.RendererPriority = CSRoadAssets_I(Decal, TEXT("m_RendererPriority"));
+		Mesh.TilingCount = CSRoadAssets_I(Curve, TEXT("m_TilingCount"));
+		Mesh.SmoothingDistance = CSRoadAssets_F(Curve, TEXT("m_SmoothingDistance"));
+		const TArray<TSharedPtr<FJsonValue>>& Surfaces = CSRoadAssets_Arr(Info, TEXT("surfaces"));
+		if (Surfaces.Num() > 0) Mesh.Surface = Surfaces[0]->AsString();
+	}
+	return Result;
+}
+
 const FPieceMesh* FAssets::PieceMesh(int32 Piece)
 {
 	if (const TSharedPtr<FPieceMesh>* Cached = MeshCache.Find(Piece)) return Cached->Get();

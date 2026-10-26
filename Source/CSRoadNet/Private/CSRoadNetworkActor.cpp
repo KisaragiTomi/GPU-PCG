@@ -5,6 +5,7 @@
 #include "CSMesh.h"
 #include "CSMeshOps.h"
 #include "CSMeshRenderComponent.h"
+#include "CSRoadGpuDecals.h"
 #include "CSRoadGpuMesh.h"
 #include "CSRoadNet.h"
 #include "CSRoadNetworkFile.h"
@@ -13,6 +14,9 @@
 #include "Materials/MaterialInterface.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "RHIGPUReadback.h"
+#include "RenderGraphUtils.h"
+#include "RenderingThread.h"
 
 namespace
 {
@@ -70,6 +74,11 @@ ACSRoadNetworkActor::ACSRoadNetworkActor()
 	PrimaryActorTick.bCanEverTick = false;
 	RoadMesh = CreateDefaultSubobject<UCSMeshRenderComponent>(TEXT("RoadMesh"));
 	RootComponent = RoadMesh;
+	MarkingMesh = CreateDefaultSubobject<UCSMeshRenderComponent>(TEXT("MarkingMesh"));
+	MarkingMesh->SetupAttachment(RoadMesh);
+	MarkingMesh->SetCastShadow(false);
+	MarkingMesh->bVisibleInRayTracing = false;
+	MarkingMesh->bAffectDistanceFieldLighting = false;
 	MaterialFolder.Path = TEXT("/PCGPlugins/CS2Roads/Materials");
 }
 
@@ -147,6 +156,16 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	const double GraphMs = Lap();
 	if (!MeshInput.Build(Graph, Library->Assets, OutError)) return false;
 	const double MeshMs = Lap();
+	// First graph: the refined node meshes' size is decided on the GPU, and the lane graph and the
+	// decal setup run on the CPU from the GPU geometry.
+	const bool bMarkings = bBuildMarkings && MarkingMesh;
+	CSRoad::FGpuGeometryResult GeometryResult;
+	if (!CSRoad::RunRefineCountsBlocking(Geometry, MeshInput, OutError, bMarkings ? &GeometryResult : nullptr)) return false;
+	if (MeshInput.NumUnconverged > 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %u node mesh triangles did not converge in 20 refinement passes"), *GetName(), MeshInput.NumUnconverged);
+	const double RefineMs = Lap();
+	CSRoad::FGpuDecalInput Decals;
+	if (bMarkings && !Decals.Build(Graph, Library->Assets, GeometryResult, MeshInput, ResolveAssetDirectory(), OutError)) return false;
+	const double DecalSetupMs = Lap();
 	if (MeshInput.NumVertices == 0 || MeshInput.NumIndices == 0)
 	{
 		OutError = TEXT("The network has no road surface");
@@ -179,9 +198,19 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	RoadMesh->SetGpuMesh(Mesh);
 	const double AllocationMs = Lap();
 
+	// Second graph: the road surface, and the decals' receivers gathered from it. The decals refer to
+	// road triangles by their place in the index stream, so the road's material sort (which reorders
+	// it) waits until they have been drawn.
 	const FTransform ActorToWorld = GetActorTransform();
 	const FMatrix44f LocalToWorld(ActorToWorld.ToMatrixWithScale());
+	const FMatrix44f WorldToLocal(ActorToWorld.ToInverseMatrixWithScale());
 	const FBox WorldBounds = MeshInput.Bounds.TransformBy(ActorToWorld);
+	const bool bDecals = bMarkings && Decals.Items.Num() > 0;
+	CSRoad::FPooledDecalReceivers PooledReceivers;
+	TUniquePtr<FRHIGPUBufferReadback> ClipReadback;
+	if (bDecals && Decals.ClippedItems.Num() > 0) ClipReadback = MakeUnique<FRHIGPUBufferReadback>(TEXT("CSRoad.ClipCountsReadback"));
+	FRHIGPUBufferReadback* ClipReadbackPtr = ClipReadback.Get();
+	const uint32 ClipBytes = uint32(Decals.ClippedItems.Num() * sizeof(uint32));
 	bool bSorted = false;
 	bool bRecorded = false;
 	Mesh->EditMeshSync([&](FCSMeshEditContext& Context)
@@ -202,7 +231,18 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 		CSRoad::AddRoadMeshPasses(GraphBuilder, GeometryOut, MeshInput, Target);
 		UCSMeshOps::AddSetCountersPass(Context, MeshInput.NumVertices, MeshInput.NumIndices);
 		Context.SetWorldBounds(WorldBounds);
-		bSorted = UCSMeshOps::AddMaterialSectionPasses(Context, NumSlots);
+		if (bDecals)
+		{
+			CSRoad::FGpuRoadStreams Road;
+			Road.Positions = Context.Positions();
+			Road.Tangents = Context.Tangents();
+			Road.Indices = Context.Indices();
+			Road.WorldToLocal = WorldToLocal;
+			const CSRoad::FGpuDecalReceivers Receivers = CSRoad::AddDecalReceiverPasses(GraphBuilder, MeshInput, Decals, Road);
+			PooledReceivers.Extract(GraphBuilder, Receivers);
+			if (ClipReadbackPtr) AddEnqueueCopyPass(GraphBuilder, ClipReadbackPtr, Receivers.ClipCounts, ClipBytes);
+		}
+		else bSorted = UCSMeshOps::AddMaterialSectionPasses(Context, NumSlots);
 		bRecorded = true;
 	});
 	if (!bRecorded)
@@ -211,12 +251,137 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 		return false;
 	}
 	if (bSorted) UCSMeshOps::PublishMaterialSections(Mesh);
-	const double GpuMs = Lap();
-	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads, %u vertices, %d compositions; prefab data %.0f ms, snapshot %.0f ms, graph and compositions %.0f ms, composition meshes %.0f ms, allocation %.0f ms, GPU build %.0f ms"),
-		*GetName(), Graph.Roads.Num(), MeshInput.NumVertices, Graph.Compositions.Num() - 1, LibraryMs, NetworkMs, GraphMs, MeshMs, AllocationMs, GpuMs);
+	const double RoadMs = Lap();
+
+	double MarkingMs = 0.0;
+	NumMarkingTriangles = 0;
+	MissingMarkingSurfaces.Reset();
+	// Decals that cannot be built (say, too little VRAM for their mesh) leave the roads standing; the
+	// error is still returned.
+	FString MarkingError;
+	bool bMarked = false;
+	if (bDecals)
+	{
+		bMarked = BuildMarkingMesh(Decals, MeshInput, ByBaseColor, Library->Assets, PooledReceivers, ClipReadbackPtr, LocalToWorld, WorldToLocal, WorldBounds, MarkingError);
+		// Fourth graph: the road's material sections, now that the decals have read its triangles.
+		Mesh->EditMeshSync([&](FCSMeshEditContext& Context) { bSorted = UCSMeshOps::AddMaterialSectionPasses(Context, NumSlots); });
+		if (bSorted) UCSMeshOps::PublishMaterialSections(Mesh);
+		MarkingMs = Lap();
+	}
+	if (MarkingMesh) MarkingMesh->SetVisibility(bMarked);
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads, %u vertices, %u triangles, %d compositions, %d decals (%d lanes); prefab data %.0f ms, snapshot %.0f ms, graph and compositions %.0f ms, composition meshes %.0f ms, refinement counts %.0f ms, lanes and decal setup %.0f ms, allocation %.0f ms, road GPU build %.0f ms, decals %.0f ms"),
+		*GetName(), Graph.Roads.Num(), MeshInput.NumVertices, MeshInput.NumIndices / 3, Graph.Compositions.Num() - 1, Decals.Items.Num(), Decals.Lanes.Lanes.Num(),
+		LibraryMs, NetworkMs, GraphMs, MeshMs, RefineMs, DecalSetupMs, AllocationMs, RoadMs, MarkingMs);
 
 	NumRoads = Graph.Roads.Num();
 	NumVertices = int32(MeshInput.NumVertices);
 	NumTriangles = int32(MeshInput.NumIndices / 3);
+	if (!bDecals || bMarked) return true;
+	OutError = MarkingError;
+	return false;
+}
+
+bool ACSRoadNetworkActor::BuildMarkingMesh(CSRoad::FGpuDecalInput& Decals, const CSRoad::FGpuRoadMeshInput& MeshInput, const TMap<FString, UMaterialInterface*>& ByBaseColor,
+	const CSRoad::FAssets& Assets, const CSRoad::FPooledDecalReceivers& Receivers, FRHIGPUBufferReadback* ClipReadback,
+	const FMatrix44f& LocalToWorld, const FMatrix44f& WorldToLocal, const FBox& WorldBounds, FString& OutError)
+{
+	if (!Receivers.IsValid())
+	{
+		OutError = TEXT("The decal receivers were not gathered");
+		return false;
+	}
+	// The clipped crosswalks' triangle counts, from the road mesh's graph.
+	TArray<uint32> ClipCounts;
+	ClipCounts.SetNumZeroed(Decals.ClippedItems.Num());
+	if (ClipReadback)
+	{
+		bool bRead = false;
+		void* Target = ClipCounts.GetData();
+		const uint32 Bytes = uint32(ClipCounts.Num() * sizeof(uint32));
+		ENQUEUE_RENDER_COMMAND(CSRoadClipCounts)([ClipReadback, Target, Bytes, &bRead](FRHICommandListImmediate& RHICmdList)
+		{
+			RHICmdList.SubmitAndBlockUntilGPUIdle();
+			const void* Data = ClipReadback->IsReady() ? ClipReadback->Lock(Bytes) : nullptr;
+			if (!Data) return;
+			FMemory::Memcpy(Target, Data, Bytes);
+			ClipReadback->Unlock();
+			bRead = true;
+		});
+		FlushRenderingCommands();
+		if (!bRead)
+		{
+			OutError = TEXT("The crosswalk clip counts were not read back");
+			return false;
+		}
+	}
+	if (!Decals.ApplyClipCounts(ClipCounts, OutError)) return false;
+	if (Decals.NumVertices == 0 || Decals.NumIndices == 0) return true;
+
+	TArray<TObjectPtr<UMaterialInterface>> Materials;
+	for (const FString& Surface : Decals.MaterialSlots)
+	{
+		UMaterialInterface* const* Found = ByBaseColor.Find(Assets.SurfaceBaseColor(Surface));
+		if (!Found) MissingMarkingSurfaces.Add(Surface);
+		Materials.Add(Found ? *Found : FallbackMaterial.Get());
+	}
+	if (!Markings || Markings->GetOuter() != MarkingMesh) Markings = NewObject<UCSMesh>(MarkingMesh);
+	// UV0 the decal texture, UV1 the distances to both ends, UV2 / UV3 the colour (CSRoadDecal.usf).
+	if (!UCSMeshOps::EnsureTexCoordSets(Markings, 4))
+	{
+		OutError = TEXT("The decal mesh could not take four UV sets");
+		return false;
+	}
+	Markings->Materials = Materials;
+	Markings->NotifyMaterialsChanged();
+	MarkingMesh->MeshMaterial = Materials.Num() > 0 ? Materials[0].Get() : FallbackMaterial.Get();
+	const int32 NumSlots = FMath::Max(1, Materials.Num());
+	if (!Markings->EnsureCapacitySync(int32(Decals.NumVertices), int32(Decals.NumIndices)))
+	{
+		OutError = FString::Printf(TEXT("Could not allocate %u decal vertices / %u indices"), Decals.NumVertices, Decals.NumIndices);
+		return false;
+	}
+	Markings->EnsureIndirectDrawCapacitySync(NumSlots);
+	MarkingMesh->SetGpuMesh(Markings);
+
+	// Third graph: the decals, reading the road mesh's streams.
+	FCSMeshResident* RoadResident = Mesh->GetResidentPtr();
+	bool bSorted = false;
+	bool bRecorded = false;
+	Markings->EditMeshSync([&](FCSMeshEditContext& Context)
+	{
+		if (!Context.Positions() || !Context.Tangents() || !Context.TexCoords() || !Context.Colors() || !Context.Indices() || !Context.MaterialIds() || !RoadResident) return;
+		FRDGBuilder& GraphBuilder = Context.GraphBuilder;
+		{
+			FCSMeshRenderThreadEdit RoadView(GraphBuilder, *RoadResident);
+			CSRoad::FGpuRoadStreams Road;
+			Road.Positions = RoadView->Positions();
+			Road.Tangents = RoadView->Tangents();
+			Road.Indices = RoadView->Indices();
+			Road.WorldToLocal = WorldToLocal;
+			if (!Road.Positions || !Road.Tangents || !Road.Indices) return;
+			CSRoad::FGpuDecalTarget Target;
+			Target.Positions = Context.Positions();
+			Target.Tangents = Context.Tangents();
+			Target.TexCoords = Context.TexCoords();
+			Target.Colors = Context.Colors();
+			Target.Indices = Context.Indices();
+			Target.MaterialIds = Context.MaterialIds();
+			Target.VertexCapacity = Context.Resident.VertexCapacity;
+			Target.IndexCapacity = Context.Resident.IndexCapacity;
+			Target.LocalToWorld = LocalToWorld;
+			CSRoad::AddDecalMeshPasses(GraphBuilder, MeshInput, Decals, Road, Receivers.Register(GraphBuilder), Target);
+		}
+		UCSMeshOps::AddSetCountersPass(Context, Decals.NumVertices, Decals.NumIndices);
+		Context.SetWorldBounds(WorldBounds);
+		bSorted = UCSMeshOps::AddMaterialSectionPasses(Context, NumSlots);
+		bRecorded = true;
+	});
+	if (!bRecorded)
+	{
+		OutError = TEXT("The decal mesh or the road mesh has no vertex streams");
+		return false;
+	}
+	if (bSorted) UCSMeshOps::PublishMaterialSections(Markings);
+	NumMarkingTriangles = int32(Decals.NumIndices / 3);
 	return true;
 }

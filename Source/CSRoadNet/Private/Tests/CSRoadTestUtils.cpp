@@ -185,6 +185,39 @@ TArray<CSRoad::FRoadSpec> ScenarioSpecs(const TSharedPtr<FJsonObject>& Golden)
 	}
 	return Specs;
 }
+
+namespace
+{
+// A flattened all-float golden struct back into its C++ layout.
+template<typename T>
+bool CSRoadTestUtils_Unflatten(const TArray<double>& Values, T& Out)
+{
+	if (Values.Num() * int32(sizeof(float)) != int32(sizeof(T))) return false;
+	float* Floats = reinterpret_cast<float*>(&Out);
+	for (int32 I = 0; I < Values.Num(); I++) Floats[I] = static_cast<float>(Values[I]);
+	return true;
+}
+}
+
+bool GoldenGeometry(const TSharedPtr<FJsonObject>& Golden, const CSRoad::FGraph& Graph, CSRoad::FGpuGeometryResult& Out)
+{
+	const TArray<TSharedPtr<FJsonValue>>& Edges = Golden->GetArrayField(TEXT("edges"));
+	if (Edges.Num() != Graph.Roads.Num()) return false;
+	Out.Edges.SetNumZeroed(Graph.NumEntities());
+	Out.StartNodes.SetNumZeroed(Graph.NumEntities());
+	Out.EndNodes.SetNumZeroed(Graph.NumEntities());
+	for (int32 Road = 0; Road < Edges.Num(); Road++)
+	{
+		const TSharedPtr<FJsonObject> E = Edges[Road]->AsObject();
+		const int32 Entity = Graph.Roads[Road].Entity;
+		if (!CSRoadTestUtils_Unflatten(Numbers(E, TEXT("edgeGeometry")), Out.Edges[Entity]) || !CSRoadTestUtils_Unflatten(Numbers(E, TEXT("startGeometry")), Out.StartNodes[Entity])
+			|| !CSRoadTestUtils_Unflatten(Numbers(E, TEXT("endGeometry")), Out.EndNodes[Entity]))
+		{
+			return false;
+		}
+	}
+	return true;
+}
 }
 
 #endif

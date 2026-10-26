@@ -1,0 +1,33 @@
+// Composition mesh ranges and road mesh instances (CSRoadGpuMesh.h FGpuMeshRange / FGpuMeshInstance),
+// shared by the mesh and decal kernels.
+#pragma once
+
+struct FMeshRange
+{
+	uint VertexOffset;
+	uint VertexCount;
+	uint IndexOffset;
+	uint IndexCount;
+	// Node compositions: the base triangles in RefineTriangles, in Refine's processing order.
+	uint RefineOffset;
+	uint RefineCount;
+};
+
+// One composition mesh drawn with one CompositionParameters: edge, start node or end node of a road.
+struct FMeshInstance
+{
+	uint Mesh;
+	uint Parameters;
+	uint VertexOffset;
+	uint IndexOffset;
+	// Parameters for node instances (their junction surface), RJS_NO_SLOT for edges.
+	uint JunctionSlot;
+	// Refined node instances: the first of their per-base-triangle items (RefineCounts / Offsets).
+	uint RefineItemOffset;
+	// A refined node mesh is the composition mesh's vertices, then RefinedVertexCount midpoints from
+	// RefinedVerticesRW[RefinedVertexOffset...], drawn by the RefinedTriangleCount leaf triangles
+	// RefineCS writes instead of the composition mesh's own. Zero counts: drawn unrefined.
+	uint RefinedVertexOffset;
+	uint RefinedVertexCount;
+	uint RefinedTriangleCount;
+};

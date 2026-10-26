@@ -9,8 +9,9 @@
 
 using namespace CSRoad;
 
-// GPU parameters + deform against GoldenDump's RoadMeshes.Deform output (no junction surface):
-// per vertex the Unity-space position, normal and UV, for every edge / start / end instance.
+// GPU parameters + deform against GoldenDump's RoadMeshes.Deform output, node instances through
+// their junction surface: per vertex of the unrefined composition mesh the Unity-space position,
+// normal and UV, for every edge / start / end instance.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadDeformScenariosTest, "PCGPlugins.CSRoadNet.Deform.Scenarios",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -50,7 +51,7 @@ bool FCSRoadDeformScenariosTest::RunTest(const FString& Parameters)
 		FGpuRoadMeshInput Mesh;
 		TArray<float> Vertices;
 		if (!Graph.Build(Lib.Assets, CSRoadTest::ScenarioSpecs(Golden), TArray<FSavedNode>(), Error) || !Geometry.Build(Graph, Lib.Assets, nullptr, Error)
-			|| !Mesh.Build(Graph, Lib.Assets, Error) || !RunDeformBlocking(Geometry, Mesh, Vertices, Error))
+			|| !Mesh.Build(Graph, Lib.Assets, Error, false) || !RunDeformBlocking(Geometry, Mesh, Vertices, nullptr, nullptr, Error))
 		{
 			AddError(FString::Printf(TEXT("%s: %s"), *Id, *Error));
 			continue;

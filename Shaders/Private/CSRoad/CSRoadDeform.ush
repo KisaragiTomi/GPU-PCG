@@ -1,0 +1,409 @@
+// The C# RoadLab composition mesh deformation (RoadMeshes.Deform: CS2 does this in its HDRP vertex
+// shader) and its junction seam adjustment (RoadJunctionSurface), shared by the mesh and refinement
+// kernels. Everything is in Unity metres, y up.
+#pragma once
+
+#include "CSRoadGeometryCommon.ush"
+
+// CSRoadCompositionMesh.h FCompositionVertex (BatchMeshHelpers.VertexData with UV0 as float).
+struct FCompositionVertex
+{
+	float3 Position;
+	uint Normal;
+	uint Tangent;
+	uint Color;
+	float4 UV0;
+};
+
+// One side of a node instance's junction surface: the endpoints of its terminal cross-section and
+// RJS_SIDE_* flags. Written by CalculateParametersCS at (parameter slot * 2 + side).
+struct FJunctionSide
+{
+	float3 Start;
+	float3 End;
+	uint Flags;
+};
+
+// Takes part in seam matching: a node patch without a middle radius (roundabout halves keep theirs).
+#define RJS_SIDE_ACTIVE 1u
+// Both sync knot vectors strictly increase, so the cross-section map can be inverted.
+#define RJS_SIDE_INVERTIBLE 2u
+// Junction slot of an instance that has no junction surface (edges).
+#define RJS_NO_SLOT 0xFFFFFFFFu
+
+// The CompositionParameters of each parameter slot (road * 3 + edge / start / end), packed so a
+// deform loads only what it uses: RM_PARAM_STRIDE float4s per slot, [0] the translation
+// (TransformMatrix.c3), [1 + 4 i + k] column k of CompositionMatrix i, [33 + s] CompositionSync s.
+// CalculateParametersCS writes them through the RW view; everything after reads DeformParams.
+#define RM_PARAM_STRIDE 37u
+RWStructuredBuffer<float4> DeformParamsRW;
+StructuredBuffer<float4> DeformParams;
+// Seam partner of each junction side, parameter slot * 2 + side: 0 = none, else partner + 1.
+StructuredBuffer<uint> JunctionPartners;
+
+// ---------------------------------------------------------------------------------------------
+// RoadMeshes
+// ---------------------------------------------------------------------------------------------
+
+Float4x4 RM_Matrix(CompositionParameters p, uint i)
+{
+	if (i == 0u) return p.m_CompositionMatrix0;
+	if (i == 1u) return p.m_CompositionMatrix1;
+	if (i == 2u) return p.m_CompositionMatrix2;
+	if (i == 3u) return p.m_CompositionMatrix3;
+	if (i == 4u) return p.m_CompositionMatrix4;
+	if (i == 5u) return p.m_CompositionMatrix5;
+	if (i == 6u) return p.m_CompositionMatrix6;
+	return p.m_CompositionMatrix7;
+}
+
+float RM_Component(float4 v, int i)
+{
+	if (i == 0) return v.x;
+	if (i == 1) return v.y;
+	if (i == 2) return v.z;
+	return v.w;
+}
+
+// Piecewise-linear remap through the sync breakpoints; returns (value, slope).
+float2 RM_Remap(float v, float4 source, float4 target)
+{
+	float previous = 0.0f;
+	float mapped = 0.0f;
+	for (int i = 0; i < 5; i++)
+	{
+		float next = i < 4 ? RM_Component(source, i) : 1.0f;
+		float value = i < 4 ? RM_Component(target, i) : 1.0f;
+		if (v <= next && next - previous > 1e-6f) return float2(U_lerp(mapped, value, (v - previous) / (next - previous)), (value - mapped) / (next - previous));
+		previous = next;
+		mapped = value;
+	}
+	return float2(v, 1.0f);
+}
+
+float4 RM_Lerp(float4 x, float4 y, float s) { return U_lerp(x, y, s); }
+
+void RM_StoreParams(uint slot, CompositionParameters p)
+{
+	uint base = slot * RM_PARAM_STRIDE;
+	DeformParamsRW[base] = float4(p.m_TransformMatrix.c3, 0.0f);
+	for (uint i = 0u; i < 8u; i++)
+	{
+		Float4x4 m = RM_Matrix(p, i);
+		DeformParamsRW[base + 1u + i * 4u + 0u] = m.c0;
+		DeformParamsRW[base + 1u + i * 4u + 1u] = m.c1;
+		DeformParamsRW[base + 1u + i * 4u + 2u] = m.c2;
+		DeformParamsRW[base + 1u + i * 4u + 3u] = m.c3;
+	}
+	DeformParamsRW[base + 33u] = p.m_CompositionSync0;
+	DeformParamsRW[base + 34u] = p.m_CompositionSync1;
+	DeformParamsRW[base + 35u] = p.m_CompositionSync2;
+	DeformParamsRW[base + 36u] = p.m_CompositionSync3;
+}
+
+float3 RM_LoadTranslation(uint slot) { return DeformParams[slot * RM_PARAM_STRIDE].xyz; }
+float4 RM_LoadSync(uint slot, uint s) { return DeformParams[slot * RM_PARAM_STRIDE + 33u + s]; }
+
+Float4x4 RM_LoadMatrix(uint slot, uint i)
+{
+	uint base = slot * RM_PARAM_STRIDE + 1u + i * 4u;
+	Float4x4 m;
+	m.c0 = DeformParams[base + 0u];
+	m.c1 = DeformParams[base + 1u];
+	m.c2 = DeformParams[base + 2u];
+	m.c3 = DeformParams[base + 3u];
+	return m;
+}
+
+// BuildDeformation from the vertex's two curve matrices and its sync knots (source / target are
+// only read when the vertex's sync bits are set).
+void RM_BuildDeformationFrom(FCompositionVertex vertex, Float4x4 left, Float4x4 right, float4 source, float4 target, out Float4x4 curve, out Float4x4 crossCurve)
+{
+	float x = vertex.Position.x;
+	uint bits = (vertex.Color >> 24) & 0xFFu;
+	float4 weights = x;
+	float4 slopes = 1.0f;
+	if ((bits & 6u) != 0u)
+	{
+		float2 end = RM_Remap(x, source, target);
+		// SecondaryObjectSystem.LerpRemap builds a cubic first: A/B keep the source width, C uses a
+		// physical-width-weighted remap, D the target. Bit 128 is LerpRemap2's second half.
+		if ((bits & 128u) != 0u)
+		{
+			weights = end.x;
+			slopes = end.y;
+		}
+		else
+		{
+			float a = U_distance(left.c0.xz, right.c0.xz);
+			float b = U_distance(left.c3.xz, right.c3.xz);
+			float2 middle = RM_Remap(x, source, U_lerp(source * a, target * b, 0.5f) / U_max(1e-6f, U_lerp(a, b, 0.5f)));
+			weights.z = middle.x;
+			weights.w = end.x;
+			slopes.z = middle.y;
+			slopes.w = end.y;
+		}
+	}
+	curve.c0 = RM_Lerp(left.c0, right.c0, weights.x);
+	curve.c1 = RM_Lerp(left.c1, right.c1, weights.y);
+	curve.c2 = RM_Lerp(left.c2, right.c2, weights.z);
+	curve.c3 = RM_Lerp(left.c3, right.c3, weights.w);
+	crossCurve.c0 = (right.c0 - left.c0) * slopes.x;
+	crossCurve.c1 = (right.c1 - left.c1) * slopes.y;
+	crossCurve.c2 = (right.c2 - left.c2) * slopes.z;
+	crossCurve.c3 = (right.c3 - left.c3) * slopes.w;
+}
+
+// The sync knot pair a vertex's sync bits select: left (2) uses sync 0 / 1, right (4) sync 2 / 3.
+uint RM_SyncPair(FCompositionVertex vertex) { return (((vertex.Color >> 24) & 2u) != 0u) ? 0u : 2u; }
+
+void RM_BuildDeformation(FCompositionVertex vertex, CompositionParameters p, out Float4x4 curve, out Float4x4 crossCurve)
+{
+	bool bLeft = RM_SyncPair(vertex) == 0u;
+	RM_BuildDeformationFrom(vertex, RM_Matrix(p, vertex.Color & 0xFFu), RM_Matrix(p, (vertex.Color >> 8) & 0xFFu),
+		bLeft ? p.m_CompositionSync0 : p.m_CompositionSync2, bLeft ? p.m_CompositionSync1 : p.m_CompositionSync3, curve, crossCurve);
+}
+
+// The same, reading the slot's packed parameters.
+void RM_BuildDeformationAt(FCompositionVertex vertex, uint slot, out Float4x4 curve, out Float4x4 crossCurve)
+{
+	uint pair = RM_SyncPair(vertex);
+	float4 source = 0.0f;
+	float4 target = 0.0f;
+	if ((((vertex.Color >> 24) & 0xFFu) & 6u) != 0u)
+	{
+		source = RM_LoadSync(slot, pair);
+		target = RM_LoadSync(slot, pair + 1u);
+	}
+	RM_BuildDeformationFrom(vertex, RM_LoadMatrix(slot, vertex.Color & 0xFFu), RM_LoadMatrix(slot, (vertex.Color >> 8) & 0xFFu), source, target, curve, crossCurve);
+}
+
+float4 RM_Curve(Float4x4 m, float t)
+{
+	float s = 1.0f - t;
+	return m.c0 * s * s * s + 3.0f * m.c1 * s * s * t + 3.0f * m.c2 * s * t * t + m.c3 * t * t * t;
+}
+
+float3 RM_Tangent(Float4x4 m, float t)
+{
+	float s = 1.0f - t;
+	return 3.0f * ((m.c1 - m.c0) * s * s + 2.0f * (m.c2 - m.c1) * s * t + (m.c3 - m.c2) * t * t).xyz;
+}
+
+float3 RM_DecodeOctahedral(float2 oct, float3 fallback)
+{
+	float3 n = float3(oct.x, oct.y, 1.0f - abs(oct.x) - abs(oct.y));
+	if (n.z < 0.0f) n.xy = (1.0f - abs(n.yx)) * select(n.xy >= 0.0f, 1.0f, -1.0f);
+	return normalizesafe(n, fallback);
+}
+
+// NormalToOctahedral: two 16-bit snorm halves.
+float3 RM_DecodeNormal(uint packed)
+{
+	float2 oct = float2(U_max(-1.0f, (float)(((int)(packed << 16u)) >> 16) / 32767.0f), U_max(-1.0f, (float)(((int)packed) >> 16) / 32767.0f));
+	return RM_DecodeOctahedral(oct, float3(0.0f, 1.0f, 0.0f));
+}
+
+// TangentToOctahedral: two 15-bit snorm fields (bits 0-14, 16-30) and the bitangent sign in bit 31.
+float4 RM_DecodeTangent(uint packed)
+{
+	float2 oct = float2(U_max(-1.0f, (float)(((int)(packed << 17u)) >> 17) / 16383.0f), U_max(-1.0f, (float)(((int)(packed << 1u)) >> 17) / 16383.0f));
+	return float4(RM_DecodeOctahedral(oct, float3(1.0f, 0.0f, 0.0f)), (packed & 0x80000000u) != 0u ? -1.0f : 1.0f);
+}
+
+// ---------------------------------------------------------------------------------------------
+// RoadJunctionSurface: two node patches whose terminal cross-sections coincide at one node get
+// one shared tangent across the seam. A side is the patch's left (curves 0 / 2, sync 0 / 1) or
+// right (curves 1 / 3, sync 2 / 3) half.
+// ---------------------------------------------------------------------------------------------
+
+// Side.Vertex(x): a terminal (z = 1) vertex on the side's sync chart.
+FCompositionVertex RJS_SideVertex(float x, uint side)
+{
+	FCompositionVertex v;
+	v.Position = float3(x, 0.0f, 1.0f);
+	v.Normal = 0u;
+	v.Tangent = 0u;
+	v.Color = side == 0u ? (0u | (2u << 8) | (2u << 24)) : (1u | (3u << 8) | (4u << 24));
+	v.UV0 = 0.0f;
+	return v;
+}
+
+float4 RJS_Offsets(CompositionParameters p, uint side) { return side == 0u ? p.m_CompositionSync0 : p.m_CompositionSync2; }
+float4 RJS_Targets(CompositionParameters p, uint side) { return side == 0u ? p.m_CompositionSync1 : p.m_CompositionSync3; }
+float4 RJS_OffsetsAt(uint slot, uint side) { return RM_LoadSync(slot, side * 2u); }
+float4 RJS_TargetsAt(uint slot, uint side) { return RM_LoadSync(slot, side * 2u + 1u); }
+
+// SideIndex: 0 / 1 for a vertex on that side's sync chart (LerpRemap's first half), else -1.
+int RJS_SideIndex(FCompositionVertex v)
+{
+	uint r = v.Color & 0xFFu;
+	uint g = (v.Color >> 8) & 0xFFu;
+	uint a = (v.Color >> 24) & 0xFFu;
+	if (r == 0u && g == 2u && (a & 134u) == 2u) return 0;
+	if (r == 1u && g == 3u && (a & 134u) == 4u) return 1;
+	return -1;
+}
+
+// Side.Start (x = 0) and Side.End (x = 1).
+float3 RJS_TerminalPoint(CompositionParameters p, uint side, float x)
+{
+	Float4x4 curve, lateral;
+	RM_BuildDeformation(RJS_SideVertex(x, side), p, curve, lateral);
+	return curve.c3.xyz + p.m_TransformMatrix.c3;
+}
+
+FJunctionSide RJS_MakeSide(CompositionParameters p, uint side, float middleRadius)
+{
+	float4 offsets = RJS_Offsets(p, side);
+	float4 targets = RJS_Targets(p, side);
+	// SharedSection's Invertible: repeated internal knots are a collapsed strip (a disappearing
+	// lane) whose inverse is not unique.
+	bool bInvertible = all(offsets.yzw - offsets.xyz > 1e-5f) && all(targets.yzw - targets.xyz > 1e-5f);
+	FJunctionSide s;
+	s.Start = RJS_TerminalPoint(p, side, 0.0f);
+	s.End = RJS_TerminalPoint(p, side, 1.0f);
+	s.Flags = (middleRadius > 0.0f ? 0u : RJS_SIDE_ACTIVE) | (bInvertible ? RJS_SIDE_INVERTIBLE : 0u);
+	return s;
+}
+
+// SharedSection(a, b): b's terminal cross-section runs back over a's, collinear, overlapping and at
+// the same height. Not symmetric in rounding, so callers keep the original argument order.
+bool RJS_SharedSection(FJunctionSide a, FJunctionSide b)
+{
+	if ((a.Flags & RJS_SIDE_INVERTIBLE) == 0u || (b.Flags & RJS_SIDE_INVERTIBLE) == 0u) return false;
+	float2 direction = (a.End - a.Start).xz;
+	float len = U_length(direction);
+	float otherLen = U_distance(b.Start.xz, b.End.xz);
+	if (len < 0.1f || otherLen < 0.1f) return false;
+	direction /= len;
+	if (dot(direction, (b.End - b.Start).xz / otherLen) > -0.9999f) return false;
+	float2 delta = (b.Start - a.Start).xz;
+	if (abs(delta.x * direction.y - delta.y * direction.x) > 0.02f) return false;
+	float from = dot((b.End - a.Start).xz, direction);
+	float to = dot(delta, direction);
+	float overlap = U_min(len, to) - U_max(0.0f, from);
+	if (overlap < U_min(len, otherLen) * 0.98f) return false;
+	float middle = (U_max(0.0f, from) + U_min(len, to)) * 0.5f;
+	float heightA = U_lerp(a.Start.y, a.End.y, middle / len);
+	float heightB = U_lerp(b.End.y, b.Start.y, (middle - from) / (to - from));
+	return abs(heightA - heightB) < 0.02f;
+}
+
+// OtherCurve: the partner side's curves through the cross-section point matching endpoint (given in
+// the coordinates of the instance translated by sideTranslation), with the lateral curves scaled by
+// the derivative of that match along endpointDerivative.
+void RJS_OtherCurve(float3 sideTranslation, uint otherSlot, uint otherSide, float3 endpoint, float3 endpointDerivative, out Float4x4 curve, out Float4x4 lateral)
+{
+	float3 left = DeformParams[otherSlot * RM_PARAM_STRIDE + 1u + otherSide * 4u + 3u].xyz;
+	float3 right = DeformParams[otherSlot * RM_PARAM_STRIDE + 1u + (otherSide + 2u) * 4u + 3u].xyz;
+	float2 direction = (right - left).xz;
+	float length2 = lengthsq(direction);
+	float3 pt = endpoint + (sideTranslation - RM_LoadTranslation(otherSlot));
+	float target = dot(pt.xz - left.xz, direction) / U_max(1e-8f, length2);
+	float2 inverse = RM_Remap(U_saturate(target), RJS_TargetsAt(otherSlot, otherSide), RJS_OffsetsAt(otherSlot, otherSide));
+	RM_BuildDeformationAt(RJS_SideVertex(inverse.x, otherSide), otherSlot, curve, lateral);
+	float derivative = (target > 0.0f && target < 1.0f) ? dot(endpointDerivative.xz, direction) / U_max(1e-8f, length2) * inverse.y : 0.0f;
+	lateral.c0 *= derivative;
+	lateral.c1 *= derivative;
+	lateral.c2 *= derivative;
+	lateral.c3 *= derivative;
+}
+
+// The 7-sample validity check of Create: the seam must reverse direction (no fold, no cusp).
+bool RJS_ValidSeam(uint slot, uint side, uint otherSlot, uint otherSide)
+{
+	static const float Samples[7] = { 0.0f, 0.125f, 0.25f, 0.5f, 0.75f, 0.875f, 1.0f };
+	for (int i = 0; i < 7; i++)
+	{
+		Float4x4 c, cl, o, ol;
+		RM_BuildDeformationAt(RJS_SideVertex(Samples[i], side), slot, c, cl);
+		RJS_OtherCurve(RM_LoadTranslation(slot), otherSlot, otherSide, c.c3.xyz, (float3)0.0f, o, ol);
+		float2 a = (c.c3 - c.c2).xz;
+		float2 b = (o.c3 - o.c2).xz;
+		if (lengthsq(a) < 1e-7f || lengthsq(b) < 1e-7f) continue;
+		if (dot(U_rsqrt(dot(a, a)) * a, U_rsqrt(dot(b, b)) * b) > -0.5f) return false;
+	}
+	return true;
+}
+
+// Adjust: moves the last inner control point so both patches leave the seam along the mean of
+// their directions; the lateral (cross) curve gets the matching derivative.
+void RJS_Adjust(float3 sideTranslation, uint otherSlot, uint otherSide, inout Float4x4 curve, inout Float4x4 lateral)
+{
+	Float4x4 counterCurve, counterLateral;
+	RJS_OtherCurve(sideTranslation, otherSlot, otherSide, curve.c3.xyz, lateral.c3.xyz, counterCurve, counterLateral);
+	float2 a = (curve.c3 - curve.c2).xz;
+	float2 da = (lateral.c3 - lateral.c2).xz;
+	float2 b = (counterCurve.c3 - counterCurve.c2).xz;
+	float2 db = (counterLateral.c3 - counterLateral.c2).xz;
+	float len = U_length(a);
+	float otherLen = U_length(b);
+	if (len < 0.0003f || otherLen < 0.0003f) return;
+	float2 na = a / len;
+	float2 nb = b / otherLen;
+	float2 dna = (da - na * dot(na, da)) / len;
+	float2 dnb = (db - nb * dot(nb, db)) / otherLen;
+	float2 difference = na - nb;
+	float scale = U_length(difference);
+	if (scale < 1.0f) return;
+	float2 tangent = difference / scale;
+	float2 derivative = (dna - dnb - tangent * dot(tangent, dna - dnb)) / scale;
+	curve.c2.xz = curve.c3.xz - tangent * len;
+	lateral.c2.xz = lateral.c3.xz - derivative * len - tangent * dot(na, da);
+}
+
+// junction?.Adjust for a vertex of the node instance whose parameters sit at slot (translated by
+// translation); RJS_NO_SLOT does nothing.
+void RJS_AdjustVertex(FCompositionVertex vertex, float3 translation, uint slot, inout Float4x4 curve, inout Float4x4 lateral)
+{
+	if (slot == RJS_NO_SLOT) return;
+	int side = RJS_SideIndex(vertex);
+	if (side < 0) return;
+	uint self = slot * 2u + uint(side);
+	uint code = JunctionPartners[self];
+	// Create's last pass: a seam is corrected on both sides or neither.
+	if (code == 0u || JunctionPartners[code - 1u] != self + 1u) return;
+	RJS_Adjust(translation, (code - 1u) / 2u, (code - 1u) % 2u, curve, lateral);
+}
+
+// ---------------------------------------------------------------------------------------------
+// RoadMeshes.Deform
+// ---------------------------------------------------------------------------------------------
+
+struct FDeformedVertex
+{
+	float3 Position;
+	float3 Normal;
+	float4 Tangent;
+	float2 UV;
+};
+
+// slot: the instance's parameter slot; junctionSlot the same for node instances, RJS_NO_SLOT for edges.
+FDeformedVertex RM_Deform(FCompositionVertex vertex, uint slot, uint junctionSlot)
+{
+	Float4x4 curve, crossCurve;
+	RM_BuildDeformationAt(vertex, slot, curve, crossCurve);
+	float3 translation = RM_LoadTranslation(slot);
+	RJS_AdjustVertex(vertex, translation, junctionSlot, curve, crossCurve);
+	float t = vertex.Position.z;
+	float4 position = RM_Curve(curve, t);
+	float3 along = normalizesafe(RM_Tangent(curve, t), float3(0.0f, 0.0f, 1.0f));
+	float3 lateral = normalizesafe(RM_Curve(crossCurve, t).xyz, float3(along.z, 0.0f, -along.x));
+	float3 up = normalizesafe(cross(along, lateral), float3(0.0f, 1.0f, 0.0f));
+	if (up.y < 0.0f) up = -up;
+	float3 normal = RM_DecodeNormal(vertex.Normal);
+	FDeformedVertex result;
+	result.Position = position.xyz + translation + float3(0.0f, vertex.Position.y, 0.0f);
+	uint terrain = (vertex.Color >> 16) & 0xFFu;
+	if (terrain == 1u) result.Position.y = U_min(result.Position.y, TerrainUtils_SampleHeight(result.Position));
+	if (terrain == 2u) result.Position.y = U_max(result.Position.y, TerrainUtils_SampleHeight(result.Position));
+	result.UV = float2(vertex.UV0.x, vertex.UV0.y >= 0.0f ? position.w * vertex.UV0.y : vertex.UV0.y);
+	result.Normal = normalizesafe(lateral * normal.x + up * normal.y + along * normal.z, float3(0.0f, 1.0f, 0.0f));
+	// The packed tangent follows the same frame; re-orthogonalised against the deformed normal.
+	float4 tangent = RM_DecodeTangent(vertex.Tangent);
+	float3 tangentWorld = lateral * tangent.x + up * tangent.y + along * tangent.z;
+	tangentWorld = normalizesafe(tangentWorld - result.Normal * dot(tangentWorld, result.Normal), along);
+	result.Tangent = float4(tangentWorld, tangent.w);
+	return result;
+}

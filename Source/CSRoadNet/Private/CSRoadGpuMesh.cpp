@@ -9,7 +9,20 @@
 
 static_assert(sizeof(CSRoad::FCompositionVertex) == 10 * sizeof(uint32), "FCompositionVertex must match the HLSL layout");
 static_assert(sizeof(CSRoad::CompositionParameters) == 156 * sizeof(float), "CompositionParameters must match the HLSL layout");
-static_assert(sizeof(CSRoad::FGpuMeshRange) == 4 * sizeof(uint32) && sizeof(CSRoad::FGpuMeshInstance) == 4 * sizeof(uint32), "Mesh tables are uint4 in HLSL");
+static_assert(sizeof(CSRoad::FGpuMeshRange) == 6 * sizeof(uint32) && sizeof(CSRoad::FGpuMeshInstance) == 9 * sizeof(uint32), "FMeshRange / FMeshInstance must match the HLSL layout");
+static_assert(sizeof(CSRoad::FGpuRefineTriangle) == 4 * sizeof(uint32), "FRefineTriangle must match the HLSL layout");
+
+namespace CSRoad
+{
+// CSRoadDeform.ush FJunctionSide.
+struct FGpuJunctionSide
+{
+	float3 Start;
+	float3 End;
+	uint32 Flags = 0;
+};
+static_assert(sizeof(FGpuJunctionSide) == 7 * sizeof(uint32), "FJunctionSide must match the HLSL layout");
+}
 
 BEGIN_SHADER_PARAMETER_STRUCT(FCSRoadMeshParameters, )
 	SHADER_PARAMETER_STRUCT_INCLUDE(FCSRoadGeometryParameters, Geometry)
@@ -19,7 +32,12 @@ BEGIN_SHADER_PARAMETER_STRUCT(FCSRoadMeshParameters, )
 	SHADER_PARAMETER(FMatrix44f, LocalToWorld)
 	SHADER_PARAMETER(uint32, VertexCapacity)
 	SHADER_PARAMETER(uint32, IndexCapacity)
-	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<CompositionParameters>, ParametersRW)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, DeformParamsRW)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, DeformParams)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FJunctionSide>, JunctionSidesRW)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, JunctionPartnersRW)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, JunctionPartners)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, RoadOfEntity)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FCompositionVertex>, MeshVertices)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, MeshIndices)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, MeshTriangleMaterials)
@@ -32,6 +50,15 @@ BEGIN_SHADER_PARAMETER_STRUCT(FCSRoadMeshParameters, )
 	SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RW_Indices)
 	SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RW_MaterialIds)
 	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, DebugVertices)
+	SHADER_PARAMETER(uint32, NumRefineInstances)
+	SHADER_PARAMETER(uint32, RefineGroupsX)
+	SHADER_PARAMETER(uint32, RefineMode)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, RefineInstances)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRefineTriangle>, RefineTriangles)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FCompositionVertex>, RefinedVerticesRW)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint4>, RefineCountsRW)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint2>, RefineOffsetsRW)
+	SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint4>, RefineTotalsRW)
 END_SHADER_PARAMETER_STRUCT()
 
 #define CSROAD_MESH_SHADER(ShaderClass, EntryPoint) \
@@ -54,6 +81,9 @@ END_SHADER_PARAMETER_STRUCT()
 	IMPLEMENT_GLOBAL_SHADER(ShaderClass, "/Plugin/PCGPlugins/Shaders/Private/CSRoad/CSRoadMesh.usf", EntryPoint, SF_Compute)
 
 CSROAD_MESH_SHADER(FCSRoadCalculateParametersCS, "CalculateParametersCS");
+CSROAD_MESH_SHADER(FCSRoadJunctionMatchCS, "JunctionMatchCS");
+CSROAD_MESH_SHADER(FCSRoadRefineCS, "RefineCS");
+CSROAD_MESH_SHADER(FCSRoadRefineScanCS, "RefineScanCS");
 CSROAD_MESH_SHADER(FCSRoadDeformVerticesCS, "DeformVerticesCS");
 CSROAD_MESH_SHADER(FCSRoadWriteIndicesCS, "WriteIndicesCS");
 
@@ -77,24 +107,62 @@ FRDGBufferUAVRef CSRoadGpuMesh_StreamUAV(FRDGBuilder& GraphBuilder, FRDGBufferRe
 	return GraphBuilder.CreateUAV(FRDGBufferUAVDesc(Buffer, Format));
 }
 
-FRDGBufferRef CSRoadGpuMesh_AddPasses(FRDGBuilder& GraphBuilder, const FGpuGeometryOutput& Geometry, const FGpuRoadMeshInput& Mesh, const FGpuRoadMeshTarget& Target)
+FIntVector CSRoadGpuMesh_Groups(uint32 Count)
+{
+	return FIntVector(int32(FMath::Clamp(Count, 1u, 65535u)), int32(FMath::DivideAndRoundUp(FMath::Max(Count, 1u), 65535u)), 1);
+}
+
+enum class ECSRoadGpuMeshStage
+{
+	// Parameters, seams and the refinement counts: the first graph of a refined build.
+	Counts,
+	// Everything, writing the target.
+	Build,
+};
+
+struct FCSRoadGpuMesh_Outputs
+{
+	// Seam partner per side (JunctionMatchCS).
+	FRDGBufferRef Partners = nullptr;
+	// Per refine instance: leaves, midpoints, unconverged (RefineScanCS).
+	FRDGBufferRef RefineTotals = nullptr;
+};
+
+FCSRoadGpuMesh_Outputs CSRoadGpuMesh_AddPasses(FRDGBuilder& GraphBuilder, const FGpuGeometryOutput& Geometry, const FGpuRoadMeshInput& Mesh, const FGpuRoadMeshTarget& Target,
+	ECSRoadGpuMeshStage Stage)
 {
 	check(Geometry.Parameters);
+	check(Stage == ECSRoadGpuMeshStage::Counts || !Mesh.NeedsRefinementCounts());
 	RDG_EVENT_SCOPE(GraphBuilder, "CSRoadMesh");
 	const uint32 NumEdges = Geometry.Parameters->NumEdges;
 	const uint32 NumInstances = uint32(Mesh.Instances.Num());
+	const uint32 NumRefine = uint32(Mesh.RefineInstances.Num());
 	const bool bDebug = Target.DebugVertices != nullptr;
-	FRDGBufferRef ParametersBuffer = GpuDetail::Zeroed<CompositionParameters>(GraphBuilder, NumEdges * 3u, TEXT("CSRoad.CompositionParameters"));
+	// CompositionParameters per parameter slot, packed as CSRoadDeform.ush RM_PARAM_STRIDE float4s.
+	FRDGBufferRef ParametersBuffer = GpuDetail::Zeroed<FVector4f>(GraphBuilder, NumEdges * 3u * 37u, TEXT("CSRoad.DeformParams"));
+	// Two sides per parameter slot; the edge slots stay unused (zero: no partner).
+	FRDGBufferRef SidesBuffer = GpuDetail::Zeroed<FGpuJunctionSide>(GraphBuilder, NumEdges * 6u, TEXT("CSRoad.JunctionSides"));
+	FCSRoadGpuMesh_Outputs Outputs;
+	Outputs.Partners = GpuDetail::Zeroed<uint32>(GraphBuilder, NumEdges * 6u, TEXT("CSRoad.JunctionPartners"));
+	Outputs.RefineTotals = GpuDetail::Zeroed<FUintVector4>(GraphBuilder, NumRefine, TEXT("CSRoad.RefineTotals"));
+	FRDGBufferRef RefineCounts = GpuDetail::Zeroed<FUintVector4>(GraphBuilder, Mesh.NumRefineItems, TEXT("CSRoad.RefineCounts"));
+	FRDGBufferRef RefineOffsets = GpuDetail::Zeroed<FUintVector2>(GraphBuilder, Mesh.NumRefineItems, TEXT("CSRoad.RefineOffsets"));
+	FRDGBufferRef RefinedVertices = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(FCompositionVertex), FMath::Max(1u, Mesh.NumMidpoints)), TEXT("CSRoad.RefinedVertices"));
 
 	FCSRoadMeshParameters Common;
 	Common.Geometry = *Geometry.Parameters;
 	Common.NumInstances = NumInstances;
-	Common.InstanceGroupsX = FMath::Clamp(NumInstances, 1u, 65535u);
+	Common.InstanceGroupsX = uint32(CSRoadGpuMesh_Groups(NumInstances).X);
 	Common.OutputMode = bDebug ? 1u : 0u;
 	Common.LocalToWorld = Target.LocalToWorld;
 	Common.VertexCapacity = Target.VertexCapacity;
 	Common.IndexCapacity = Target.IndexCapacity;
-	Common.ParametersRW = GraphBuilder.CreateUAV(ParametersBuffer);
+	Common.DeformParamsRW = GraphBuilder.CreateUAV(ParametersBuffer);
+	Common.DeformParams = GraphBuilder.CreateSRV(ParametersBuffer);
+	Common.JunctionSidesRW = GraphBuilder.CreateUAV(SidesBuffer);
+	Common.JunctionPartnersRW = GraphBuilder.CreateUAV(Outputs.Partners);
+	Common.JunctionPartners = GraphBuilder.CreateSRV(Outputs.Partners);
+	Common.RoadOfEntity = GpuDetail::UploadSRV(GraphBuilder, Mesh.RoadOfEntity, TEXT("CSRoad.RoadOfEntity"));
 	Common.MeshVertices = GpuDetail::UploadSRV(GraphBuilder, Mesh.Vertices, TEXT("CSRoad.MeshVertices"));
 	Common.MeshIndices = GpuDetail::UploadSRV(GraphBuilder, Mesh.Indices, TEXT("CSRoad.MeshIndices"));
 	Common.MeshTriangleMaterials = GpuDetail::UploadSRV(GraphBuilder, Mesh.TriangleMaterials, TEXT("CSRoad.MeshTriangleMaterials"));
@@ -107,23 +175,88 @@ FRDGBufferRef CSRoadGpuMesh_AddPasses(FRDGBuilder& GraphBuilder, const FGpuGeome
 	Common.RW_Indices = CSRoadGpuMesh_StreamUAV(GraphBuilder, Target.Indices, PF_R32_UINT, TEXT("CSRoad.NoIndices"));
 	Common.RW_MaterialIds = CSRoadGpuMesh_StreamUAV(GraphBuilder, Target.MaterialIds, PF_R32_UINT, TEXT("CSRoad.NoMaterialIds"));
 	Common.DebugVertices = GraphBuilder.CreateUAV(bDebug ? Target.DebugVertices : GpuDetail::Zeroed<float>(GraphBuilder, 1, TEXT("CSRoad.NoDebugVertices")));
+	Common.NumRefineInstances = NumRefine;
+	Common.RefineGroupsX = uint32(CSRoadGpuMesh_Groups(NumRefine).X);
+	Common.RefineMode = 0u;
+	Common.RefineInstances = GpuDetail::UploadSRV(GraphBuilder, Mesh.RefineInstances, TEXT("CSRoad.RefineInstances"));
+	Common.RefineTriangles = GpuDetail::UploadSRV(GraphBuilder, Mesh.RefineTriangles, TEXT("CSRoad.RefineTriangles"));
+	Common.RefinedVerticesRW = GraphBuilder.CreateUAV(RefinedVertices);
+	Common.RefineCountsRW = GraphBuilder.CreateUAV(RefineCounts);
+	Common.RefineOffsetsRW = GraphBuilder.CreateUAV(RefineOffsets);
+	Common.RefineTotalsRW = GraphBuilder.CreateUAV(Outputs.RefineTotals);
 
-	if (NumEdges == 0 || NumInstances == 0) return ParametersBuffer;
+	if (NumEdges == 0) return Outputs;
 	CSRoadGpuMesh_AddPass<FCSRoadCalculateParametersCS>(GraphBuilder, Common, FComputeShaderUtils::GetGroupCount(int32(NumEdges), GpuDetail::GroupSize),
 		RDG_EVENT_NAME("CalculateParameters"));
-	const FIntVector InstanceGroups(int32(Common.InstanceGroupsX), int32(FMath::DivideAndRoundUp(NumInstances, 65535u)), 1);
-	CSRoadGpuMesh_AddPass<FCSRoadDeformVerticesCS>(GraphBuilder, Common, InstanceGroups, RDG_EVENT_NAME("DeformVertices"));
-	if (!bDebug) CSRoadGpuMesh_AddPass<FCSRoadWriteIndicesCS>(GraphBuilder, Common, InstanceGroups, RDG_EVENT_NAME("WriteIndices"));
-	return ParametersBuffer;
-}
+	CSRoadGpuMesh_AddPass<FCSRoadJunctionMatchCS>(GraphBuilder, Common, FComputeShaderUtils::GetGroupCount(int32(NumEdges * 4u), GpuDetail::GroupSize),
+		RDG_EVENT_NAME("JunctionMatch"));
+	if (NumRefine > 0)
+	{
+		CSRoadGpuMesh_AddPass<FCSRoadRefineCS>(GraphBuilder, Common, CSRoadGpuMesh_Groups(NumRefine), RDG_EVENT_NAME("RefineCount"));
+		CSRoadGpuMesh_AddPass<FCSRoadRefineScanCS>(GraphBuilder, Common, CSRoadGpuMesh_Groups(NumRefine), RDG_EVENT_NAME("RefineScan"));
+	}
+	if (Stage == ECSRoadGpuMeshStage::Counts || NumInstances == 0) return Outputs;
+	if (NumRefine > 0)
+	{
+		FCSRoadMeshParameters Emit = Common;
+		Emit.RefineMode = 1u;
+		CSRoadGpuMesh_AddPass<FCSRoadRefineCS>(GraphBuilder, Emit, CSRoadGpuMesh_Groups(NumRefine), RDG_EVENT_NAME("RefineEmit"));
+	}
+	CSRoadGpuMesh_AddPass<FCSRoadDeformVerticesCS>(GraphBuilder, Common, CSRoadGpuMesh_Groups(NumInstances), RDG_EVENT_NAME("DeformVertices"));
+	if (!bDebug) CSRoadGpuMesh_AddPass<FCSRoadWriteIndicesCS>(GraphBuilder, Common, CSRoadGpuMesh_Groups(NumInstances), RDG_EVENT_NAME("WriteIndices"));
+	return Outputs;
 }
 
-bool FGpuRoadMeshInput::Build(const FGraph& Graph, FAssets& Assets, FString& OutError)
+}
+
+bool RunGraphBlocking(TFunctionRef<TArray<FRDGBufferRef>(FRDGBuilder&)> Record, const TArray<TPair<void*, uint32>>& Targets)
+{
+	bool bRead = false;
+	ENQUEUE_RENDER_COMMAND(CSRoadGpuMeshBlocking)([&Record, &Targets, &bRead](FRHICommandListImmediate& RHICmdList)
+	{
+		TArray<TUniquePtr<FRHIGPUBufferReadback>> Readbacks;
+		{
+			FRDGBuilder GraphBuilder(RHICmdList, RDG_EVENT_NAME("CSRoadGpuMeshBlocking"));
+			const TArray<FRDGBufferRef> Buffers = Record(GraphBuilder);
+			check(Buffers.Num() == Targets.Num());
+			for (int32 I = 0; I < Buffers.Num(); I++)
+			{
+				Readbacks.Add(MakeUnique<FRHIGPUBufferReadback>(TEXT("CSRoad.Readback")));
+				if (Targets[I].Value > 0) AddEnqueueCopyPass(GraphBuilder, Readbacks.Last().Get(), Buffers[I], Targets[I].Value);
+			}
+			GraphBuilder.Execute();
+		}
+		RHICmdList.SubmitAndBlockUntilGPUIdle();
+		bRead = true;
+		for (int32 I = 0; I < Readbacks.Num(); I++)
+		{
+			if (Targets[I].Value == 0) continue;
+			const void* Data = Readbacks[I]->IsReady() ? Readbacks[I]->Lock(Targets[I].Value) : nullptr;
+			if (!Data)
+			{
+				bRead = false;
+				continue;
+			}
+			FMemory::Memcpy(Targets[I].Key, Data, Targets[I].Value);
+			Readbacks[I]->Unlock();
+		}
+	});
+	FlushRenderingCommands();
+	return bRead;
+}
+
+bool FGpuRoadMeshInput::Build(const FGraph& Graph, FAssets& Assets, FString& OutError, bool bRefine)
 {
 	Vertices.Reset();
 	Indices.Reset();
 	TriangleMaterials.Reset();
 	MaterialSlots.Reset();
+	RefineTriangles.Reset();
+	RefineInstances.Reset();
+	NumRefineItems = 0;
+	bRefinementApplied = false;
+	NumMidpoints = 0;
+	NumUnconverged = 0;
 	Meshes.SetNumZeroed(Graph.Compositions.Num());
 	TMap<int32, int32> SlotOfAtlas;
 	for (int32 Index = 1; Index < Graph.Compositions.Num(); Index++)
@@ -138,6 +271,8 @@ bool FGpuRoadMeshInput::Build(const FGraph& Graph, FAssets& Assets, FString& Out
 		Vertices.Append(Mesh.Vertices);
 		for (int32 I = 0; I < int32(Range.IndexCount); I++) Indices.Add(uint32(Mesh.Indices[I]));
 		const int32 FirstTriangle = TriangleMaterials.AddZeroed(int32(Range.IndexCount / 3));
+		const bool bRefined = bRefine && (Graph.Compositions[Index]->Data.m_Flags.m_General & CompositionFlags_General_Node) != 0;
+		Range.RefineOffset = uint32(RefineTriangles.Num());
 		for (const MeshMaterial& Material : Mesh.Materials)
 		{
 			int32* Slot = SlotOfAtlas.Find(Material.m_MaterialIndex);
@@ -148,13 +283,38 @@ bool FGpuRoadMeshInput::Build(const FGraph& Graph, FAssets& Assets, FString& Out
 			}
 			const int32 End = FMath::Min(int32(Range.IndexCount), Material.m_StartIndex + Material.m_IndexCount) / 3;
 			for (int32 Triangle = Material.m_StartIndex / 3; Triangle < End; Triangle++) TriangleMaterials[FirstTriangle + Triangle] = uint32(*Slot);
+			if (!bRefined) continue;
+			// Refine works per material group, triangle by triangle; an edge's defining direction is
+			// the one of the first triangle of the group that uses it (the first Midpoint call).
+			TMap<uint64, bool> FirstForward;
+			for (int32 Triangle = Material.m_StartIndex / 3; Triangle < End; Triangle++)
+			{
+				FGpuRefineTriangle& Refine = RefineTriangles.AddDefaulted_GetRef();
+				const uint32 Corners[3] = { uint32(Mesh.Indices[Triangle * 3]), uint32(Mesh.Indices[Triangle * 3 + 1]), uint32(Mesh.Indices[Triangle * 3 + 2]) };
+				Refine.A = Corners[0];
+				Refine.B = Corners[1];
+				Refine.C = Corners[2];
+				Refine.Flags = uint32(*Slot);
+				for (int32 Edge = 0; Edge < 3; Edge++)
+				{
+					const uint32 U = Corners[Edge];
+					const uint32 V = Corners[(Edge + 1) % 3];
+					const uint64 Key = (uint64(FMath::Min(U, V)) << 32) | uint64(FMath::Max(U, V));
+					const bool bForward = U < V;
+					const bool* First = FirstForward.Find(Key);
+					if (!First) FirstForward.Add(Key, bForward);
+					else if (*First != bForward) Refine.Flags |= 1u << (29 + Edge);
+				}
+			}
 		}
+		Range.RefineCount = uint32(RefineTriangles.Num()) - Range.RefineOffset;
 	}
+
+	RoadOfEntity.Init(-1, Graph.NumEntities());
+	for (int32 Road = 0; Road < Graph.Roads.Num(); Road++) RoadOfEntity[Graph.Roads[Road].Entity] = Road;
 
 	// Edge, start node and end node of every road, in road order (RoadRenderer.BuildSteps).
 	Instances.Reset(Graph.Roads.Num() * 3);
-	uint64 VertexCount = 0;
-	uint64 IndexCount = 0;
 	FBox Unity(ForceInit);
 	float MaxHalfWidth = 0.0f;
 	float MinHeight = 0.0f;
@@ -169,10 +329,13 @@ bool FGpuRoadMeshInput::Build(const FGraph& Graph, FAssets& Assets, FString& Out
 			FGpuMeshInstance& Instance = Instances.AddDefaulted_GetRef();
 			Instance.Mesh = uint32(MeshOf[Kind]);
 			Instance.Parameters = uint32(Road * 3 + Kind);
-			Instance.VertexOffset = uint32(VertexCount);
-			Instance.IndexOffset = uint32(IndexCount);
-			VertexCount += Meshes[MeshOf[Kind]].VertexCount;
-			IndexCount += Meshes[MeshOf[Kind]].IndexCount;
+			Instance.JunctionSlot = Kind == 0 ? FGpuMeshInstance::NoJunction : Instance.Parameters;
+			if (Meshes[MeshOf[Kind]].RefineCount > 0)
+			{
+				Instance.RefineItemOffset = NumRefineItems;
+				NumRefineItems += Meshes[MeshOf[Kind]].RefineCount;
+				RefineInstances.Add(uint32(Instances.Num() - 1));
+			}
 			const NetCompositionData& Data = Graph.Compositions[MeshOf[Kind]]->Data;
 			MaxHalfWidth = FMath::Max(MaxHalfWidth, Data.m_Width * 0.5f);
 			MinHeight = FMath::Min(MinHeight, Data.m_HeightRange.min);
@@ -181,15 +344,8 @@ bool FGpuRoadMeshInput::Build(const FGraph& Graph, FAssets& Assets, FString& Out
 		const Bezier4x3& Curve = Graph.CurveData[Entity].m_Bezier;
 		for (const float3& P : { Curve.a, Curve.b, Curve.c, Curve.d }) Unity += FVector(P.x, P.y, P.z);
 	}
-	if (VertexCount > uint64(MAX_int32) || IndexCount > uint64(MAX_int32))
-	{
-		OutError = FString::Printf(TEXT("The road mesh needs %llu vertices / %llu indices"), VertexCount, IndexCount);
-		return false;
-	}
-	NumVertices = uint32(VertexCount);
-	NumIndices = uint32(IndexCount);
 	// Nodes widen past the curves by about a road width; terrain-following vertices may drop to the
-	// ground under elevated roads.
+	// ground under elevated roads. Refinement only adds points on the same curves.
 	if (Unity.IsValid)
 	{
 		const double Margin = double(MaxHalfWidth) * 2.0 + 2.0;
@@ -199,49 +355,159 @@ bool FGpuRoadMeshInput::Build(const FGraph& Graph, FAssets& Assets, FString& Out
 		Bounds += FVector(Unity.Min.X, -Unity.Min.Z, Unity.Min.Y) * 100.0;
 		Bounds += FVector(Unity.Max.X, -Unity.Max.Z, Unity.Max.Y) * 100.0;
 	}
+	return Layout(OutError);
+}
+
+bool FGpuRoadMeshInput::ApplyRefinement(const TArray<FUintVector4>& Totals, FString& OutError)
+{
+	if (Totals.Num() != RefineInstances.Num())
+	{
+		OutError = FString::Printf(TEXT("%d refinement totals for %d refined instances"), Totals.Num(), RefineInstances.Num());
+		return false;
+	}
+	uint64 Midpoints = 0;
+	NumUnconverged = 0;
+	for (int32 I = 0; I < Totals.Num(); I++)
+	{
+		FGpuMeshInstance& Instance = Instances[RefineInstances[I]];
+		Instance.RefinedTriangleCount = Totals[I].X;
+		Instance.RefinedVertexCount = Totals[I].Y;
+		Instance.RefinedVertexOffset = uint32(Midpoints);
+		Midpoints += Totals[I].Y;
+		NumUnconverged += Totals[I].Z;
+	}
+	if (Midpoints > uint64(MAX_int32))
+	{
+		OutError = FString::Printf(TEXT("Refinement made %llu midpoints"), Midpoints);
+		return false;
+	}
+	NumMidpoints = uint32(Midpoints);
+	bRefinementApplied = true;
+	return Layout(OutError);
+}
+
+bool FGpuRoadMeshInput::Layout(FString& OutError)
+{
+	uint64 VertexCount = 0;
+	uint64 IndexCount = 0;
+	for (FGpuMeshInstance& Instance : Instances)
+	{
+		const FGpuMeshRange& Range = Meshes[Instance.Mesh];
+		Instance.VertexOffset = uint32(FMath::Min(VertexCount, uint64(MAX_uint32)));
+		Instance.IndexOffset = uint32(FMath::Min(IndexCount, uint64(MAX_uint32)));
+		VertexCount += uint64(Range.VertexCount) + Instance.RefinedVertexCount;
+		IndexCount += Instance.RefinedTriangleCount > 0 ? uint64(Instance.RefinedTriangleCount) * 3u : uint64(Range.IndexCount);
+	}
+	if (VertexCount > uint64(MAX_int32) || IndexCount > uint64(MAX_int32))
+	{
+		OutError = FString::Printf(TEXT("The road mesh needs %llu vertices / %llu indices"), VertexCount, IndexCount);
+		return false;
+	}
+	NumVertices = uint32(VertexCount);
+	NumIndices = uint32(IndexCount);
 	return true;
 }
 
 void AddRoadMeshPasses(FRDGBuilder& GraphBuilder, const FGpuGeometryOutput& Geometry, const FGpuRoadMeshInput& Mesh, const FGpuRoadMeshTarget& Target)
 {
-	CSRoadGpuMesh_AddPasses(GraphBuilder, Geometry, Mesh, Target);
+	CSRoadGpuMesh_AddPasses(GraphBuilder, Geometry, Mesh, Target, ECSRoadGpuMeshStage::Build);
 }
 
-bool RunDeformBlocking(const FGpuGeometryInput& Geometry, const FGpuRoadMeshInput& Mesh, TArray<float>& OutVertices, FString& OutError)
+bool RunRefineCountsBlocking(const FGpuGeometryInput& Geometry, FGpuRoadMeshInput& Mesh, FString& OutError, FGpuGeometryResult* OutGeometry)
+{
+	const bool bCounts = Mesh.NeedsRefinementCounts();
+	if (!bCounts && !OutGeometry) return true;
+	TArray<FUintVector4> Totals;
+	Totals.SetNumZeroed(Mesh.RefineInstances.Num());
+	TArray<TPair<void*, uint32>> Targets;
+	if (bCounts) Targets.Add({ Totals.GetData(), uint32(Totals.Num() * sizeof(FUintVector4)) });
+	if (OutGeometry)
+	{
+		const uint32 NumEntities = Geometry.NumEntities;
+		OutGeometry->Nodes.Reset();
+		OutGeometry->Edges.SetNumZeroed(NumEntities);
+		OutGeometry->StartNodes.SetNumZeroed(NumEntities);
+		OutGeometry->EndNodes.SetNumZeroed(NumEntities);
+		Targets.Add({ OutGeometry->Edges.GetData(), NumEntities * uint32(sizeof(EdgeGeometry)) });
+		Targets.Add({ OutGeometry->StartNodes.GetData(), NumEntities * uint32(sizeof(EdgeNodeGeometry)) });
+		Targets.Add({ OutGeometry->EndNodes.GetData(), NumEntities * uint32(sizeof(EdgeNodeGeometry)) });
+	}
+	const bool bRead = RunGraphBlocking([&Geometry, &Mesh, bCounts, OutGeometry](FRDGBuilder& GraphBuilder)
+	{
+		const FGpuGeometryOutput GeometryOut = AddGeometryPasses(GraphBuilder, Geometry);
+		TArray<FRDGBufferRef> Buffers;
+		if (bCounts) Buffers.Add(CSRoadGpuMesh_AddPasses(GraphBuilder, GeometryOut, Mesh, FGpuRoadMeshTarget(), ECSRoadGpuMeshStage::Counts).RefineTotals);
+		if (OutGeometry) Buffers.Append({ GeometryOut.EdgeGeometry, GeometryOut.StartNodeGeometry, GeometryOut.EndNodeGeometry });
+		return Buffers;
+	}, Targets);
+	if (!bRead)
+	{
+		OutError = TEXT("The GPU refinement count readback did not complete");
+		return false;
+	}
+	return !bCounts || Mesh.ApplyRefinement(Totals, OutError);
+}
+
+bool RunDeformBlocking(const FGpuGeometryInput& Geometry, const FGpuRoadMeshInput& Mesh, TArray<float>& OutVertices, TArray<uint32>* OutPartners,
+	TArray<uint32>* OutIndices, FString& OutError)
 {
 	if (Mesh.NumVertices == 0)
 	{
 		OutError = TEXT("The road mesh has no vertices");
 		return false;
 	}
-	const uint32 Bytes = Mesh.NumVertices * 8u * uint32(sizeof(float));
-	OutVertices.SetNumZeroed(int32(Mesh.NumVertices * 8u));
-	float* Target = OutVertices.GetData();
-	bool bRead = false;
-	ENQUEUE_RENDER_COMMAND(CSRoadDeformBlocking)([&Geometry, &Mesh, Target, Bytes, &bRead](FRHICommandListImmediate& RHICmdList)
+	if (Mesh.NeedsRefinementCounts())
 	{
-		FRHIGPUBufferReadback* Readback = new FRHIGPUBufferReadback(TEXT("CSRoad.DeformReadback"));
+		OutError = TEXT("The road mesh has refined instances but no refinement counts (RunRefineCountsBlocking)");
+		return false;
+	}
+	OutVertices.SetNumZeroed(int32(Mesh.NumVertices * 8u));
+	TArray<TPair<void*, uint32>> Targets = { { OutVertices.GetData(), Mesh.NumVertices * 8u * uint32(sizeof(float)) } };
+	if (OutPartners)
+	{
+		OutPartners->SetNumZeroed(Mesh.Instances.Num() * 2);
+		Targets.Add({ OutPartners->GetData(), uint32(OutPartners->Num() * sizeof(uint32)) });
+	}
+	if (OutIndices)
+	{
+		OutIndices->SetNumZeroed(int32(Mesh.NumIndices));
+		Targets.Add({ OutIndices->GetData(), Mesh.NumIndices * uint32(sizeof(uint32)) });
+	}
+	const bool bRead = RunGraphBlocking([&Geometry, &Mesh, OutPartners, OutIndices](FRDGBuilder& GraphBuilder)
+	{
+		const FGpuGeometryOutput GeometryOut = AddGeometryPasses(GraphBuilder, Geometry);
+		FGpuRoadMeshTarget MeshTarget;
+		MeshTarget.DebugVertices = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(float), Mesh.NumVertices * 8u), TEXT("CSRoad.DeformedVertices"));
+		if (OutIndices)
 		{
-			FRDGBuilder GraphBuilder(RHICmdList, RDG_EVENT_NAME("CSRoadDeformBlocking"));
-			const FGpuGeometryOutput GeometryOut = AddGeometryPasses(GraphBuilder, Geometry);
-			FGpuRoadMeshTarget MeshTarget;
-			MeshTarget.DebugVertices = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(float), Mesh.NumVertices * 8u), TEXT("CSRoad.DeformedVertices"));
-			CSRoadGpuMesh_AddPasses(GraphBuilder, GeometryOut, Mesh, MeshTarget);
-			AddEnqueueCopyPass(GraphBuilder, Readback, MeshTarget.DebugVertices, Bytes);
-			GraphBuilder.Execute();
+			MeshTarget.Indices = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), FMath::Max(1u, Mesh.NumIndices)), TEXT("CSRoad.DebugIndices"));
+			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(FRDGBufferUAVDesc(MeshTarget.Indices, PF_R32_UINT)), 0u);
+			MeshTarget.IndexCapacity = Mesh.NumIndices;
 		}
-		RHICmdList.SubmitAndBlockUntilGPUIdle();
-		const void* Data = Readback->IsReady() ? Readback->Lock(Bytes) : nullptr;
-		if (Data)
-		{
-			FMemory::Memcpy(Target, Data, Bytes);
-			Readback->Unlock();
-			bRead = true;
-		}
-		delete Readback;
-	});
-	FlushRenderingCommands();
+		const FCSRoadGpuMesh_Outputs Outputs = CSRoadGpuMesh_AddPasses(GraphBuilder, GeometryOut, Mesh, MeshTarget, ECSRoadGpuMeshStage::Build);
+		TArray<FRDGBufferRef> Buffers = { MeshTarget.DebugVertices };
+		if (OutPartners) Buffers.Add(Outputs.Partners);
+		if (OutIndices) Buffers.Add(MeshTarget.Indices);
+		return Buffers;
+	}, Targets);
 	if (!bRead) OutError = TEXT("The GPU deform readback did not complete");
+	return bRead;
+}
+
+bool RunJunctionBlocking(const FGpuGeometryInput& Geometry, const FGpuRoadMeshInput& Mesh, TArray<uint32>& OutPartners, FString& OutError)
+{
+	// Parameters and seam matching only: an input without instances skips the rest.
+	FGpuRoadMeshInput MatchOnly;
+	MatchOnly.RoadOfEntity = Mesh.RoadOfEntity;
+	OutPartners.SetNumZeroed(Geometry.EdgeList.Num() * 6);
+	if (OutPartners.Num() == 0) return true;
+	const TArray<TPair<void*, uint32>> Targets = { { OutPartners.GetData(), uint32(OutPartners.Num() * sizeof(uint32)) } };
+	const bool bRead = RunGraphBlocking([&Geometry, &MatchOnly](FRDGBuilder& GraphBuilder)
+	{
+		const FGpuGeometryOutput GeometryOut = AddGeometryPasses(GraphBuilder, Geometry);
+		return TArray<FRDGBufferRef>{ CSRoadGpuMesh_AddPasses(GraphBuilder, GeometryOut, MatchOnly, FGpuRoadMeshTarget(), ECSRoadGpuMeshStage::Build).Partners };
+	}, Targets);
+	if (!bRead) OutError = TEXT("The GPU junction readback did not complete");
 	return bRead;
 }
 }

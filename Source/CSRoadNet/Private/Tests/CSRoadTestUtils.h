@@ -2,7 +2,7 @@
 // Scripts/CS2Road/GoldenDump (C# RoadLab port) and live in <Project>/Saved/CSRoadGolden.
 #pragma once
 
-#include "CSRoadGraph.h"
+#include "CSRoadGpuGeometry.h"
 #include "Dom/JsonObject.h"
 #include "Misc/AutomationTest.h"
 
@@ -71,4 +71,8 @@ struct FBudgetCompare
 
 // Non-source specs (scenario graphs) rebuilt from the golden edges: prefab + curve control points.
 TArray<CSRoad::FRoadSpec> ScenarioSpecs(const TSharedPtr<FJsonObject>& Golden);
+
+// The golden edge / start / end node geometry of every road of Graph (built from the same golden),
+// for the CPU stages that read the geometry back (lanes, crosswalks, decal items).
+bool GoldenGeometry(const TSharedPtr<FJsonObject>& Golden, const CSRoad::FGraph& Graph, CSRoad::FGpuGeometryResult& Out);
 }

@@ -1,0 +1,416 @@
+// RoadLab RoadMeshRefinement.Refine on the GPU: the node composition meshes are subdivided until
+// every edge's deformed chord is within 1 cm of the deformed curve (in xz).
+//
+// The C# version refines a whole material group pass by pass, memoising each edge's split by its
+// vertex pair. Here one thread refines one base triangle depth first. That gives the same output:
+//  - Refine replaces every triangle by its children in place, so its final triangle list is the
+//    depth-first leaf order of the subdivision trees, which is the order this thread emits leaves.
+//  - An edge's split and midpoint are functions of the edge's two vertices taken in the order of
+//    the first Midpoint call that saw it. That order is fixed per edge (its "defining direction"):
+//    a base edge's comes from the first base triangle using it (FRefineTriangle flip bits), a split
+//    edge's halves keep their parent's, and an interior edge's is the one of the first child (in
+//    list order) that contains it. Both triangles sharing an edge evaluate it in that direction, so
+//    they agree bit for bit and the surface stays watertight without the memo.
+// What differs is vertex sharing: a midpoint is created once per triangle split rather than once
+// per edge, so a refined mesh has more vertices than RoadLab's (same positions, same triangles).
+//
+// Needs, declared by the includer: MeshVertices, RefinedVerticesRW, RW_Indices, RW_MaterialIds.
+#pragma once
+
+#include "CSRoadDeform.ush"
+
+// RoadMeshRefinement.Tolerance.
+#define RMR_TOLERANCE 0.01f
+// Refine gives up after 20 passes, so a converged tree is at most 19 deep.
+#define RMR_MAX_DEPTH 19u
+
+// A base triangle of a node composition mesh, in RoadLab's processing order (material groups in
+// order, triangles in index order): composition-local corner indices and Flags = material slot
+// (bits 0-28) | defining-direction flips of edges ab, bc, ca (bits 29, 30, 31).
+struct FRefineTriangle
+{
+	uint A;
+	uint B;
+	uint C;
+	uint Flags;
+};
+
+// ---------------------------------------------------------------------------------------------
+// Unity.Mathematics / Colossal.Mathematics encoders used by Interpolate
+// ---------------------------------------------------------------------------------------------
+
+// math.f32tof16: round on the 13th mantissa bit after dropping the low 12 (not round-to-even).
+uint U_f32tof16(float x)
+{
+	uint ux = asuint(x);
+	uint uux = ux & 0x7FFFF000u;
+	uint h = (asuint(U_min(asfloat(uux) * asfloat(0x07800000u), 260042752.0f)) + 0x1000u) >> 13;
+	if ((int)uux >= 0x7F800000) h = (int)uux > 0x7F800000 ? 0x7E00u : 0x7C00u;
+	return h | ((ux & 0x80000FFFu) >> 16);
+}
+
+// math.f16tof32.
+float U_f16tof32(uint x)
+{
+	uint bits = (x & 0x7FFFu) << 13;
+	uint exponent = bits & 0x0F800000u;
+	uint value = bits + 0x38000000u + (exponent == 0x0F800000u ? 0x38000000u : 0u);
+	if (exponent == 0u) value = asuint(asfloat(value + 0x00800000u) - 6.1035156e-05f);
+	return asfloat(value | ((x & 0x8000u) << 16));
+}
+
+float U_RoundHalf(float x) { return U_f16tof32(U_f32tof16(x)); }
+
+// MathUtils.QuantizeSnorm: the rounding offset is taken before the clamp; the cast truncates.
+int MU_QuantizeSnorm(float v, int bits)
+{
+	float scale = (float)((1 << (bits - 1)) - 1);
+	float bias = v >= 0.0f ? 0.5f : -0.5f;
+	v = U_clamp(v, -1.0f, 1.0f);
+	return (int)(v * scale + bias);
+}
+
+float2 MU_EncodeOctahedral(float3 n)
+{
+	float x = n.x;
+	float y = n.y;
+	float z = n.z;
+	float sum = abs(x) + abs(y) + abs(z);
+	float inverse = sum == 0.0f ? 0.0f : 1.0f / sum;
+	x *= inverse;
+	y *= inverse;
+	return float2(z >= 0.0f ? x : (1.0f - abs(y)) * (x >= 0.0f ? 1.0f : -1.0f), z >= 0.0f ? y : (1.0f - abs(x)) * (y >= 0.0f ? 1.0f : -1.0f));
+}
+
+uint MU_NormalToOctahedral(float3 n)
+{
+	float2 e = MU_EncodeOctahedral(n);
+	return (uint(MU_QuantizeSnorm(e.x, 16)) & 0xFFFFu) | ((uint(MU_QuantizeSnorm(e.y, 16)) & 0xFFFFu) << 16);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Refinement
+// ---------------------------------------------------------------------------------------------
+
+// A vertex of a base triangle's refinement: composition-space position plus Ref =
+//   bit 31: a midpoint created by this refinement (else a base corner)
+//   bits 29-30: the base corner whose colour and tangent it carries (Interpolate keeps a's)
+//   bits 0-28: the base corner (0-2), or the midpoint's creation index
+struct FRefineVertex
+{
+	float3 Position;
+	uint Ref;
+};
+
+#define RMR_MIDPOINT 0x80000000u
+
+uint RMR_Source(uint ref) { return (ref >> 29) & 3u; }
+uint RMR_Index(uint ref) { return ref & 0x1FFFFFFFu; }
+
+// The base triangle being refined and where its output goes.
+struct FRefineContext
+{
+	uint ParameterSlot;
+	uint JunctionSlot;
+	float3 Translation;
+	// Composition-local vertex index of each base corner, and its data.
+	uint Corner[3];
+	float3 Position[3];
+	uint Color[3];
+	uint Tangent[3];
+	uint Normal[3];
+	float4 UV[3];
+	uint MaterialSlot;
+	uint Flips;
+	// Emit only: RefinedVertices index of midpoint 0, stream index of the instance's vertex 0, local
+	// index of midpoint 0 (after the composition mesh's vertices), first index of the first leaf.
+	uint MidpointStorage;
+	uint VertexBase;
+	uint MidpointLocal;
+	uint IndexBase;
+};
+
+// A parent triangle on the depth-first path: corners, the unrotated edges' defining-direction
+// flips (bits 0-2), split mask (3-5), split pattern rotation (6-7), count-2 diagonal through ab-c
+// (8), next child (9-11) and child count (12-14); MidpointBase numbers its split edges' midpoints.
+struct FRefineFrame
+{
+	FRefineVertex V[3];
+	uint Flags;
+	uint MidpointBase;
+};
+
+uint RMR_Color(FRefineContext c, FRefineVertex v) { return c.Color[RMR_Source(v.Ref)]; }
+
+// RoadMeshes.Deform(...).Position.xz without terrain (Refine never samples it): curves, junction
+// seam adjustment, then the translation.
+float2 RMR_DeformXZ(FRefineContext c, float3 position, uint color)
+{
+	FCompositionVertex v;
+	v.Position = position;
+	v.Normal = 0u;
+	v.Tangent = 0u;
+	v.Color = color;
+	v.UV0 = 0.0f;
+	Float4x4 curve, lateral;
+	RM_BuildDeformationAt(v, c.ParameterSlot, curve, lateral);
+	RJS_AdjustVertex(v, c.Translation, c.JunctionSlot, curve, lateral);
+	precise float2 xz = RM_Curve(curve, position.z).xz + c.Translation.xz;
+	return xz;
+}
+
+// ChordError(a, b) > Tolerance, given the endpoints' deformed xz.
+bool RMR_Splits(FRefineContext c, FRefineVertex a, float2 pa, FRefineVertex b, float2 pb)
+{
+	uint color = RMR_Color(c, a);
+	if (color != RMR_Color(c, b)) return false;
+	precise float error = 0.0f;
+	for (uint i = 1u; i <= 3u; i++)
+	{
+		float t = 0.25f * float(i);
+		precise float2 m = RMR_DeformXZ(c, U_lerp(a.Position, b.Position, t), color);
+		error = U_max(error, U_distance(m, U_lerp(pa, pb, t)));
+	}
+	return error > RMR_TOLERANCE;
+}
+
+// Midpoint's position: half way, or at the sync knot nearest the middle when the edge crosses one
+// of the vertex sync breakpoints (those are derivative discontinuities, so bisecting across them
+// would never converge).
+FRefineVertex RMR_Midpoint(FRefineContext c, FRefineVertex a, FRefineVertex b, uint index, out float fraction)
+{
+	fraction = 0.5f;
+	float knot = 0.0f;
+	float best = 0.5f;
+	precise float dx = b.Position.x - a.Position.x;
+	uint bits = RMR_Color(c, a) >> 24;
+	if (abs(dx) > 1e-6f && (bits & 6u) != 0u)
+	{
+		float4 sync = RM_LoadSync(c.ParameterSlot, (bits & 2u) != 0u ? 0u : 2u);
+		for (int i = 0; i < 4; i++)
+		{
+			float s = RM_Component(sync, i);
+			precise float f = (s - a.Position.x) / dx;
+			precise float center = abs(f - 0.5f);
+			if (f > 1e-4f && f < 0.9999f && center < best)
+			{
+				fraction = f;
+				knot = s;
+				best = center;
+			}
+		}
+	}
+	FRefineVertex m;
+	precise float3 position = U_lerp(a.Position, b.Position, fraction);
+	m.Position = position;
+	if (best < 0.5f) m.Position.x = knot;
+	m.Ref = RMR_MIDPOINT | (RMR_Source(a.Ref) << 29) | index;
+	return m;
+}
+
+uint RMR_NormalOf(FRefineContext c, FRefineVertex v)
+{
+	return (v.Ref & RMR_MIDPOINT) != 0u ? RefinedVerticesRW[c.MidpointStorage + RMR_Index(v.Ref)].Normal : c.Normal[RMR_Index(v.Ref)];
+}
+
+float4 RMR_UVOf(FRefineContext c, FRefineVertex v)
+{
+	return (v.Ref & RMR_MIDPOINT) != 0u ? RefinedVerticesRW[c.MidpointStorage + RMR_Index(v.Ref)].UV0 : c.UV[RMR_Index(v.Ref)];
+}
+
+// The rest of Interpolate(a, b, fraction) for an emitted midpoint: a's chart and tangent, the
+// lerped normal re-encoded unless both match, the UVs rounded through half.
+void RMR_WriteMidpoint(FRefineContext c, FRefineVertex a, FRefineVertex b, FRefineVertex m, float fraction)
+{
+	uint na = RMR_NormalOf(c, a);
+	uint nb = RMR_NormalOf(c, b);
+	float4 uva = RMR_UVOf(c, a);
+	float4 uvb = RMR_UVOf(c, b);
+	FCompositionVertex v;
+	v.Position = m.Position;
+	v.Color = c.Color[RMR_Source(a.Ref)];
+	v.Tangent = c.Tangent[RMR_Source(a.Ref)];
+	precise float3 decodedA = RM_DecodeNormal(na);
+	precise float3 lerped = normalizesafe(U_lerp(decodedA, RM_DecodeNormal(nb), fraction), decodedA);
+	v.Normal = na == nb ? na : MU_NormalToOctahedral(lerped);
+	precise float4 uv = U_lerp(uva, uvb, fraction);
+	v.UV0 = float4(U_RoundHalf(uv.x), U_RoundHalf(uv.y), U_RoundHalf(uv.z), U_RoundHalf(uv.w));
+	RefinedVerticesRW[c.MidpointStorage + RMR_Index(m.Ref)] = v;
+}
+
+// Edge e of a triangle (0 = v0 v1, 1 = v1 v2, 2 = v2 v0) in its defining direction.
+void RMR_Edge(FRefineVertex v[3], uint flips, uint e, out FRefineVertex a, out FRefineVertex b)
+{
+	bool bFlip = ((flips >> e) & 1u) != 0u;
+	a = v[bFlip ? (e + 1u) % 3u : e];
+	b = v[bFlip ? e : (e + 1u) % 3u];
+}
+
+// Which of the triangle's edges Refine splits.
+uint RMR_SplitMask(FRefineContext c, FRefineVertex v[3], uint flips)
+{
+	float2 deformed[3];
+	for (uint i = 0u; i < 3u; i++) deformed[i] = RMR_DeformXZ(c, v[i].Position, RMR_Color(c, v[i]));
+	uint mask = 0u;
+	for (uint e = 0u; e < 3u; e++)
+	{
+		bool bFlip = ((flips >> e) & 1u) != 0u;
+		uint first = bFlip ? (e + 1u) % 3u : e;
+		uint second = bFlip ? e : (e + 1u) % 3u;
+		if (RMR_Splits(c, v[first], deformed[first], v[second], deformed[second])) mask |= 1u << e;
+	}
+	return mask;
+}
+
+// Midpoint of a split edge e, numbered after the frame's earlier split edges.
+FRefineVertex RMR_EdgeMidpoint(FRefineContext c, FRefineFrame f, uint e)
+{
+	FRefineVertex a, b;
+	RMR_Edge(f.V, f.Flags & 7u, e, a, b);
+	uint mask = (f.Flags >> 3) & 7u;
+	float fraction;
+	return RMR_Midpoint(c, a, b, f.MidpointBase + countbits(mask & ((1u << e) - 1u)), fraction);
+}
+
+// Children of each split pattern, in the rotated frame (a, b, c, ab, bc, ca = slots 0-5), with
+// flip codes 0 / 1 (the interior edge's first child defines it) or 2 / 3 / 4 (inherit ab / bc / ca).
+// A child is 3 slots (4 bits each) and 3 flip codes (3 bits each).
+#define RMR_CHILD(s0, s1, s2, f0, f1, f2) ((s0) | ((s1) << 4) | ((s2) << 8) | ((f0) << 12) | ((f1) << 15) | ((f2) << 18))
+
+uint RMR_ChildCode(uint pattern, uint k)
+{
+	// 0: one split edge ab. 1: all three. 2 / 3: ab and bc, diagonal a-bc / ab-c.
+	if (pattern == 0u) return k == 0u ? RMR_CHILD(0, 3, 2, 2, 0, 4) : RMR_CHILD(3, 1, 2, 2, 3, 1);
+	if (pattern == 1u)
+	{
+		if (k == 0u) return RMR_CHILD(0, 3, 5, 2, 0, 4);
+		if (k == 1u) return RMR_CHILD(3, 1, 4, 2, 3, 0);
+		if (k == 2u) return RMR_CHILD(5, 4, 2, 0, 3, 4);
+		return RMR_CHILD(3, 4, 5, 1, 1, 1);
+	}
+	if (k == 0u) return RMR_CHILD(1, 4, 3, 3, 0, 2);
+	if (pattern == 2u) return k == 1u ? RMR_CHILD(0, 3, 4, 2, 1, 0) : RMR_CHILD(0, 4, 2, 1, 3, 4);
+	return k == 1u ? RMR_CHILD(0, 3, 2, 2, 0, 4) : RMR_CHILD(3, 4, 2, 1, 3, 1);
+}
+
+uint RMR_Pattern(uint mask, uint flags)
+{
+	uint count = countbits(mask);
+	if (count == 1u) return 0u;
+	if (count == 3u) return 1u;
+	return (flags & (1u << 8)) != 0u ? 3u : 2u;
+}
+
+// Child k of frame f: its corners and flips.
+void RMR_Child(FRefineContext c, FRefineFrame f, uint k, out FRefineVertex v[3], out uint flips)
+{
+	uint mask = (f.Flags >> 3) & 7u;
+	uint rotation = (f.Flags >> 6) & 3u;
+	uint code = RMR_ChildCode(RMR_Pattern(mask, f.Flags), k);
+	flips = 0u;
+	for (uint i = 0u; i < 3u; i++)
+	{
+		uint slot = (code >> (4u * i)) & 15u;
+		uint flip = (code >> (12u + 3u * i)) & 7u;
+		if (slot < 3u) v[i] = f.V[(rotation + slot) % 3u];
+		else v[i] = RMR_EdgeMidpoint(c, f, (rotation + slot - 3u) % 3u);
+		uint bit = flip < 2u ? flip : (f.Flags >> ((rotation + flip - 2u) % 3u)) & 1u;
+		flips |= bit << i;
+	}
+}
+
+// Splits a triangle: creates (and when emitting writes) its midpoints, numbered from midpoints,
+// and decides the split pattern Refine uses (rotation for one or two split edges, the shorter
+// diagonal for two).
+FRefineFrame RMR_Split(FRefineContext c, FRefineVertex v[3], uint flips, uint mask, inout uint midpoints, bool bEmit)
+{
+	FRefineFrame f;
+	f.V[0] = v[0];
+	f.V[1] = v[1];
+	f.V[2] = v[2];
+	f.MidpointBase = midpoints;
+	uint count = countbits(mask);
+	uint rotation = 0u;
+	if (count == 1u) rotation = firstbitlow(mask);
+	else if (count == 2u) rotation = (mask & 1u) == 0u ? 1u : ((mask & 2u) == 0u ? 2u : 0u);
+	f.Flags = (flips & 7u) | (mask << 3) | (rotation << 6) | ((count == 3u ? 4u : count + 1u) << 12);
+	FRefineVertex m[3];
+	for (uint e = 0u; e < 3u; e++)
+	{
+		m[e].Position = 0.0f;
+		m[e].Ref = 0u;
+		if ((mask & (1u << e)) == 0u) continue;
+		FRefineVertex a, b;
+		RMR_Edge(v, flips, e, a, b);
+		float fraction;
+		m[e] = RMR_Midpoint(c, a, b, midpoints++, fraction);
+		if (bEmit) RMR_WriteMidpoint(c, a, b, m[e], fraction);
+	}
+	if (count == 2u)
+	{
+		// Rotated so the split edges are ab and bc: the shorter of a-bc and ab-c in composition xz.
+		float3 a = v[rotation].Position;
+		float3 cc = v[(rotation + 2u) % 3u].Position;
+		float3 ab = m[rotation].Position;
+		float3 bc = m[(rotation + 1u) % 3u].Position;
+		if (!(distancesq(a.xz, bc.xz) < distancesq(ab.xz, cc.xz))) f.Flags |= 1u << 8;
+	}
+	return f;
+}
+
+uint RMR_LocalIndex(FRefineContext c, FRefineVertex v)
+{
+	return (v.Ref & RMR_MIDPOINT) != 0u ? c.MidpointLocal + RMR_Index(v.Ref) : c.Corner[RMR_Index(v.Ref)];
+}
+
+// A leaf triangle into the index stream, corners 1 and 2 swapped for UE's winding.
+void RMR_WriteLeaf(FRefineContext c, FRefineVertex v[3], uint leaf, uint indexCapacity)
+{
+	uint dst = c.IndexBase + leaf * 3u;
+	if (dst + 2u >= indexCapacity) return;
+	RW_Indices[dst + 0u] = c.VertexBase + RMR_LocalIndex(c, v[0]);
+	RW_Indices[dst + 1u] = c.VertexBase + RMR_LocalIndex(c, v[2]);
+	RW_Indices[dst + 2u] = c.VertexBase + RMR_LocalIndex(c, v[1]);
+	RW_MaterialIds[dst / 3u] = c.MaterialSlot;
+}
+
+// Refines one base triangle depth first. Returns (leaf triangles, midpoints, unconverged leaves:
+// ones Refine would still split after its 20 passes, where the C# throws); with bEmit also writes
+// the midpoints and leaves.
+uint3 RMR_Refine(FRefineContext c, bool bEmit, uint indexCapacity)
+{
+	FRefineFrame frames[RMR_MAX_DEPTH];
+	uint leaves = 0u;
+	uint midpoints = 0u;
+	uint unconverged = 0u;
+	FRefineVertex v[3];
+	for (uint i = 0u; i < 3u; i++)
+	{
+		v[i].Position = c.Position[i];
+		v[i].Ref = (i << 29) | i;
+	}
+	uint flips = c.Flips;
+	// frames[0..level] is the path to the triangle in v, which sits at depth level + 1.
+	int level = -1;
+	for (;;)
+	{
+		uint mask = RMR_SplitMask(c, v, flips);
+		if (mask != 0u && uint(level + 1) < RMR_MAX_DEPTH)
+		{
+			level++;
+			frames[level] = RMR_Split(c, v, flips, mask, midpoints, bEmit);
+		}
+		else
+		{
+			if (mask != 0u) unconverged++;
+			if (bEmit) RMR_WriteLeaf(c, v, leaves, indexCapacity);
+			leaves++;
+		}
+		while (level >= 0 && ((frames[level].Flags >> 9) & 7u) == ((frames[level].Flags >> 12) & 7u)) level--;
+		if (level < 0) break;
+		uint k = (frames[level].Flags >> 9) & 7u;
+		frames[level].Flags += 1u << 9;
+		RMR_Child(c, frames[level], k, v, flips);
+	}
+	return uint3(leaves, midpoints, unconverged);
+}

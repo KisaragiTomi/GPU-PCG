@@ -1,43 +1,19 @@
 // Road surface meshes from the GPU geometry: BatchDataHelpers.CalculateEdge/NodeParameters per
-// road (the CompositionParameters CS2 hands its deforming vertex shader), then every composition
-// mesh vertex deformed onto those curves (the C# RoadLab RoadMeshes.Deform) and written into a
-// UCSMesh resident stream set. Geometry is computed in Unity metres (y up) and converted at the
-// write: UE = (x, -z, y) * 100, a proper rotation. Unity's front faces have cross(B - A, C - A)
-// along the normal, UE's against it, so the index writer swaps corners 1 and 2.
+// road (the CompositionParameters CS2 hands its deforming vertex shader), RoadLab's junction seam
+// matching (RoadJunctionSurface.Create) and node mesh refinement (RoadMeshRefinement, in
+// CSRoadRefine.ush), then every vertex deformed onto those curves (RoadMeshes.Deform,
+// CSRoadDeform.ush) and written into a UCSMesh resident stream set.
+// Geometry is computed in Unity metres (y up) and converted at the write: UE = (x, -z, y) * 100,
+// a proper rotation. Unity's front faces have cross(B - A, C - A) along the normal, UE's against
+// it, so the index writer swaps corners 1 and 2.
 
-#include "CSRoadGeometryCommon.ush"
+#include "CSRoadDeform.ush"
+#include "CSRoadMeshLayout.ush"
 #include "/Plugin/PCGPlugins/Shaders/Private/CSPackedVertex.ush"
 
 #ifndef THREADGROUP_SIZE
 #define THREADGROUP_SIZE 64
 #endif
-
-// CSRoadCompositionMesh.h FCompositionVertex (BatchMeshHelpers.VertexData with UV0 as float).
-struct FCompositionVertex
-{
-	float3 Position;
-	uint Normal;
-	uint Tangent;
-	uint Color;
-	float4 UV0;
-};
-
-struct FMeshRange
-{
-	uint VertexOffset;
-	uint VertexCount;
-	uint IndexOffset;
-	uint IndexCount;
-};
-
-// One composition mesh drawn with one CompositionParameters: edge, start node or end node of a road.
-struct FMeshInstance
-{
-	uint Mesh;
-	uint Parameters;
-	uint VertexOffset;
-	uint IndexOffset;
-};
 
 uint NumInstances;
 uint InstanceGroupsX;
@@ -47,7 +23,10 @@ float4x4 LocalToWorld;
 uint VertexCapacity;
 uint IndexCapacity;
 
-RWStructuredBuffer<CompositionParameters> ParametersRW;
+RWStructuredBuffer<FJunctionSide> JunctionSidesRW;
+RWStructuredBuffer<uint> JunctionPartnersRW;
+// Road index (EdgeList position) of each entity, -1 for nodes.
+StructuredBuffer<int> RoadOfEntity;
 StructuredBuffer<FCompositionVertex> MeshVertices;
 StructuredBuffer<uint> MeshIndices;
 StructuredBuffer<uint> MeshTriangleMaterials;
@@ -61,6 +40,23 @@ RWBuffer<uint> RW_Colors;
 RWBuffer<uint> RW_Indices;
 RWBuffer<uint> RW_MaterialIds;
 RWStructuredBuffer<float> DebugVertices;
+
+// Refinement: RefineInstances lists the refined instances (MeshInstances indices), one group each.
+// RefineMode 0 counts per base triangle item (leaves, midpoints, unconverged), 1 emits.
+uint NumRefineInstances;
+uint RefineGroupsX;
+uint RefineMode;
+StructuredBuffer<uint> RefineInstances;
+RWStructuredBuffer<FCompositionVertex> RefinedVerticesRW;
+RWStructuredBuffer<uint4> RefineCountsRW;
+// Per item: first leaf and first midpoint within its instance.
+RWStructuredBuffer<uint2> RefineOffsetsRW;
+// Per refine instance: leaves, midpoints, unconverged leaves.
+RWStructuredBuffer<uint4> RefineTotalsRW;
+
+#include "CSRoadRefine.ush"
+
+StructuredBuffer<FRefineTriangle> RefineTriangles;
 
 // ---------------------------------------------------------------------------------------------
 // BatchDataHelpers
@@ -198,176 +194,99 @@ CompositionParameters BDH_CalculateNodeParameters(EdgeNodeGeometry nodeGeometry,
 	return p;
 }
 
-// One road per thread: its edge, start node and end node parameters (RoadRenderer.BuildSteps).
+// One road per thread: its edge, start node and end node parameters (RoadRenderer.BuildSteps), and
+// the two junction surface sides of each node instance (the RoadJunctionSurface constructor).
 [numthreads(THREADGROUP_SIZE, 1, 1)]
 void CalculateParametersCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
 	if (DispatchThreadId.x >= NumEdges) return;
-	int entity = EdgeList[DispatchThreadId.x];
+	uint road = DispatchThreadId.x;
+	int entity = EdgeList[road];
 	Composition composition = CompositionData[entity];
+	EdgeNodeGeometry startGeometry = StartNodeGeometryRW[entity];
+	EdgeNodeGeometry endGeometry = EndNodeGeometryRW[entity];
 	precise CompositionParameters edge = BDH_CalculateEdgeParameters(EdgeGeometryRW[entity]);
-	precise CompositionParameters start = BDH_CalculateNodeParameters(StartNodeGeometryRW[entity], GetComposition(composition.m_StartNode));
-	precise CompositionParameters end = BDH_CalculateNodeParameters(EndNodeGeometryRW[entity], GetComposition(composition.m_EndNode));
-	ParametersRW[DispatchThreadId.x * 3u + 0u] = edge;
-	ParametersRW[DispatchThreadId.x * 3u + 1u] = start;
-	ParametersRW[DispatchThreadId.x * 3u + 2u] = end;
+	precise CompositionParameters start = BDH_CalculateNodeParameters(startGeometry, GetComposition(composition.m_StartNode));
+	precise CompositionParameters end = BDH_CalculateNodeParameters(endGeometry, GetComposition(composition.m_EndNode));
+	precise FJunctionSide startLeft = RJS_MakeSide(start, 0u, startGeometry.m_MiddleRadius);
+	precise FJunctionSide startRight = RJS_MakeSide(start, 1u, startGeometry.m_MiddleRadius);
+	precise FJunctionSide endLeft = RJS_MakeSide(end, 0u, endGeometry.m_MiddleRadius);
+	precise FJunctionSide endRight = RJS_MakeSide(end, 1u, endGeometry.m_MiddleRadius);
+	RM_StoreParams(road * 3u + 0u, edge);
+	RM_StoreParams(road * 3u + 1u, start);
+	RM_StoreParams(road * 3u + 2u, end);
+	JunctionSidesRW[(road * 3u + 1u) * 2u + 0u] = startLeft;
+	JunctionSidesRW[(road * 3u + 1u) * 2u + 1u] = startRight;
+	JunctionSidesRW[(road * 3u + 2u) * 2u + 0u] = endLeft;
+	JunctionSidesRW[(road * 3u + 2u) * 2u + 1u] = endRight;
 }
 
-// ---------------------------------------------------------------------------------------------
-// RoadMeshes.Deform (C# RoadLab stand-in for CS2's composition vertex shader)
-// ---------------------------------------------------------------------------------------------
-
-Float4x4 RM_Matrix(CompositionParameters p, uint i)
+// The one side of another node instance at the node whose terminal cross-section SharedSection
+// pairs with side self (as partner code: side + 1), or 0 when there is none or more than one.
+// Candidates come from the node's ConnectedEdge list, where RoadWorld lists a road whose two ends
+// are both on the node twice.
+uint RJS_UniquePartner(int node, uint self, FJunctionSide me)
 {
-	if (i == 0u) return p.m_CompositionMatrix0;
-	if (i == 1u) return p.m_CompositionMatrix1;
-	if (i == 2u) return p.m_CompositionMatrix2;
-	if (i == 3u) return p.m_CompositionMatrix3;
-	if (i == 4u) return p.m_CompositionMatrix4;
-	if (i == 5u) return p.m_CompositionMatrix5;
-	if (i == 6u) return p.m_CompositionMatrix6;
-	return p.m_CompositionMatrix7;
-}
-
-float RM_Component(float4 v, int i)
-{
-	if (i == 0) return v.x;
-	if (i == 1) return v.y;
-	if (i == 2) return v.z;
-	return v.w;
-}
-
-// Piecewise-linear remap through the sync breakpoints; returns (value, slope).
-float2 RM_Remap(float v, float4 source, float4 target)
-{
-	float previous = 0.0f;
-	float mapped = 0.0f;
-	for (int i = 0; i < 5; i++)
+	uint2 range = ConnectedEdgeRange[node];
+	uint count = 0u;
+	uint found = 0u;
+	for (uint i = 0u; i < range.y; i++)
 	{
-		float next = i < 4 ? RM_Component(source, i) : 1.0f;
-		float value = i < 4 ? RM_Component(target, i) : 1.0f;
-		if (v <= next && next - previous > 1e-6f) return float2(U_lerp(mapped, value, (v - previous) / (next - previous)), (value - mapped) / (next - previous));
-		previous = next;
-		mapped = value;
-	}
-	return float2(v, 1.0f);
-}
-
-float4 RM_Lerp(float4 x, float4 y, float s) { return U_lerp(x, y, s); }
-
-void RM_BuildDeformation(FCompositionVertex vertex, CompositionParameters p, out Float4x4 curve, out Float4x4 crossCurve)
-{
-	float x = vertex.Position.x;
-	uint bits = (vertex.Color >> 24) & 0xFFu;
-	Float4x4 left = RM_Matrix(p, vertex.Color & 0xFFu);
-	Float4x4 right = RM_Matrix(p, (vertex.Color >> 8) & 0xFFu);
-	float4 weights = x;
-	float4 slopes = 1.0f;
-	if ((bits & 6u) != 0u)
-	{
-		float4 source = (bits & 2u) != 0u ? p.m_CompositionSync0 : p.m_CompositionSync2;
-		float4 target = (bits & 2u) != 0u ? p.m_CompositionSync1 : p.m_CompositionSync3;
-		float2 end = RM_Remap(x, source, target);
-		// SecondaryObjectSystem.LerpRemap builds a cubic first: A/B keep the source width, C uses a
-		// physical-width-weighted remap, D the target. Bit 128 is LerpRemap2's second half.
-		if ((bits & 128u) != 0u)
+		int entity = ConnectedEdgeList[range.x + i];
+		bool bRepeat = false;
+		for (uint j = 0u; j < i; j++) bRepeat = bRepeat || ConnectedEdgeList[range.x + j] == entity;
+		int road = RoadOfEntity[entity];
+		if (bRepeat || road < 0) continue;
+		Edge edge = EdgeData[entity];
+		for (uint kind = 1u; kind <= 2u; kind++)
 		{
-			weights = end.x;
-			slopes = end.y;
-		}
-		else
-		{
-			float a = U_distance(left.c0.xz, right.c0.xz);
-			float b = U_distance(left.c3.xz, right.c3.xz);
-			float2 middle = RM_Remap(x, source, U_lerp(source * a, target * b, 0.5f) / U_max(1e-6f, U_lerp(a, b, 0.5f)));
-			weights.z = middle.x;
-			weights.w = end.x;
-			slopes.z = middle.y;
-			slopes.w = end.y;
+			uint slot = uint(road) * 3u + kind;
+			if ((kind == 1u ? edge.m_Start : edge.m_End) != node || slot == self / 2u) continue;
+			for (uint side = 0u; side < 2u; side++)
+			{
+				FJunctionSide them = JunctionSidesRW[slot * 2u + side];
+				if ((them.Flags & RJS_SIDE_ACTIVE) == 0u || !RJS_SharedSection(me, them)) continue;
+				count++;
+				found = slot * 2u + side + 1u;
+			}
 		}
 	}
-	curve.c0 = RM_Lerp(left.c0, right.c0, weights.x);
-	curve.c1 = RM_Lerp(left.c1, right.c1, weights.y);
-	curve.c2 = RM_Lerp(left.c2, right.c2, weights.z);
-	curve.c3 = RM_Lerp(left.c3, right.c3, weights.w);
-	crossCurve.c0 = (right.c0 - left.c0) * slopes.x;
-	crossCurve.c1 = (right.c1 - left.c1) * slopes.y;
-	crossCurve.c2 = (right.c2 - left.c2) * slopes.z;
-	crossCurve.c3 = (right.c3 - left.c3) * slopes.w;
+	return count == 1u ? found : 0u;
 }
 
-float4 RM_Curve(Float4x4 m, float t)
+// RoadJunctionSurface.Create, one thread per side of a node instance (road * 4 + start / end * 2 +
+// side): the unique, mutual, non-folded seam partner among the other node instances at the same
+// node. The order sides are visited in does not matter, the matching is unique. Create's last
+// pass (a seam is corrected on both sides or neither) is applied by the readers.
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void JunctionMatchCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
-	float s = 1.0f - t;
-	return m.c0 * s * s * s + 3.0f * m.c1 * s * s * t + 3.0f * m.c2 * s * t * t + m.c3 * t * t * t;
-}
-
-float3 RM_Tangent(Float4x4 m, float t)
-{
-	float s = 1.0f - t;
-	return 3.0f * ((m.c1 - m.c0) * s * s + 2.0f * (m.c2 - m.c1) * s * t + (m.c3 - m.c2) * t * t).xyz;
-}
-
-float3 RM_DecodeOctahedral(float2 oct, float3 fallback)
-{
-	float3 n = float3(oct.x, oct.y, 1.0f - abs(oct.x) - abs(oct.y));
-	if (n.z < 0.0f) n.xy = (1.0f - abs(n.yx)) * select(n.xy >= 0.0f, 1.0f, -1.0f);
-	return normalizesafe(n, fallback);
-}
-
-// NormalToOctahedral: two 16-bit snorm halves.
-float3 RM_DecodeNormal(uint packed)
-{
-	float2 oct = float2(U_max(-1.0f, (float)(((int)(packed << 16u)) >> 16) / 32767.0f), U_max(-1.0f, (float)(((int)packed) >> 16) / 32767.0f));
-	return RM_DecodeOctahedral(oct, float3(0.0f, 1.0f, 0.0f));
-}
-
-// TangentToOctahedral: two 15-bit snorm fields (bits 0-14, 16-30) and the bitangent sign in bit 31.
-float4 RM_DecodeTangent(uint packed)
-{
-	float2 oct = float2(U_max(-1.0f, (float)(((int)(packed << 17u)) >> 17) / 16383.0f), U_max(-1.0f, (float)(((int)(packed << 1u)) >> 17) / 16383.0f));
-	return float4(RM_DecodeOctahedral(oct, float3(1.0f, 0.0f, 0.0f)), (packed & 0x80000000u) != 0u ? -1.0f : 1.0f);
-}
-
-struct FDeformedVertex
-{
-	float3 Position;
-	float3 Normal;
-	float4 Tangent;
-	float2 UV;
-};
-
-FDeformedVertex RM_Deform(FCompositionVertex vertex, CompositionParameters p)
-{
-	Float4x4 curve, crossCurve;
-	RM_BuildDeformation(vertex, p, curve, crossCurve);
-	float t = vertex.Position.z;
-	float4 position = RM_Curve(curve, t);
-	float3 along = normalizesafe(RM_Tangent(curve, t), float3(0.0f, 0.0f, 1.0f));
-	float3 lateral = normalizesafe(RM_Curve(crossCurve, t).xyz, float3(along.z, 0.0f, -along.x));
-	float3 up = normalizesafe(cross(along, lateral), float3(0.0f, 1.0f, 0.0f));
-	if (up.y < 0.0f) up = -up;
-	float3 normal = RM_DecodeNormal(vertex.Normal);
-	FDeformedVertex result;
-	result.Position = position.xyz + p.m_TransformMatrix.c3 + float3(0.0f, vertex.Position.y, 0.0f);
-	uint terrain = (vertex.Color >> 16) & 0xFFu;
-	if (terrain == 1u) result.Position.y = U_min(result.Position.y, TerrainUtils_SampleHeight(result.Position));
-	if (terrain == 2u) result.Position.y = U_max(result.Position.y, TerrainUtils_SampleHeight(result.Position));
-	result.UV = float2(vertex.UV0.x, vertex.UV0.y >= 0.0f ? position.w * vertex.UV0.y : vertex.UV0.y);
-	result.Normal = normalizesafe(lateral * normal.x + up * normal.y + along * normal.z, float3(0.0f, 1.0f, 0.0f));
-	// The packed tangent follows the same frame; re-orthogonalised against the deformed normal.
-	float4 tangent = RM_DecodeTangent(vertex.Tangent);
-	float3 tangentWorld = lateral * tangent.x + up * tangent.y + along * tangent.z;
-	tangentWorld = normalizesafe(tangentWorld - result.Normal * dot(tangentWorld, result.Normal), along);
-	result.Tangent = float4(tangentWorld, tangent.w);
-	return result;
+	if (DispatchThreadId.x >= NumEdges * 4u) return;
+	uint road = DispatchThreadId.x / 4u;
+	uint kind = 1u + (DispatchThreadId.x / 2u) % 2u;
+	uint self = (road * 3u + kind) * 2u + DispatchThreadId.x % 2u;
+	FJunctionSide me = JunctionSidesRW[self];
+	precise uint partner = 0u;
+	if ((me.Flags & RJS_SIDE_ACTIVE) != 0u)
+	{
+		Edge edge = EdgeData[EdgeList[road]];
+		int node = kind == 1u ? edge.m_Start : edge.m_End;
+		uint other = RJS_UniquePartner(node, self, me);
+		if (other != 0u && RJS_UniquePartner(node, other - 1u, JunctionSidesRW[other - 1u]) == self + 1u
+			&& RJS_ValidSeam(self / 2u, self % 2u, (other - 1u) / 2u, (other - 1u) % 2u))
+		{
+			partner = other;
+		}
+	}
+	JunctionPartnersRW[self] = partner;
 }
 
 uint InstanceIndex(uint3 GroupId) { return GroupId.y * InstanceGroupsX + GroupId.x; }
 
 float3 ToUnreal(float3 v) { return float3(v.x, 0.0f - v.z, v.y); }
 
-// One group per instance; the threads stride over the instance's composition mesh vertices.
+// One group per instance; the threads stride over the instance's composition mesh vertices, then
+// a refined instance's midpoints.
 [numthreads(THREADGROUP_SIZE, 1, 1)]
 void DeformVerticesCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 {
@@ -375,10 +294,13 @@ void DeformVerticesCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupInde
 	if (instanceIndex >= NumInstances) return;
 	FMeshInstance instance = MeshInstances[instanceIndex];
 	FMeshRange range = MeshRanges[instance.Mesh];
-	CompositionParameters p = ParametersRW[instance.Parameters];
-	for (uint local = GroupIndex; local < range.VertexCount; local += THREADGROUP_SIZE)
+	uint numVertices = range.VertexCount + instance.RefinedVertexCount;
+	for (uint local = GroupIndex; local < numVertices; local += THREADGROUP_SIZE)
 	{
-		precise FDeformedVertex v = RM_Deform(MeshVertices[range.VertexOffset + local], p);
+		FCompositionVertex source;
+		if (local < range.VertexCount) source = MeshVertices[range.VertexOffset + local];
+		else source = RefinedVerticesRW[instance.RefinedVertexOffset + local - range.VertexCount];
+		precise FDeformedVertex v = RM_Deform(source, instance.Parameters, instance.JunctionSlot);
 		uint dst = instance.VertexOffset + local;
 		if (OutputMode == 1u)
 		{
@@ -415,7 +337,8 @@ void WriteIndicesCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	if (instanceIndex >= NumInstances) return;
 	FMeshInstance instance = MeshInstances[instanceIndex];
 	FMeshRange range = MeshRanges[instance.Mesh];
-	uint numTriangles = range.IndexCount / 3u;
+	// A refined instance's leaves come from RefineCS.
+	uint numTriangles = instance.RefinedTriangleCount > 0u ? 0u : range.IndexCount / 3u;
 	for (uint tri = GroupIndex; tri < numTriangles; tri += THREADGROUP_SIZE)
 	{
 		uint dst = instance.IndexOffset + tri * 3u;
@@ -427,3 +350,91 @@ void WriteIndicesCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		RW_MaterialIds[dst / 3u] = MeshTriangleMaterials[src / 3u];
 	}
 }
+
+uint RefineInstanceIndex(uint3 GroupId) { return GroupId.y * RefineGroupsX + GroupId.x; }
+
+// RoadMeshRefinement.Refine, one group per refined node instance, one thread per base triangle.
+// RefineMode 0 counts each base triangle's leaves and midpoints, 1 writes them where RefineScanCS
+// placed them. Both run the same code, so the emit reproduces the count exactly.
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void RefineCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint refineIndex = RefineInstanceIndex(GroupId);
+	if (refineIndex >= NumRefineInstances) return;
+	FMeshInstance instance = MeshInstances[RefineInstances[refineIndex]];
+	FMeshRange range = MeshRanges[instance.Mesh];
+	bool bEmit = RefineMode != 0u;
+	for (uint t = GroupIndex; t < range.RefineCount; t += THREADGROUP_SIZE)
+	{
+		uint item = instance.RefineItemOffset + t;
+		FRefineTriangle base = RefineTriangles[range.RefineOffset + t];
+		FRefineContext c;
+		c.ParameterSlot = instance.Parameters;
+		c.JunctionSlot = instance.JunctionSlot;
+		c.Translation = RM_LoadTranslation(instance.Parameters);
+		c.Corner[0] = base.A;
+		c.Corner[1] = base.B;
+		c.Corner[2] = base.C;
+		for (uint i = 0u; i < 3u; i++)
+		{
+			FCompositionVertex corner = MeshVertices[range.VertexOffset + c.Corner[i]];
+			c.Position[i] = corner.Position;
+			c.Color[i] = corner.Color;
+			c.Tangent[i] = corner.Tangent;
+			c.Normal[i] = corner.Normal;
+			c.UV[i] = corner.UV0;
+		}
+		c.MaterialSlot = base.Flags & 0x1FFFFFFFu;
+		c.Flips = base.Flags >> 29;
+		uint2 offsets = bEmit ? RefineOffsetsRW[item] : uint2(0u, 0u);
+		c.MidpointStorage = instance.RefinedVertexOffset + offsets.y;
+		c.VertexBase = instance.VertexOffset;
+		c.MidpointLocal = range.VertexCount + offsets.y;
+		c.IndexBase = instance.IndexOffset + offsets.x * 3u;
+		precise uint3 counts = RMR_Refine(c, bEmit, IndexCapacity);
+		if (!bEmit) RefineCountsRW[item] = uint4(counts, 0u);
+	}
+}
+
+groupshared uint2 RefineScanShared[THREADGROUP_SIZE];
+
+// Exclusive scan of a refined instance's per-base-triangle (leaves, midpoints), in item order, and
+// the instance totals (with the unconverged leaves) for the CPU to lay the output out.
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void RefineScanCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint refineIndex = RefineInstanceIndex(GroupId);
+	if (refineIndex >= NumRefineInstances) return;
+	FMeshInstance instance = MeshInstances[RefineInstances[refineIndex]];
+	uint count = MeshRanges[instance.Mesh].RefineCount;
+	uint2 carry = 0u;
+	uint unconverged = 0u;
+	for (uint start = 0u; start < count; start += THREADGROUP_SIZE)
+	{
+		uint t = start + GroupIndex;
+		uint4 value = t < count ? RefineCountsRW[instance.RefineItemOffset + t] : uint4(0u, 0u, 0u, 0u);
+		unconverged += value.z;
+		RefineScanShared[GroupIndex] = value.xy;
+		GroupMemoryBarrierWithGroupSync();
+		for (uint offset = 1u; offset < THREADGROUP_SIZE; offset <<= 1)
+		{
+			uint2 add = GroupIndex >= offset ? RefineScanShared[GroupIndex - offset] : uint2(0u, 0u);
+			GroupMemoryBarrierWithGroupSync();
+			RefineScanShared[GroupIndex] += add;
+			GroupMemoryBarrierWithGroupSync();
+		}
+		if (t < count) RefineOffsetsRW[instance.RefineItemOffset + t] = carry + RefineScanShared[GroupIndex] - value.xy;
+		carry += RefineScanShared[THREADGROUP_SIZE - 1u];
+		GroupMemoryBarrierWithGroupSync();
+	}
+	// Every thread holds a share of the unconverged count; thread 0 only knows its own.
+	RefineScanShared[GroupIndex] = uint2(unconverged, 0u);
+	GroupMemoryBarrierWithGroupSync();
+	if (GroupIndex == 0u)
+	{
+		uint total = 0u;
+		for (uint i = 0u; i < THREADGROUP_SIZE; i++) total += RefineScanShared[i].x;
+		RefineTotalsRW[refineIndex] = uint4(carry, total, 0u);
+	}
+}
+

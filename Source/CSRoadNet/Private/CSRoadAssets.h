@@ -30,6 +30,29 @@ struct FComposition
 	TArray<NetCompositionCrosswalk> Crosswalks;
 };
 
+// A decal mesh of a lane prefab (a NetLanePrefab.m_Meshes entry whose render asset has an active
+// DecalProperties): what RoadDecals.AddLane reads from it.
+struct FLaneDecalMesh
+{
+	// The NetLaneMeshInfo requirements RoadDecals filters on.
+	bool bRequireEditor = false;
+	bool bRequireLeftHandTraffic = false;
+	bool bRequireRightHandTraffic = false;
+	bool bRequireLevelCrossing = false;
+	bool bRequireTrackCrossing = false;
+	// Render asset bounds size; x is the decal's width across the curve, z its tile length.
+	float3 Size;
+	// DecalProperties.m_TextureArea.
+	float2 UVMin;
+	float2 UVMax;
+	int32 RendererPriority = 0;
+	// CurveProperties (0 without one).
+	int32 TilingCount = 0;
+	float SmoothingDistance = 0.0f;
+	// The render asset's first surface: the decal material.
+	FString Surface;
+};
+
 class FAssets
 {
 public:
@@ -55,6 +78,11 @@ public:
 	const TArray<FString>& Atlases() const { return AtlasNames; }
 	// RoadRenderer.Material: the base-colour texture an atlas is drawn with (catalog material_bindings).
 	FString AtlasBaseColor(const FString& Atlas) const;
+	// RoadDecals.Material: material_bindings[Surface].BaseColor, empty without one (no fallback name).
+	FString SurfaceBaseColor(const FString& Surface) const;
+	// The decal meshes of a lane prefab in m_Meshes order; meshes without a render asset or decal
+	// properties are left out, as AddLane skips them. Cached per prefab.
+	const TArray<FLaneDecalMesh>& LaneDecalMeshes(int32 LanePrefab) const;
 
 	TLookup<NetPieceData> PieceData;
 	TLookup<NetVertexMatchData> VertexMatches;
@@ -80,6 +108,7 @@ private:
 	TMap<FString, TArray<NetGeometrySection>> Sections;
 	TMap<TPair<FString, CompositionFlags>, TSharedPtr<FComposition>> CompositionCache;
 	TMap<FString, NetGeometryData> GeometryCache;
+	mutable TMap<int32, TArray<FLaneDecalMesh>> LaneDecalCache;
 
 	TSharedPtr<FJsonObject> RawObject(int32 Id) const;
 	TArray<TSharedPtr<FJsonObject>> Components(const TSharedPtr<FJsonObject>& Prefab) const;

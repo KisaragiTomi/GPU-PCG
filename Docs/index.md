@@ -16,7 +16,7 @@
   - [减少更新、重复写入与每组件固定成本：实现与结果](InstanceCulling/Step3_20261002.md)
 - [Landscape 图层编辑框架](CSLandscapeLayer_Framework.md)
 - [Palmsland 道路关卡](CS2Roads.md)（CS2 Road Lab 场景的静态网格导入）
-- [CS2 道路逻辑的 GPU 移植](CS2RoadsGpu.md)（`CSRoadNet` 模块：CPU 组合 + GPU 几何、参数与变形，直写 `UCSMesh`；验证方法与精度结论）
+- [CS2 道路逻辑的 GPU 移植](CS2RoadsGpu.md)（`CSRoadNet` 模块：CPU 组合与车道图 + GPU 几何、参数、路口接缝、细分、变形与标线贴花，直写 `UCSMesh`；验证方法与精度结论）
 - [帧配额调度计划](FrameQuotaScheduler_Plan.md)（未实施）
 - [Motion Matching 与动画预测插件移植说明](motion-matching-plugin-porting-guide.md)
 - [CSSceneDirty3D：场景级三维 Dirty 区域系统](cs-scene-dirty-3d-design.md)（当前范围与设计见正文）
