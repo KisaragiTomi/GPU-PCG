@@ -158,7 +158,9 @@ void AddRoadMeshPasses(FRDGBuilder& GraphBuilder, const FGpuGeometryOutput& Geom
 // Game thread: the first graph of a refined build (geometry, parameters, seams, refinement counts),
 // then Mesh.ApplyRefinement; with OutGeometry it also reads back the roads' edge and node geometry
 // (the CPU lane graph and decal setup need it). A no-op when there is nothing to count or read.
-bool RunRefineCountsBlocking(const FGpuGeometryInput& Geometry, FGpuRoadMeshInput& Mesh, FString& OutError, FGpuGeometryResult* OutGeometry = nullptr);
+// Shared: an empty one keeps this graph's geometry for the build's later graphs; one that holds a
+// geometry is used instead of running the passes again.
+bool RunRefineCountsBlocking(const FGpuGeometryInput& Geometry, FGpuRoadMeshInput& Mesh, FString& OutError, FGpuGeometryResult* OutGeometry = nullptr, FPooledGeometry* Shared = nullptr);
 
 // Game thread, tests: geometry + deform, reading back the Unity-space vertices (8 floats each), and
 // optionally the junction seam partner of every side (parameter slot * 2 + side: 0 = none, else

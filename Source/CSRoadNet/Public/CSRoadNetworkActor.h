@@ -24,6 +24,7 @@ class FAssets;
 struct FGpuDecalInput;
 struct FPooledDecalReceivers;
 struct FGpuRoadMeshInput;
+struct FPooledGeometry;
 struct FRoadSpec;
 struct FSplineRoad;
 class FGraph;
@@ -452,8 +453,9 @@ private:
 	// BuildRoads in tiles: the graph's geometry decides which tiles to write (CSRoadTiles.h).
 	bool BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGraph& Graph, const CSRoad::FGpuGeometryInput& Geometry, const TMap<FString, UMaterialInterface*>& ByBaseColor,
 		const CSRoad::FSavedTerrain* Terrain, bool bMarkings, FString& OutError);
-	// Allocates the targets and records the road mesh (and the decals, when Decals has items) into them.
-	bool WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry, const CSRoad::FGpuRoadMeshInput& MeshInput, CSRoad::FGpuDecalInput* Decals,
+	// Allocates the targets and records the road mesh (and the decals, when Decals has items) into them,
+	// on the build's geometry when SharedGeometry holds it (else the graph runs it again).
+	bool WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry, const CSRoad::FPooledGeometry& SharedGeometry, const CSRoad::FGpuRoadMeshInput& MeshInput, CSRoad::FGpuDecalInput* Decals,
 		const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FAssets& Assets, FMeshTargets& Targets, FString& OutError);
 	// The decal mesh: reads back the crosswalk clip counts, lays the decals out and draws them onto
 	// the road mesh just built (its receivers gathered into Receivers).

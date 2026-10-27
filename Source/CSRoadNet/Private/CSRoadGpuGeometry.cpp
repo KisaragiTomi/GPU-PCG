@@ -258,6 +258,61 @@ FGpuGeometryOutput AddGeometryPasses(FRDGBuilder& GraphBuilder, const FGpuGeomet
 	return Out;
 }
 
+namespace
+{
+// Visit(member address, is a UAV) for every buffer member of the geometry parameters, in member order.
+template<typename FVisit>
+void CSRoadGpu_ForEachBuffer(FCSRoadGeometryParameters& Parameters, FVisit&& Visit)
+{
+	for (const FShaderParametersMetadata::FMember& Member : FCSRoadGeometryParameters::FTypeInfo::GetStructMetadata()->GetMembers())
+	{
+		const EUniformBufferBaseType Type = Member.GetBaseType();
+		if (Type == UBMT_RDG_BUFFER_SRV || Type == UBMT_RDG_BUFFER_UAV) Visit(reinterpret_cast<uint8*>(&Parameters) + Member.GetOffset(), Type == UBMT_RDG_BUFFER_UAV);
+	}
+}
+}
+
+bool FPooledGeometry::IsValid() const
+{
+	return Parameters.IsValid() && Buffers.Num() > 0 && Buffers.Last().IsValid();
+}
+
+void FPooledGeometry::Extract(FRDGBuilder& GraphBuilder, const FGpuGeometryOutput& Geometry)
+{
+	Parameters = MakeShared<FCSRoadGeometryParameters>(*Geometry.Parameters);
+	// Sized first: each extraction keeps a pointer into the array.
+	int32 Count = 0;
+	CSRoadGpu_ForEachBuffer(*Parameters, [&Count](uint8*, bool) { Count++; });
+	Buffers.Reset();
+	Buffers.SetNum(Count);
+	int32 Index = 0;
+	CSRoadGpu_ForEachBuffer(*Parameters, [&GraphBuilder, this, &Index](uint8* Address, bool bUAV)
+	{
+		const FRDGBufferRef Buffer = bUAV ? (*reinterpret_cast<FRDGBufferUAVRef*>(Address))->GetParent() : (*reinterpret_cast<FRDGBufferSRVRef*>(Address))->GetParent();
+		GraphBuilder.QueueBufferExtraction(Buffer, &Buffers[Index++]);
+	});
+}
+
+FGpuGeometryOutput FPooledGeometry::Register(FRDGBuilder& GraphBuilder) const
+{
+	FCSRoadGeometryParameters* Bound = GraphBuilder.AllocParameters<FCSRoadGeometryParameters>();
+	*Bound = *Parameters;
+	int32 Index = 0;
+	CSRoadGpu_ForEachBuffer(*Bound, [&GraphBuilder, this, &Index](uint8* Address, bool bUAV)
+	{
+		const FRDGBufferRef Buffer = GraphBuilder.RegisterExternalBuffer(Buffers[Index++]);
+		if (bUAV) *reinterpret_cast<FRDGBufferUAVRef*>(Address) = GraphBuilder.CreateUAV(Buffer);
+		else *reinterpret_cast<FRDGBufferSRVRef*>(Address) = GraphBuilder.CreateSRV(Buffer);
+	});
+	FGpuGeometryOutput Out;
+	Out.Parameters = Bound;
+	Out.NodeGeometry = Bound->NodeGeometryRW->GetParent();
+	Out.EdgeGeometry = Bound->EdgeGeometryRW->GetParent();
+	Out.StartNodeGeometry = Bound->StartNodeGeometryRW->GetParent();
+	Out.EndNodeGeometry = Bound->EndNodeGeometryRW->GetParent();
+	return Out;
+}
+
 bool RunGeometryBlocking(const FGpuGeometryInput& Input, FGpuGeometryResult& OutResult, FString& OutError)
 {
 	const uint32 NumEntities = Input.NumEntities;

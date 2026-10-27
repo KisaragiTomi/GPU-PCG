@@ -508,7 +508,7 @@ void AddRoadMeshPasses(FRDGBuilder& GraphBuilder, const FGpuGeometryOutput& Geom
 	CSRoadGpuMesh_AddPasses(GraphBuilder, Geometry, Mesh, Target, ECSRoadGpuMeshStage::Build);
 }
 
-bool RunRefineCountsBlocking(const FGpuGeometryInput& Geometry, FGpuRoadMeshInput& Mesh, FString& OutError, FGpuGeometryResult* OutGeometry)
+bool RunRefineCountsBlocking(const FGpuGeometryInput& Geometry, FGpuRoadMeshInput& Mesh, FString& OutError, FGpuGeometryResult* OutGeometry, FPooledGeometry* Shared)
 {
 	const bool bCounts = Mesh.NeedsRefinementCounts();
 	if (!bCounts && !OutGeometry) return true;
@@ -527,9 +527,11 @@ bool RunRefineCountsBlocking(const FGpuGeometryInput& Geometry, FGpuRoadMeshInpu
 		Targets.Add({ OutGeometry->StartNodes.GetData(), NumEntities * uint32(sizeof(EdgeNodeGeometry)) });
 		Targets.Add({ OutGeometry->EndNodes.GetData(), NumEntities * uint32(sizeof(EdgeNodeGeometry)) });
 	}
-	const bool bRead = RunGraphBlocking([&Geometry, &Mesh, bCounts, OutGeometry](FRDGBuilder& GraphBuilder)
+	const bool bRead = RunGraphBlocking([&Geometry, &Mesh, bCounts, OutGeometry, Shared](FRDGBuilder& GraphBuilder)
 	{
-		const FGpuGeometryOutput GeometryOut = AddGeometryPasses(GraphBuilder, Geometry);
+		const bool bReuse = Shared && Shared->IsValid();
+		const FGpuGeometryOutput GeometryOut = bReuse ? Shared->Register(GraphBuilder) : AddGeometryPasses(GraphBuilder, Geometry);
+		if (Shared && !bReuse) Shared->Extract(GraphBuilder, GeometryOut);
 		TArray<FRDGBufferRef> Buffers;
 		if (bCounts) Buffers.Add(CSRoadGpuMesh_AddPasses(GraphBuilder, GeometryOut, Mesh, FGpuRoadMeshTarget(), ECSRoadGpuMeshStage::Counts).RefineTotals);
 		if (OutGeometry) Buffers.Append({ GeometryOut.EdgeGeometry, GeometryOut.StartNodeGeometry, GeometryOut.EndNodeGeometry });

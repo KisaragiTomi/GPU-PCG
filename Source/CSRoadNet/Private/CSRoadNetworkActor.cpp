@@ -481,10 +481,11 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	if (!MeshInput.Build(Graph, Library->Assets, OutError)) return false;
 	const double MeshMs = Lap();
 	// First graph: the refined node meshes' size is decided on the GPU, and the lane graph and the
-	// decal setup run on the CPU from the GPU geometry.
+	// decal setup run on the CPU from the GPU geometry. The geometry is kept for the mesh graph.
 	CSRoad::FGpuGeometryResult GeometryResult;
+	CSRoad::FPooledGeometry SharedGeometry;
 	// Cache the lane graph even with markings/traffic hidden, so the visibility switch is instant.
-	if (!CSRoad::RunRefineCountsBlocking(Geometry, MeshInput, OutError, &GeometryResult)) return false;
+	if (!CSRoad::RunRefineCountsBlocking(Geometry, MeshInput, OutError, &GeometryResult, &SharedGeometry)) return false;
 	if (MeshInput.NumUnconverged > 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %u node mesh triangles did not converge in 20 refinement passes"), *GetName(), MeshInput.NumUnconverged);
 	const double RefineMs = Lap();
 	CSRoad::FGpuDecalInput Decals;
@@ -501,7 +502,7 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	Targets.RoadMesh = &Mesh;
 	Targets.Markings = MarkingMesh;
 	Targets.MarkingMesh = &Markings;
-	if (!WriteMeshes(Geometry, MeshInput, bMarkings ? &Decals : nullptr, ByBaseColor, Library->Assets, Targets, OutError)) return false;
+	if (!WriteMeshes(Geometry, SharedGeometry, MeshInput, bMarkings ? &Decals : nullptr, ByBaseColor, Library->Assets, Targets, OutError)) return false;
 	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads, %u vertices, %u triangles, %d compositions, %d decals (%d lanes); prefab data %.0f ms, snapshot %.0f ms, graph and compositions %.0f ms, composition meshes %.0f ms, refinement counts %.0f ms, lanes and decal setup %.0f ms, allocation %.0f ms, road GPU build %.0f ms, decals %.0f ms"),
 		*GetName(), Graph.Roads.Num(), MeshInput.NumVertices, MeshInput.NumIndices / 3, Graph.Compositions.Num() - 1, Decals.Items.Num(), Decals.Lanes.Lanes.Num(),
 		LibraryMs, NetworkMs, GraphMs, MeshMs, RefineMs, DecalSetupMs, Targets.AllocationMs, Targets.RoadMs, Targets.MarkingMs);
@@ -539,10 +540,13 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 	Markings = nullptr;
 
 	// First graph: the whole network's geometry, read back. It tells which roads came out different
-	// from the last build, and the lanes (decals, traffic) are built from it.
+	// from the last build, and the lanes (decals, traffic) are built from it. The geometry is kept:
+	// every later graph of the build (refinement counts, each tile's meshes) registers it instead of
+	// running it, and uploading its tables, again.
 	CSRoad::FGpuRoadMeshInput NoInstances;
 	CSRoad::FGpuGeometryResult GeometryResult;
-	if (!CSRoad::RunRefineCountsBlocking(Geometry, NoInstances, OutError, &GeometryResult)) return false;
+	CSRoad::FPooledGeometry SharedGeometry;
+	if (!CSRoad::RunRefineCountsBlocking(Geometry, NoInstances, OutError, &GeometryResult, &SharedGeometry)) return false;
 	CSRoad::FRoadLanes Lanes;
 	Lanes.Build(Graph, Assets, GeometryResult);
 	const double GeometryMs = Lap();
@@ -588,7 +592,7 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 		}
 	}
 	CSRoad::FGpuRoadMeshInput Counted;
-	if (All.Num() > 0 && (!Counted.BuildSubset(Graph, Assets, All, {}, &TileState->Compositions, OutError) || !CSRoad::RunRefineCountsBlocking(Geometry, Counted, OutError)))
+	if (All.Num() > 0 && (!Counted.BuildSubset(Graph, Assets, All, {}, &TileState->Compositions, OutError) || !CSRoad::RunRefineCountsBlocking(Geometry, Counted, OutError, nullptr, &SharedGeometry)))
 	{
 		TileState->Reset();
 		return false;
@@ -628,7 +632,7 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 		Targets.RoadMesh = &Tile.RoadMesh;
 		Targets.Markings = Tile.Markings;
 		Targets.MarkingMesh = &Tile.MarkingMesh;
-		if (!WriteMeshes(Geometry, MeshInput, bMarkings ? &Decals : nullptr, ByBaseColor, Assets, Targets, OutError))
+		if (!WriteMeshes(Geometry, SharedGeometry, MeshInput, bMarkings ? &Decals : nullptr, ByBaseColor, Assets, Targets, OutError))
 		{
 			TileState->Reset();
 			return false;
@@ -663,7 +667,7 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 	return false;
 }
 
-bool ACSRoadNetworkActor::WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry, const CSRoad::FGpuRoadMeshInput& MeshInput, CSRoad::FGpuDecalInput* Decals,
+bool ACSRoadNetworkActor::WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry, const CSRoad::FPooledGeometry& SharedGeometry, const CSRoad::FGpuRoadMeshInput& MeshInput, CSRoad::FGpuDecalInput* Decals,
 	const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FAssets& Assets, FMeshTargets& Targets, FString& OutError)
 {
 	double LapStart = FPlatformTime::Seconds();
@@ -719,7 +723,7 @@ bool ACSRoadNetworkActor::WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry,
 	{
 		if (!Context.Positions() || !Context.Tangents() || !Context.TexCoords() || !Context.Colors() || !Context.Indices() || !Context.MaterialIds()) return;
 		FRDGBuilder& GraphBuilder = Context.GraphBuilder;
-		const CSRoad::FGpuGeometryOutput GeometryOut = CSRoad::AddGeometryPasses(GraphBuilder, Geometry);
+		const CSRoad::FGpuGeometryOutput GeometryOut = SharedGeometry.IsValid() ? SharedGeometry.Register(GraphBuilder) : CSRoad::AddGeometryPasses(GraphBuilder, Geometry);
 		CSRoad::FGpuRoadMeshTarget Target;
 		Target.Positions = Context.Positions();
 		Target.Tangents = Context.Tangents();

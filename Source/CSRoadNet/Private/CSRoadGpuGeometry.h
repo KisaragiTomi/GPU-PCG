@@ -4,6 +4,7 @@
 
 #include "CSRoadGraph.h"
 #include "RenderGraphFwd.h"
+#include "RenderGraphResources.h"
 
 class FCSRoadGeometryParameters;
 
@@ -75,6 +76,24 @@ struct FGpuGeometryOutput
 
 // Render thread: adds the GeometrySystem passes in job order. The input is copied into the graph.
 FGpuGeometryOutput AddGeometryPasses(FRDGBuilder& GraphBuilder, const FGpuGeometryInput& Input);
+
+// One AddGeometryPasses kept past its graph, the results with every table they were made from: the
+// later graphs of a build register it instead of running the passes, and uploading their input,
+// again. What comes after the passes only reads the geometry.
+struct FPooledGeometry
+{
+	bool IsValid() const;
+	// Render thread, in the graph that ran AddGeometryPasses: extracted when it executes.
+	void Extract(FRDGBuilder& GraphBuilder, const FGpuGeometryOutput& Geometry);
+	// Render thread: the geometry in another graph, as AddGeometryPasses returned it.
+	FGpuGeometryOutput Register(FRDGBuilder& GraphBuilder) const;
+
+private:
+	// The parameters as the passes bound them; Register replaces their buffer members.
+	TSharedPtr<FCSRoadGeometryParameters> Parameters;
+	// One per buffer member of the parameters, in member order.
+	TArray<TRefCountPtr<FRDGPooledBuffer>> Buffers;
+};
 
 // Per-entity results (index = entity id).
 struct FGpuGeometryResult
