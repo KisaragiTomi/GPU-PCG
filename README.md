@@ -380,6 +380,7 @@ UCSClothSimComponent::TickComponent          # 游戏线程：dt、钉组变换�
 - **外力与碰撞**：重力、线性阻尼、Perlin 湍流叠加的风（按布面法线分解的相对风速）；球 / 胶囊 / 半空间碰撞体，可跟随 actor，substep 间插值。
 - **失配停摆**：setup 之后别的算子改了网格（Generation 动了）或重新分配过，约束就不再描述这份几何——停摆并写日志，`SetupFromMeshSync` 恢复。写回前发现非有限粒子同样停摆（那些角点保留上一帧的值）。
 - **放进关卡就能看**：`ACSClothActor` 接好源网格（或程序化网格布，默认 2 m × 2 m、64² 格、−X 边钉住）、渲染组件与布料组件。放下去当场就有布（`OnConstruction` 里建，不等 tick），之后在编辑器视口里逐帧模拟，不用进 PIE；`BakeCurrentPoseToStaticMesh` 把当前姿态存成 StaticMesh。
+- 📍 演示关卡：[`Content/ClothSim/L_ClothDemo.umap`](Content/ClothSim)（`Scripts/MakeClothDemo.py` 生成）——帘杆上的窗帘、只钉两角的挂布、盖在球上的桌布（拖 `Ball` 布当场响应）、被风吹鼓的晾布，打开关卡就在编辑器视口里从水平摆下来。
 - ⚠️ 编辑器只在有视口开着 Realtime 时 tick actor：编辑器窗口退到后台时（偏好设置 Performance →「Use Less CPU when in Background」，默认开）布会停在那一帧，回到前台接着摆。真编辑器里的验收跑 `Scripts/RunClothEditorModeCheck.ps1`（拉起编辑器执行 `ClothEditorModeCheck.py`，只对这一次会话关掉后台降频）。
 - ⚠️ 已知限制：没有运动矢量（快摆时 TAA / TSR 有拖影）；光追 BLAS 停在 rest 姿态；没有场景网格碰撞与自碰撞；格距 ≤ 2 cm 的细布要把 substep 调到 16~32 才拉得住。
 - 📖 设计、实测数据与未做的阶段：[`Docs/GpuClothSim_Plan.md`](Docs/GpuClothSim_Plan.md)
