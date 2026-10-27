@@ -120,9 +120,7 @@ void UCSRoadSplineComponent::PostEditUndo()
 
 ACSRoadNetworkActor* UCSRoadSplineComponent::FindNetwork() const
 {
-	AActor* Owner = GetOwner();
-	for (AActor* Actor = Owner; Actor; Actor = Actor->GetAttachParentActor()) if (ACSRoadNetworkActor* Network = Cast<ACSRoadNetworkActor>(Actor)) return Network;
-	return Owner ? ACSRoadNetworkActor::LevelSplineNetwork(Owner->GetLevel()) : nullptr;
+	return ACSRoadNetworkActor::NetworkOf(GetOwner());
 }
 
 void UCSRoadSplineComponent::NotifyNetwork() const

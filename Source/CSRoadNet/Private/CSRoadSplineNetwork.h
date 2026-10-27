@@ -33,6 +33,9 @@ struct FSplinePointData
 	// Where the segment's edge goes among the network's edges: a converted snapshot keeps its edge
 	// order, which the geometry jobs follow where they break ties. Unset: after those, in spline order.
 	int32 SegmentOrder = INDEX_NONE;
+	// An alley end cut under a main road: its node joins the road it lies on, however many roads end
+	// there (two, where an alley crossing straight over meets it).
+	bool bJoin = false;
 
 	bool HasNodeOverrides() const { return !NodeOffset.IsZero() || !NodePrefab.IsEmpty() || bNodeElevation || !IsDefault(NodeUpgrade) || bOutside || NodeOwner != 0; }
 };
@@ -43,11 +46,17 @@ struct FSplineRoad
 {
 	// For messages.
 	FString Name;
+	// Tells the spline apart from the network's others for what derives from it (the batch buildings'
+	// plots); 0 when unknown.
+	uint64 Id = 0;
 	FString Prefab;
 	// Every segment's upgrades.
 	CompositionFlags Upgrade{};
 	// Split and merge its segments, and join roads it crosses or ends on.
 	bool bAdjust = true;
+	// An alley: where a main road (any road that is not an alley) covers it, it is cut away and its
+	// ends join that road. The spline itself never changes, so the alley is back once the road goes.
+	bool bAlley = false;
 	bool bClosed = false;
 	TArray<FVector3d> Points;
 	// Hermite tangents per unit of the segment parameter, as a USplineComponent keeps them.
@@ -72,6 +81,8 @@ struct FSplineNetworkSettings
 	double SnapDistance = 1.0;
 	// Roads crossing at most this far apart in height meet in a junction; farther, one passes over.
 	double JunctionHeight = 2.0;
+	// An alley is cut back this far from a main road's edge, past its own half width.
+	double AlleyClearance = 1.0;
 };
 
 struct FSplineNetworkStats
@@ -84,9 +95,14 @@ struct FSplineNetworkStats
 	int32 Merges = 0;
 	// Segments shorter than the snap distance, left out.
 	int32 Dropped = 0;
+	// Stretches of alley cut away under main roads.
+	int32 AlleyCuts = 0;
 };
 
 // Terrain (optional) is the ground elevations are measured from; without it, the plane y = 0.
+// Alleys give way first: the stretches a main road covers (at most JunctionHeight apart in height)
+// are cut away, and the cut ends are pulled onto the main road, where they join it like any road
+// ending on another one; an alley crossing straight over meets it in one crossing.
 bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Splines, const FSplineNetworkSettings& Settings, const FSavedTerrain* Terrain,
 	TArray<FSavedNode>& OutNodes, TArray<FRoadSpec>& OutRoads, FSplineNetworkStats& OutStats, FString& OutError);
 

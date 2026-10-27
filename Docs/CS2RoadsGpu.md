@@ -8,6 +8,7 @@
 
 - 关卡里放 `ACSRoadNetworkActor`，`NetworkFile` 指向 `cs2-road-network-v1` 快照，例如 `D:\MyProject\CitiesSkylines-Road2-C#\Artifacts\public-saves\palmsland-3\network.json`。
 - 要用样条画路，把 `Source` 设为 `Splines`，在 actor 下挂 `ACSRoadSplineActor`，一根样条是一条路，见[样条路网](#样条路网)。`ConvertToSplines` 把快照转成这样的样条路。示例关卡 `/PCGPlugins/CSRoadNet/L_SplineRoadDemo` 由 8 根样条组成，打开后拖样条点即可看到路网实时重建。
+- 城市局部更新：`bLocalUpdate` 让路网分 tile 重建，见[局部更新](#局部更新)；样条路分大路和小路，见[大路与小路](#大路与小路)；特殊建筑、小路生成和批量补房见[城市布局](#城市布局)。示例关卡 `/PCGPlugins/CSRoadNet/L_CityDemo`。
 - 改属性、移动松手、关卡加载或复制 actor 时自动重建，也可以点 `Rebuild`。常驻网格不存盘，加载后重新生成。
 - `AssetDirectory` 留空时读 `<CS2ROADLAB 或 D:/MyProject/CitiesSkylines-Road2-C#>/Assets/CS2` 下的 `prefabs.json`、`raw-prefabs.json`、`pieces.bin`。同一目录每个进程只加载一次。
 - 材质按 atlas 的 BaseColor 贴图名（目录里的 `material_bindings`）在 `MaterialFolder` 找 `M_CS2_<NN>_<BaseColor>`，这些材质由 `Scripts/ImportCS2Roads.py` 生成。找不到的 atlas 列在 `MissingAtlases`，改用 `FallbackMaterial`。
@@ -70,6 +71,50 @@
 
 Palmsland 转成 3,894 根样条后重建，5,667 条边与读文件时逐位一致，实体编号、组合和 GPU 几何都相同。转换后暖重建约 1.0–1.1 s，与读文件相当。
 
+## 局部更新
+
+`bLocalUpdate` 打开后，路面和标线按 `TileSize` 的方格分 tile 写，每个 tile 一对渲染组件（`RoadTile_*`、`MarkingTile_*`），组件和网格都不存盘。一条路归它曲线中点所在的 tile。流程在 `ACSRoadNetworkActor::BuildTiles` 和 `CSRoadTiles.cpp`：
+
+1. 整网照常建图、跑 GPU 几何并读回。车道图也从读回的几何建，标线和车流都要用。
+2. 每条路算一个输出指纹：prefab、曲线、高程、升级、owner、两端节点的数据，加上读回的边与两端节点几何，以及三个实例的组合。与上次相比，指纹变了、新增或删掉的路所在的 tile 要重写，在它们的节点上相接的路所在的 tile 也要重写。tile 尺寸、左右舵、标线开关、actor 变换或材质设置变了，全部重写。
+3. 脏 tile 的实例合在一张图里算细分计数。之后逐 tile 只为本 tile 的路建组合网格、写路面和标线。节点上相邻路的边和节点实例只当贴花接收面，写在绘制计数之后，不画出来。
+4. 删掉不再有路的 tile。
+
+各 tile 画出的三角形合起来与整网重建逐个相同（`Tiles.Actor`）。
+
+每个 tile 写网格时要与渲染线程同步约 6 次，约 20 ms，所以脏 tile 多时比整网重建还慢。`L_CityDemo` 的 79 条路分在 8 个 128 m 的 tile 里：整网暖重建 58 ms，分 tile 从零建 225 ms，没有改动时 24 ms。斜穿全区的大路挪一个点会弄脏全部 8 个 tile，耗时 194 ms；只挪特殊建筑时，路面不重写，25–30 ms。
+
+Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路）后用 1024 m 的 tile，共 80 个 tile，另有 84 个 tile 共 36,591 栋批量房子。测量时 GPU 同时被别的编辑器占着，下面的数字只看相对快慢：
+
+| 重建 | 耗时 | 说明 |
+| --- | --- | --- |
+| 整网（不含批量房子） | 1.43 s | 与上文的 1.1–1.4 s 相当 |
+| 分 tile 从零建 | 10.8 s | tile 网格 9.5 s，每个 tile 约 120 ms：组合网格每个 tile 各传一份，挑贴花时每个 tile 都把全部道路和车道过一遍 |
+| 分 tile，没有改动 | 0.94 s | 整网建图、GPU 几何和批量房子布局照算 |
+| 挪一个样条点 5 m | 0.66–0.75 s | 重写 1 个路面 tile（89 条路）和 1 个房子 tile。批量房子布局约 250 ms，整网 GPU 几何与车道图约 125 ms，细分计数约 90 ms，tile 网格约 100 ms |
+
+一次重建的所有 tile 都在同一帧里写。D3D12 的上传堆到帧末才回收，RDG 池里的缓冲要闲置 30 帧才释放，而组合网格又由每个用到它的 tile 各传一份，所以从零分 tile 建大路网时，上传内存会一路涨。10-27 用 256 m 的 tile 从零建 Palmsland 时，D3D12 报显存不足而崩溃，崩在上传堆开新池；当时别的进程占着 GPU，物理内存只剩约 1 GB。同一天显存宽裕一些时，1024 m 的 tile 建成了。
+
+## 大路与小路
+
+`UCSRoadSplineComponent::Tier` 默认为 `Main`，设为 `Alley` 的样条路是小路。建路网前，`CSRoadSplineNetwork.cpp` 的 `ClipAlleys` 把小路被大路覆盖的段裁掉。覆盖范围是大路半宽加小路半宽，再加 `SplineSettings.AlleyClearance`，且两条路高差不超过 `JunctionHeight`；从上方跨过的不算。
+
+- 裁口拉到大路中线，带 `bJoin` 标记，按 T 形路口接上大路，节点度数大于 1 时也照样接。
+- 一条小路正好横穿大路时，两个裁口落在同一点，成为十字路口。
+- 样条本身不改，大路挪走或删掉后，小路按原样恢复。
+
+小路之间的 T 形路口在外侧会画出圆头。`City.AlleyJunctions` 已确认这些路口在拓扑上已经接上，是否与 CS2 里 `Alley` 的画法一致尚未核对。
+
+## 城市布局
+
+按 `LocalUpdateSystem_Plan.md` 的顺序：先放特殊建筑占出预留位，再一次性生成小路，之后随时放入大路，最后批量补房。几何部分是 `CSCityLayout.h` 里的纯函数（UE 厘米，俯视平面），不依赖 actor。
+
+- **特殊建筑** `ACSCityBuildingActor`：闭合轮廓样条 `UCSCityOutlineComponent` 取凸包，挤出 `Height`；凸包外扩 `Setback` 就是它的预留位。改轮廓、移动、改属性或撤销时重建自身，并通知所属路网。所属路网由 `ACSRoadNetworkActor::NetworkOf` 决定：挂在哪个路网下就归谁，否则归关卡里唯一的样条路网。
+- **小路区域** `ACSCityAlleyRegion`：`Generate` 把盒子的俯视矩形当成一块，每次垂直于长边把块切成两半，直到每块都不长于 `BlockSize`。切线落点在块中部抖动（`Jitter`、`TurnJitter`）；离预留位外扩 `Clearance` 后的范围有交叉，或切后有一块窄于 `MinBlockSize`，就换下一个落点，都不行的块保持完整。`bBoundaryAlleys` 时区域四边也是小路，跨过预留位的部分去掉。随机数取自块在切分树里的路径，所以同样的区域、预留位和设置得到同样的小路。生成结果是挂在路网下、`Tier = Alley` 的直线样条路，再次生成会替换上次的结果；生成之后它们与手画的路没有区别。
+- **批量房子**（路网的 `bBatchBuildings`、`Lots`）：每根样条的每一段两侧每隔 `Frontage` 设一个候选位，快照路网则沿每条边。候选位的身份由样条（actor 名加组件名的哈希）、段号、槽位和朝向侧决定，进深、高度和颜色都由身份派生。候选位离建成后各条道路（小路已裁切）的路边至少半个 `Setback`，离自己面对的那条路是整个 `Setback`，也不能压到预留位；互相重叠时按身份派生的优先级取舍，只与重叠的候选位比较。所以改动一条路，只影响它附近的房子。房子按路面的 tile 网格分组写网格（`BuildingTile_*`），内容哈希没变的 tile 不重写。
+
+`L_CityDemo` 由 `Scripts/CS2Road/MakeCityDemo.py` 生成：两栋特殊建筑，`Old Town` 区域生成 23 条小路；`Avenue` 大路斜穿其中，裁掉 14 段小路并接上。全图共 79 条路，114 栋批量房子分在 10 个 tile 里。批量房子的布局每次整体重算，没有变化时约 1 ms，全部重写约 16 ms。
+
 ## 管线
 
 | 阶段 | 位置 | 原版来源 | 文件 |
@@ -127,7 +172,7 @@ Palmsland 转成 3,894 根样条后重建，5,667 条边与读文件时逐位一
 - `MathUtils.TightBounds`：曲线完全对称（b = c、a = d）时三次项系数恰好为 0，原式变成 0/0，会漏掉曲线中间的凸起。C# 参考靠 1 ulp 的舍入残差碰巧算对。HLSL 在系数为 0 时取原式的极限 `f4 / (2 f3)`。
 - `FlattenNodeGeometryJob` 用定长数组暂存节点的边，单个节点最多 16 条边（`GpuMaxNodeEdges`），超出时直接报错。
 - 细分的中点不共享，每次切分各自生成，因此顶点比 C# 多（Palmsland 378 万个，C# 新增 201 万个），但位置相同，网格仍然闭合。C# 超过 20 轮会抛异常，GPU 的深度上限是 19 层。
-- 尚未移植：车流（车道图已经在 CPU 上建好，目前只供贴花使用）和局部更新。
+- 车流只有预览（见[车流预览与桥墩](#车流预览与桥墩)），没有市民出行。原版按 `Updated` 标记只重算改动实体的做法没有照搬，局部更新改为按 tile 重写，见[局部更新](#局部更新)。
 
 ## 验证
 
@@ -147,6 +192,12 @@ Palmsland 转成 3,894 根样条后重建，5,667 条边与读文件时逐位一
 | `Splines.Basics` | 手画小路网：十字、立交、高差 1.5 m 的交叉、T 形、固定样条交叉、吸附、按长度和转角细分、合并、闭环、未知 prefab | 拓扑和统计逐项 | 全部符合 |
 | `Splines.Palmsland` | Palmsland 经 `ChainNetwork` 转成样条再建回：边和节点的数据、实体编号、组合、GPU 几何 | 逐位 | 5,667 条边转成 3,894 根样条（9,561 个点），0 不同 |
 | `Splines.Actor` | actor 放在离原点几公里处并转 30°，建一次，平移后再建一次：两根样条建成 4 条路；再用代码挪一个样条点，下一次 `Tick` 自己重建 | 两个网格组件保持单位变换；路面包围盒含 4 个路端，中心离路口 < 5 m | 通过 |
+| `Splines.Alleys` | 小路与大路：横穿、斜穿、顺着压、立交 | 裁切段数，十字或 T 形接法，裁后的小路不进大路的覆盖范围 | 通过 |
+| `Tiles.Actor` | 3 条东西向、4 条南北向的路，整网建与分 tile 建；不改动重建；挪一个点；删一条路 | 路面、标线三角形与整网重建逐个相同；不改动时不重写 tile；改动只重写部分 tile，其余网格代数不变 | 通过 |
+| `City.Alleys` | 区域里两块预留位，一块横跨中部 | 小路不进预留位外扩 `Clearance` 的范围、不出区域；同输入同结果；去掉预留位后会穿过它们；换种子结果不同 | 通过 |
+| `City.AlleyJunctions` | `L_CityDemo` 区域的小路建成路网 | 没有断头 | 40 个节点、57 条边，0 个断头 |
+| `City.Lots` | 两条相交的街和一块预留位；在 150 m 外加一条街，再去掉 | 地块离路边至少半个退让、不压预留位、互不重叠；加街后 50 m 外的地块身份和形状不变，新地块只出现在新街旁；去掉后复原 | 通过 |
+| `City.Actor` | 特殊建筑、小路区域、批量房子和分 tile 路网；不改动重建；在区域一角加大路；挪特殊建筑；关掉批量房子 | 小路和批量房子都不进预留位；不改动时不重写房子 tile；加大路只重写附近的房子 tile | 100 栋房子 8 个 tile，加大路后重写 3 个、5 个不动 |
 
 `Refine.Palmsland` 有 21.6% 的实例三角形数不同，这在噪声范围内：扰动版 C# 自己就有 27% 的实例不同。`Decals.Scenarios` 里 `elevated-cross` 的裁剪三角形只报告不计入预算（1,504 个里 615 个未配对），原因是它的几何本身处在平局上，见下文。
 
@@ -164,6 +215,9 @@ Palmsland 转成 3,894 根样条后重建，5,667 条边与读文件时逐位一
 - `Scripts/CS2Road/RoadNetworkShots.py`：在 `L_Palmsland` 里生成 GPU 路网，从相同机位分别拍静态导入版和 GPU 版。默认两边都带标线，输出到 `Saved/CS2RoadShots`；设 `CS2ROAD_SHOTS=roads` 只比路面，输出到 `Saved/CS2RoadShots_roads`。要用完整编辑器的 `-ExecCmds="py <脚本>"` 运行，`UnrealEditor-Cmd` 里拍出来是黑的。
 - `Scripts/CS2Road/MakeSplineRoadDemo.py`：生成示例关卡 `L_SplineRoadDemo`，用无头编辑器的 `-ExecutePythonScript` 运行。关卡基于引擎的 Basic 模板（太阳、天空、雾），地面比样条低 0.25 m（路面比样条低 0.2 m）；8 根样条包括主路、十字路口、弯道 T 形路口、两端坡道各落在一条街上的 12 m 高架，以及一条带连接路的环路。关卡已存在时脚本会拒绝覆盖。
 - `Scripts/CS2Road/SplineNetworkShots.py`：在 `L_Palmsland` 离城 900 m 的空地上用样条画一个小路网（十字、T 形、立交、3 m 短段），路网只借 Palmsland 快照的地形，从 5 个机位拍到 `Saved/CS2RoadSplineShots`。运行方式同上。
+- `Scripts/CS2Road/MakeCityDemo.py`：生成示例关卡 `L_CityDemo`，见[城市布局](#城市布局)。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖。
+- `Scripts/CS2Road/CityDemoShots.py`：打开 `L_CityDemo`，给整网、分 tile、挪大路、挪特殊建筑计时，再从 4 个机位拍到 `Saved/CS2CityShots`。用完整编辑器运行，不存盘。
+- `Scripts/CS2Road/LocalUpdateTiming.py`：把 Palmsland 转成样条，开批量房子，给整网和分 tile 重建计时，结果写到 `Saved/CS2LocalUpdateTiming_<tile>.json`。`CS2ROAD_TILE` 设 tile 尺寸（米，默认 1024）。用无头编辑器的 `-ExecutePythonScript` 运行，不存盘。
 
 ## 重新生成
 

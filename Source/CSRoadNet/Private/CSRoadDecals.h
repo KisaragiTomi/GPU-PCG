@@ -77,11 +77,23 @@ struct FGpuReceiverSegment
 	uint32 bTwoCentres = 0;
 };
 
+// A part of the network's decals: the items of some roads (a connector belongs to its source road),
+// projected onto receivers gathered from every road at their node as a whole build gathers them. The
+// road mesh input must therefore write those roads' instances at the node too (as context ones).
+struct FDecalScope
+{
+	// The whole network's lane graph, built once and shared; Build does not build its own.
+	const FRoadLanes* Lanes = nullptr;
+	// Per FGraph::Roads index: the road's items are emitted.
+	const TBitArray<>* Keep = nullptr;
+};
+
 struct FGpuDecalInput
 {
 	// Receiver slots per chunk box (CSRoadDecal.usf ChunkBoxes): the decal passes' group size.
 	static constexpr uint32 ReceiverChunk = 64;
 
+	// Built here unless a scope shares its lane graph.
 	FRoadLanes Lanes;
 	TArray<FGpuDecalItem> Items;
 	// The RoadDecals call each item came from: its road's Add (road index), then each connector's
@@ -106,8 +118,9 @@ struct FGpuDecalInput
 
 	// Mesh: the road mesh input after ApplyRefinement (receiver segments index its instances).
 	// AssetDirectory: where RoadDecals.Material looks for a surface's base-colour texture; surfaces
-	// without one are skipped as in RoadLab.
-	bool Build(const FGraph& Graph, const FAssets& Assets, const FGpuGeometryResult& Geometry, const FGpuRoadMeshInput& Mesh, const FString& AssetDirectory, FString& OutError);
+	// without one are skipped as in RoadLab. Scope (optional) limits the items to some roads.
+	bool Build(const FGraph& Graph, const FAssets& Assets, const FGpuGeometryResult& Geometry, const FGpuRoadMeshInput& Mesh, const FString& AssetDirectory, FString& OutError,
+		const FDecalScope* Scope = nullptr);
 	// Output triangles per clipped item, in ClippedItems order.
 	bool ApplyClipCounts(const TArray<uint32>& Triangles, FString& OutError);
 

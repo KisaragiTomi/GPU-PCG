@@ -54,6 +54,27 @@ struct FGpuRefineTriangle
 	uint32 Flags = 0;
 };
 
+// One mesh instance of a road: Road is its FGraph::Roads index, Kind 0 the edge, 1 the start node,
+// 2 the end node. Road * 3 + Kind is its CompositionParameters slot.
+struct FGpuInstanceRef
+{
+	int32 Road = INDEX_NONE;
+	int32 Kind = 0;
+
+	int32 Slot() const { return Road * 3 + Kind; }
+};
+
+// GenerateCompositionMesh is the costly part of a mesh input (Palmsland's ~2,100 compositions take
+// ~230 ms) and a composition never changes once FAssets made it, so builds that run often keep them.
+class FCompositionMeshCache
+{
+public:
+	const FCompositionMesh& Get(FAssets& Assets, const FComposition& Composition);
+
+private:
+	TMap<const FComposition*, TUniquePtr<FCompositionMesh>> Meshes;
+};
+
 // The composition meshes a graph uses (GenerateCompositionMesh, CPU) and the output layout.
 struct FGpuRoadMeshInput
 {
@@ -63,8 +84,16 @@ struct FGpuRoadMeshInput
 	TArray<uint32> TriangleMaterials;
 	// Per graph composition index (0 unused).
 	TArray<FGpuMeshRange> Meshes;
-	// Per road: edge, start node, end node.
+	// Per road: edge, start node, end node (BuildSubset: the drawn instances, then the context ones).
 	TArray<FGpuMeshInstance> Instances;
+	// Per CompositionParameters slot (FGpuInstanceRef::Slot): its Instances index, INDEX_NONE when this
+	// input does not write it.
+	TArray<int32> InstanceOfSlot;
+	// Instances [0, NumDrawnInstances) are drawn; the rest are written past the draw counters, as
+	// receivers for the decals of the drawn ones.
+	uint32 NumDrawnInstances = 0;
+	uint32 NumDrawnVertices = 0;
+	uint32 NumDrawnIndices = 0;
 	// Road index (FGraph::Roads position) of each entity, -1 for nodes.
 	TArray<int32> RoadOfEntity;
 	// Base triangles of the node compositions, in Refine's order (material groups, then index order).
@@ -80,17 +109,28 @@ struct FGpuRoadMeshInput
 	TArray<FString> MaterialSlots;
 	uint32 NumVertices = 0;
 	uint32 NumIndices = 0;
-	// Conservative bounds of the output before LocalToWorld (UE space, cm).
+	// Conservative bounds of the drawn output before LocalToWorld (UE space, cm).
 	FBox Bounds = FBox(ForceInit);
 
-	// bRefine = false draws the node meshes unrefined (the deform tests compare those).
+	// Every instance of every road, drawn. bRefine = false draws the node meshes unrefined (the deform
+	// tests compare those).
 	bool Build(const FGraph& Graph, FAssets& Assets, FString& OutError, bool bRefine = true);
+	// Some instances: Drawn ones, then Context ones, which are written but not drawn. The parameters,
+	// seams and refinement of an instance do not depend on which others are written, so each comes out
+	// as it does in a whole build. Cache (optional) keeps the composition meshes between builds.
+	bool BuildSubset(const FGraph& Graph, FAssets& Assets, const TArray<FGpuInstanceRef>& Drawn, const TArray<FGpuInstanceRef>& Context, FCompositionMeshCache* Cache,
+		FString& OutError, bool bRefine = true);
 	bool NeedsRefinementCounts() const { return RefineInstances.Num() > 0 && !bRefinementApplied; }
 	// Per refine instance (leaves, midpoints, unconverged, 0) from RunRefineCountsBlocking: sizes the
 	// refined instances and lays every instance out again.
 	bool ApplyRefinement(const TArray<FUintVector4>& Totals, FString& OutError);
+	// The refinement sizes of Counted (an input of the same graph with ApplyRefinement done, holding at
+	// least the refined instances of this one), without counting again.
+	bool ApplyRefinementFrom(const FGpuRoadMeshInput& Counted, FString& OutError);
 
 private:
+	bool BuildInstances(const FGraph& Graph, FAssets& Assets, const TArray<FGpuInstanceRef>& Drawn, const TArray<FGpuInstanceRef>& Context, FCompositionMeshCache* Cache,
+		FString& OutError, bool bRefine);
 	bool Layout(FString& OutError);
 };
 

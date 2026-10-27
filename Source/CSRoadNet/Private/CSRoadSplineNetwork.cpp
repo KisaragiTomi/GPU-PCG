@@ -254,6 +254,8 @@ struct FCSRoadSplineNetwork_Node
 	int32 Owner = 0;
 	// Never merged away: it carries data, joins splines or belongs to a fixed one.
 	bool bPinned = false;
+	// Joins the road it lies on whatever its degree (FSplinePointData::bJoin).
+	bool bJoin = false;
 };
 
 struct FCSRoadSplineNetwork_Piece
@@ -277,14 +279,301 @@ struct FCSRoadSplineNetwork_Cut
 	double T = 0.0;
 	int32 Node = 0;
 };
+
+int32 CSRoadSplineNetwork_Segments(const FSplineRoad& Road) { return Road.Points.Num() < 2 ? 0 : Road.bClosed ? Road.Points.Num() : Road.Points.Num() - 1; }
+
+// Segment I of a spline (to the next point), as its piece starts out.
+FCSRoadSplineNetwork_Curve CSRoadSplineNetwork_Segment(const FSplineRoad& Road, int32 I)
+{
+	const int32 J = (I + 1) % Road.Points.Num();
+	FCSRoadSplineNetwork_Curve Curve;
+	Curve.A = Road.Points[I];
+	Curve.B = Road.Points[I] + Road.Leave[I] / 3.0;
+	Curve.C = Road.Points[J] - Road.Arrive[J] / 3.0;
+	Curve.D = Road.Points[J];
+	if (Road.Linear.IsValidIndex(I) && Road.Linear[I])
+	{
+		Curve.B = FMath::Lerp(Curve.A, Curve.D, 1.0 / 3.0);
+		Curve.C = FMath::Lerp(Curve.A, Curve.D, 2.0 / 3.0);
+	}
+	return Curve;
 }
 
-bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Splines, const FSplineNetworkSettings& Settings, const FSavedTerrain* Terrain,
+// A main road's segment in the ground plane, sampled about every metre: what the alleys give way to.
+struct FCSRoadSplineNetwork_Corridor
+{
+	TArray<FVector3d> Points;
+	double HalfWidth = 0.0;
+	FBox3d Box = FBox3d(ForceInit);
+};
+
+// The point of a corridor's centre line nearest to P in the ground plane, and on which side of the
+// line P lies (+1 / -1).
+struct FCSRoadSplineNetwork_OnCorridor
+{
+	double Distance = TNumericLimits<double>::Max();
+	FVector3d Point = FVector3d::ZeroVector;
+	double Side = 0.0;
+};
+
+FCSRoadSplineNetwork_OnCorridor CSRoadSplineNetwork_Nearest(const FCSRoadSplineNetwork_Corridor& Corridor, const FVector3d& P)
+{
+	FCSRoadSplineNetwork_OnCorridor Best;
+	for (int32 I = 0; I + 1 < Corridor.Points.Num(); I++)
+	{
+		const FVector3d A = Corridor.Points[I];
+		const FVector3d B = Corridor.Points[I + 1];
+		const FVector2d AB(B.X - A.X, B.Z - A.Z);
+		const FVector2d AP(P.X - A.X, P.Z - A.Z);
+		const double Length2 = AB.SquaredLength();
+		const double T = Length2 > 1e-12 ? FMath::Clamp(AP.Dot(AB) / Length2, 0.0, 1.0) : 0.0;
+		const FVector3d On = FMath::Lerp(A, B, T);
+		const double Distance = FVector2d(P.X - On.X, P.Z - On.Z).Length();
+		if (Distance >= Best.Distance) continue;
+		Best.Distance = Distance;
+		Best.Point = On;
+		Best.Side = AB.X * AP.Y - AB.Y * AP.X >= 0.0 ? 1.0 : -1.0;
+	}
+	return Best;
+}
+
+// Alleys give way to the main roads over them. Out holds every spline, in order: a main road or an
+// alley no main road covers as it is, a covered alley as the parts left of it. False (Out unused)
+// when no alley is covered.
+bool CSRoadSplineNetwork_ClipAlleys(FAssets& Assets, const TArray<FSplineRoad>& Splines, const FSplineNetworkSettings& Settings, TArray<FSplineRoad>& Out, FSplineNetworkStats& OutStats)
+{
+	TArray<FCSRoadSplineNetwork_Corridor> Corridors;
+	bool bAlleys = false;
+	for (const FSplineRoad& Road : Splines)
+	{
+		bAlleys |= Road.bAlley;
+		if (Road.bAlley || !Assets.HasRoad(Road.Prefab) || Road.Arrive.Num() != Road.Points.Num() || Road.Leave.Num() != Road.Points.Num()) continue;
+		const double HalfWidth = double(Assets.Geometry(Road.Prefab).m_DefaultWidth) * 0.5;
+		for (int32 I = 0; I < CSRoadSplineNetwork_Segments(Road); I++)
+		{
+			const FCSRoadSplineNetwork_Curve Curve = CSRoadSplineNetwork_Segment(Road, I);
+			const int32 Count = FMath::Clamp(FMath::CeilToInt32(CSRoadSplineNetwork_Length(Curve)), 8, 1024);
+			FCSRoadSplineNetwork_Corridor& Corridor = Corridors.AddDefaulted_GetRef();
+			Corridor.HalfWidth = HalfWidth;
+			for (int32 K = 0; K <= Count; K++)
+			{
+				Corridor.Points.Add(Curve.Position(double(K) / Count));
+				Corridor.Box += Corridor.Points.Last();
+			}
+		}
+	}
+	if (!bAlleys || Corridors.Num() == 0) return false;
+
+	Out.Reset(Splines.Num());
+	bool bCut = false;
+	for (const FSplineRoad& Road : Splines)
+	{
+		const int32 Segments = CSRoadSplineNetwork_Segments(Road);
+		if (!Road.bAlley || Segments == 0 || !Assets.HasRoad(Road.Prefab) || Road.Arrive.Num() != Road.Points.Num() || Road.Leave.Num() != Road.Points.Num())
+		{
+			Out.Add(Road);
+			continue;
+		}
+		const double Reach = double(Assets.Geometry(Road.Prefab).m_DefaultWidth) * 0.5 + Settings.AlleyClearance;
+		TArray<FCSRoadSplineNetwork_Curve> Curves;
+		for (int32 I = 0; I < Segments; I++) Curves.Add(CSRoadSplineNetwork_Segment(Road, I));
+		auto At = [&Curves, Segments](double U) { const int32 I = FMath::Clamp(FMath::FloorToInt32(U), 0, Segments - 1); return Curves[I].Position(U - I); };
+		// The main road nearest to P relative to its reach (its half width plus the alley's), among those
+		// at about P's height; covered within that reach. Margin widens the search past the reach.
+		auto Nearest = [&Corridors, &Settings, Reach](const FVector3d& P, double Margin, FCSRoadSplineNetwork_OnCorridor& OutOn)
+		{
+			double Best = TNumericLimits<double>::Max();
+			for (const FCSRoadSplineNetwork_Corridor& Corridor : Corridors)
+			{
+				const double Limit = Corridor.HalfWidth + Reach;
+				const double Search = Limit + Margin;
+				if (P.X < Corridor.Box.Min.X - Search || P.X > Corridor.Box.Max.X + Search || P.Z < Corridor.Box.Min.Z - Search || P.Z > Corridor.Box.Max.Z + Search) continue;
+				const FCSRoadSplineNetwork_OnCorridor On = CSRoadSplineNetwork_Nearest(Corridor, P);
+				if (On.Distance > Search || FMath::Abs(P.Y - On.Point.Y) > Settings.JunctionHeight || On.Distance / Limit >= Best) continue;
+				Best = On.Distance / Limit;
+				OutOn = On;
+			}
+			return Best;
+		};
+		auto Covered = [&Nearest](const FVector3d& P)
+		{
+			FCSRoadSplineNetwork_OnCorridor On;
+			return Nearest(P, 0.0, On) <= 1.0;
+		};
+
+		// Samples about every half metre along the whole spline (parameter U: segment + t).
+		TArray<double> U;
+		for (int32 I = 0; I < Segments; I++)
+		{
+			const int32 Count = FMath::Clamp(FMath::CeilToInt32(CSRoadSplineNetwork_Length(Curves[I]) * 2.0), 4, 4096);
+			for (int32 K = 0; K < Count; K++) U.Add(I + double(K) / Count);
+		}
+		U.Add(double(Segments));
+		TArray<bool> Inside;
+		for (const double V : U) Inside.Add(Covered(At(V)));
+		if (!Inside.Contains(true))
+		{
+			Out.Add(Road);
+			continue;
+		}
+		bCut = true;
+		// Where the alley enters and leaves cover, to a few millimetres.
+		auto Edge = [&](double Outside, double In)
+		{
+			for (int32 Step = 0; Step < 20; Step++)
+			{
+				const double Middle = (Outside + In) * 0.5;
+				if (Covered(At(Middle))) In = Middle;
+				else Outside = Middle;
+			}
+			return Outside;
+		};
+		struct FRun
+		{
+			double Enter = 0.0;
+			double Leave = 0.0;
+			bool bStart = false;
+			bool bEnd = false;
+		};
+		TArray<FRun> Runs;
+		for (int32 K = 0; K < U.Num(); K++)
+		{
+			if (!Inside[K] || (K > 0 && Inside[K - 1])) continue;
+			FRun& Run = Runs.AddDefaulted_GetRef();
+			Run.bStart = K == 0;
+			Run.Enter = Run.bStart ? U[0] : Edge(U[K - 1], U[K]);
+			int32 Last = K;
+			while (Last + 1 < U.Num() && Inside[Last + 1]) Last++;
+			Run.bEnd = Last == U.Num() - 1;
+			Run.Leave = Run.bEnd ? U.Last() : Edge(U[Last + 1], U[Last]);
+		}
+		OutStats.AlleyCuts += Runs.Num();
+		// A closed alley covered where it starts goes on round to the cover's far side.
+		if (Road.bClosed && Runs.Num() > 1 && Runs[0].bStart && Runs.Last().bEnd)
+		{
+			Runs[0].Enter = Runs.Last().Enter - Segments;
+			Runs[0].bStart = false;
+			Runs.Pop();
+		}
+		// Where a cut end joins the main road: one point for both ends of a stretch that crosses it
+		// straight over, else the nearest point of the road.
+		auto Join = [&](const FRun& Run, bool bBefore)
+		{
+			const double Wrap = Road.bClosed ? double(Segments) : 0.0;
+			auto Wrapped = [Wrap](double V) { return Wrap > 0.0 ? FMath::Fmod(FMath::Fmod(V, Wrap) + Wrap, Wrap) : V; };
+			// The run's ends lie just outside cover: look a little past the reach.
+			FCSRoadSplineNetwork_OnCorridor Enter;
+			FCSRoadSplineNetwork_OnCorridor Leave;
+			Nearest(At(Wrapped(Run.Enter)), 1.0, Enter);
+			Nearest(At(Wrapped(Run.Leave)), 1.0, Leave);
+			if (!Run.bStart && !Run.bEnd && Enter.Side * Leave.Side < 0.0)
+			{
+				FCSRoadSplineNetwork_OnCorridor Closest;
+				for (int32 Step = 0; Step <= 64; Step++)
+				{
+					FCSRoadSplineNetwork_OnCorridor On;
+					if (Nearest(At(Wrapped(FMath::Lerp(Run.Enter, Run.Leave, Step / 64.0))), 1.0, On) <= 1.0 && On.Distance < Closest.Distance) Closest = On;
+				}
+				return Closest.Point;
+			}
+			return bBefore ? Enter.Point : Leave.Point;
+		};
+
+		// The parts between the stretches, each a spline ending on the main roads it was cut by.
+		TArray<TPair<double, double>> Parts;
+		TArray<TPair<const FRun*, const FRun*>> Bounds;
+		if (Road.bClosed && Runs.Num() > 0)
+		{
+			for (int32 R = 0; R < Runs.Num(); R++)
+			{
+				const FRun& From = Runs[R];
+				const FRun& To = Runs[(R + 1) % Runs.Num()];
+				Parts.Add({ From.Leave, R + 1 < Runs.Num() ? To.Enter : To.Enter + Segments });
+				Bounds.Add({ &From, &To });
+			}
+		}
+		else
+		{
+			double From = 0.0;
+			const FRun* Before = nullptr;
+			for (const FRun& Run : Runs)
+			{
+				Parts.Add({ From, Run.Enter });
+				Bounds.Add({ Before, &Run });
+				From = Run.Leave;
+				Before = &Run;
+			}
+			Parts.Add({ From, double(Segments) });
+			Bounds.Add({ Before, nullptr });
+		}
+		for (int32 P = 0; P < Parts.Num(); P++)
+		{
+			const double From = Parts[P].Key;
+			const double To = Parts[P].Value;
+			if (To - From < 1e-6) continue;
+			FSplineRoad Part;
+			Part.Name = FString::Printf(TEXT("%s (part %d)"), *Road.Name, P + 1);
+			Part.Prefab = Road.Prefab;
+			Part.Upgrade = Road.Upgrade;
+			Part.bAdjust = Road.bAdjust;
+			Part.bAlley = true;
+			TArray<FCSRoadSplineNetwork_Curve> PartCurves;
+			TArray<int32> Original;
+			for (int32 S = FMath::FloorToInt32(From); S < FMath::CeilToInt32(To); S++)
+			{
+				const double T0 = FMath::Max(From - S, 0.0);
+				const double T1 = FMath::Min(To - S, 1.0);
+				if (T1 - T0 < 1e-6) continue;
+				const int32 Segment = ((S % Segments) + Segments) % Segments;
+				PartCurves.Add(Curves[Segment].Cut(T0, T1));
+				Original.Add(Segment);
+			}
+			if (PartCurves.Num() == 0) continue;
+			const FRun* Before = Bounds[P].Key;
+			const FRun* After = Bounds[P].Value;
+			if (Before) PartCurves[0].MoveStart(Join(*Before, false));
+			if (After) PartCurves.Last().MoveEnd(Join(*After, true));
+			if (FVector3d::Dist(PartCurves[0].A, PartCurves.Last().D) < 1.0 && PartCurves.Num() == 1) continue;
+			for (int32 C = 0; C < PartCurves.Num(); C++)
+			{
+				const FCSRoadSplineNetwork_Curve& Curve = PartCurves[C];
+				const int32 Segment = Original[C];
+				if (C == 0)
+				{
+					// The part's first point is the spline's own only where the part starts on it.
+					const bool bOwnPoint = !Before && FMath::IsNearlyEqual(From, double(FMath::RoundToInt32(From)));
+					Part.Points.Add(Curve.A);
+					Part.Arrive.Add((Curve.B - Curve.A) * 3.0);
+					Part.Data.Add(bOwnPoint && Road.Data.IsValidIndex(Segment) ? Road.Data[Segment] : FSplinePointData());
+				}
+				Part.Leave.Add((Curve.B - Curve.A) * 3.0);
+				Part.Linear.Add(Road.Linear.IsValidIndex(Segment) && Road.Linear[Segment]);
+				const int32 Next = (Segment + 1) % Road.Points.Num();
+				const bool bOwnEnd = C + 1 < PartCurves.Num() || (!After && FMath::IsNearlyEqual(To, double(FMath::RoundToInt32(To))));
+				Part.Points.Add(Curve.D);
+				Part.Arrive.Add((Curve.D - Curve.C) * 3.0);
+				Part.Data.Add(bOwnEnd && Road.Data.IsValidIndex(Next) ? Road.Data[Next] : FSplinePointData());
+			}
+			// The last point leaves the way it arrives; cut ends join the main road they were cut by.
+			Part.Leave.Add(Part.Arrive.Last());
+			if (Before) Part.Data[0].bJoin = true;
+			if (After) Part.Data.Last().bJoin = true;
+			Out.Add(MoveTemp(Part));
+		}
+	}
+	return bCut;
+}
+}
+
+bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Drawn, const FSplineNetworkSettings& Settings, const FSavedTerrain* Terrain,
 	TArray<FSavedNode>& OutNodes, TArray<FRoadSpec>& OutRoads, FSplineNetworkStats& OutStats, FString& OutError)
 {
 	OutNodes.Reset();
 	OutRoads.Reset();
 	OutStats = FSplineNetworkStats();
+	// Alleys give way to the main roads over them; the splines drawn stay as they are.
+	TArray<FSplineRoad> Clipped;
+	const TArray<FSplineRoad>& Splines = CSRoadSplineNetwork_ClipAlleys(Assets, Drawn, Settings, Clipped, OutStats) ? Clipped : Drawn;
 	const double Snap = FMath::Max(Settings.SnapDistance, 0.01);
 	static const FSplinePointData NoData;
 	auto DataAt = [&Splines](int32 Spline, int32 Index) -> const FSplinePointData& { return Splines[Spline].Data.IsValidIndex(Index) ? Splines[Spline].Data[Index] : NoData; };
@@ -399,7 +688,8 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Splines, con
 			Node.Upgrade = Node.Upgrade | Data.NodeUpgrade;
 			Node.bOutside |= Data.bOutside;
 			if (Node.Owner == 0) Node.Owner = Data.NodeOwner;
-			Node.bPinned |= Points[I].bFixed || Data.HasNodeOverrides() || Points[I].Spline != FirstSpline[NodeIndex];
+			Node.bJoin |= Data.bJoin;
+			Node.bPinned |= Points[I].bFixed || Data.HasNodeOverrides() || Data.bJoin || Points[I].Spline != FirstSpline[NodeIndex];
 		}
 	}
 	for (const FCSRoadSplineNetwork_Node& Node : Nodes)
@@ -457,8 +747,8 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Splines, con
 	TArray<TArray<FCSRoadSplineNetwork_Cut>> Cuts;
 	Cuts.SetNum(Pieces.Num());
 
-	// A road ending on another one (not at its ends, which snapping settles) joins it there. At
-	// least one of the two must be adjusted.
+	// A road ending on another one (not at its ends, which snapping settles) joins it there, and so do
+	// alley ends cut under a main road whatever their degree. At least one of the two must be adjusted.
 	{
 		TArray<int32> Degree;
 		TArray<int32> Incident;
@@ -473,7 +763,7 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Splines, con
 		}
 		for (int32 N = 0; N < Nodes.Num(); N++)
 		{
-			if (Degree[N] != 1) continue;
+			if (Degree[N] != 1 && !(Degree[N] > 1 && Nodes[N].bJoin)) continue;
 			const bool bOwnAdjusted = Adjusted(Pieces[Incident[N]]);
 			const FVector3d Position = Nodes[N].Position;
 			int32 Best = INDEX_NONE;
@@ -495,9 +785,13 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Splines, con
 			if (Best == INDEX_NONE) continue;
 			Nodes[N].Position = Pieces[Best].Curve.Position(BestT);
 			Nodes[N].bPinned = true;
-			FCSRoadSplineNetwork_Piece& Own = Pieces[Incident[N]];
-			if (Own.Start == N && Own.bStartFree) Own.Curve.MoveStart(Nodes[N].Position);
-			if (Own.End == N && Own.bEndFree) Own.Curve.MoveEnd(Nodes[N].Position);
+			// Every road ending there follows the node onto the road it joins.
+			for (int32 P = Degree[N] == 1 ? Incident[N] : 0; P < (Degree[N] == 1 ? Incident[N] + 1 : Pieces.Num()); P++)
+			{
+				FCSRoadSplineNetwork_Piece& Own = Pieces[P];
+				if (Own.Start == N && Own.bStartFree) Own.Curve.MoveStart(Nodes[N].Position);
+				if (Own.End == N && Own.bEndFree) Own.Curve.MoveEnd(Nodes[N].Position);
+			}
 			Cuts[Best].Add({ BestT, N });
 			OutStats.Junctions++;
 		}

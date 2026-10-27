@@ -11,6 +11,16 @@
 
 class ACSRoadNetworkActor;
 
+UENUM()
+enum class ECSRoadTier : uint8
+{
+	/** A main road: alleys under it give way. */
+	Main,
+	/** An alley (laid out beforehand): where a main road covers it, it is cut away and its ends join that road. The
+	 *  spline stays as drawn, so the alley comes back when the road goes. */
+	Alley,
+};
+
 // Unset values are measured (elevation above the ground) or chosen by the network (node prefab).
 USTRUCT()
 struct CSROADNET_API FCSRoadSplinePoint
@@ -98,6 +108,10 @@ public:
 	/** The road prefab of every segment. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (GetOptions = "GetRoadPrefabOptions"))
 	FString Prefab = TEXT("Small Road");
+
+	/** A main road, or an alley that gives way to main roads. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road")
+	ECSRoadTier Tier = ECSRoadTier::Main;
 
 	/** Split segments that are too long or turn too much, merge short ones, and join the roads this one crosses or
 	 *  ends on. Off keeps every point a node exactly as drawn (a converted snapshot). */

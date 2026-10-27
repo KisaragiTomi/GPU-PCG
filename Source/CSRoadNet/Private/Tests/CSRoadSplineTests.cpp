@@ -331,6 +331,117 @@ bool FCSRoadSplinesPalmslandTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Alleys giving way to main roads: an alley a main road crosses is cut there and both ends meet it in
+// one crossing (also on a slant); one a main road runs along loses the stretch under it and its ends
+// join the road; a main road passing high overhead leaves it whole; and the alley comes back as it
+// was when the main road goes.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadSplinesAlleysTest, "PCGPlugins.CSRoadNet.Splines.Alleys",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSRoadSplinesAlleysTest::RunTest(const FString& Parameters)
+{
+	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
+	if (!Lib.bLoaded)
+	{
+		AddWarning(Lib.Error + TEXT(" (skipped)"));
+		return true;
+	}
+	const FSplineNetworkSettings Settings = CSRoadSplineTests_JunctionsOnly();
+	auto Alley = [](const TArray<FVector3d>& Points)
+	{
+		FSplineRoad Road = CSRoadSplineTests_Road(Points);
+		Road.Prefab = TEXT("Alley");
+		Road.bAlley = true;
+		return Road;
+	};
+	auto Main = [](const TArray<FVector3d>& Points)
+	{
+		FSplineRoad Road = CSRoadSplineTests_Road(Points);
+		Road.Prefab = TEXT("Medium Road");
+		return Road;
+	};
+	auto Count = [](const FCSRoadSplineTests_Network& Network, const TCHAR* Prefab)
+	{
+		int32 Total = 0;
+		for (const FRoadSpec& Road : Network.Roads) Total += Road.Prefab == Prefab ? 1 : 0;
+		return Total;
+	};
+	// No alley edge comes closer to the main road's line (from A to B) than its reach, but next to its
+	// ends (where it meets the road, on a slant too).
+	const double Reach = double(Lib.Assets.Geometry(TEXT("Medium Road")).m_DefaultWidth + Lib.Assets.Geometry(TEXT("Alley")).m_DefaultWidth) * 0.5;
+	auto Clear = [&](const FCSRoadSplineTests_Network& Network, const FVector3d& A, const FVector3d& B)
+	{
+		for (const FRoadSpec& Road : Network.Roads)
+		{
+			if (Road.Prefab != TEXT("Alley")) continue;
+			for (int32 K = 1; K < 16; K++)
+			{
+				const float3 P = MathUtils::Position(Road.Curve, K / 16.0f);
+				const FVector2d Point(P.x, P.z);
+				const FVector2d Closest = FMath::ClosestPointOnSegment2D(Point, FVector2d(A.X, A.Z), FVector2d(B.X, B.Z));
+				if (FVector2d::Distance(Point, Closest) < Reach - 0.5 && FVector2d::Distance(Point, FVector2d(Road.Curve.a.x, Road.Curve.a.z)) > Reach * 2.0 && FVector2d::Distance(Point, FVector2d(Road.Curve.d.x, Road.Curve.d.z)) > Reach * 2.0) return false;
+			}
+		}
+		return true;
+	};
+
+	{
+		FCSRoadSplineTests_Network N;
+		if (!CSRoadSplineTests_Build(*this, TEXT("crossing"), { Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) }), Main({ FVector3d(0.0, 0.0, -100.0), FVector3d(0.0, 0.0, 100.0) }) }, Settings, N)) return false;
+		TestEqual(TEXT("crossing: one stretch cut"), N.Stats.AlleyCuts, 1);
+		TestEqual(TEXT("crossing: two alley parts"), Count(N, TEXT("Alley")), 2);
+		const int32 Cross = N.NodeAt(FVector3d(0.0, 0.0, 0.0), 0.05);
+		TestTrue(TEXT("crossing: one crossing node"), Cross != INDEX_NONE && N.Degree(Cross) == 4);
+		TestTrue(TEXT("crossing: no alley under the road"), Clear(N, FVector3d(0.0, 0.0, -100.0), FVector3d(0.0, 0.0, 100.0)));
+		TestTrue(TEXT("crossing: edges on their nodes"), N.EdgesOnNodes());
+	}
+	{
+		FCSRoadSplineTests_Network N;
+		if (!CSRoadSplineTests_Build(*this, TEXT("slant"), { Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) }), Main({ FVector3d(-60.0, 0.0, -100.0), FVector3d(60.0, 0.0, 100.0) }) }, Settings, N)) return false;
+		TestEqual(TEXT("slant: two alley parts"), Count(N, TEXT("Alley")), 2);
+		int32 Crossings = 0;
+		for (int32 Node = 0; Node < N.Nodes.Num(); Node++) Crossings += N.Degree(Node) == 4 ? 1 : 0;
+		TestEqual(TEXT("slant: one crossing"), Crossings, 1);
+		TestTrue(TEXT("slant: no alley under the road"), Clear(N, FVector3d(-60.0, 0.0, -100.0), FVector3d(60.0, 0.0, 100.0)));
+	}
+	{
+		FCSRoadSplineTests_Network N;
+		if (!CSRoadSplineTests_Build(*this, TEXT("along"), { Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) }), Main({ FVector3d(-40.0, 0.0, 3.0), FVector3d(40.0, 0.0, 3.0) }) }, Settings, N)) return false;
+		TestEqual(TEXT("along: one stretch cut"), N.Stats.AlleyCuts, 1);
+		TestEqual(TEXT("along: two alley parts"), Count(N, TEXT("Alley")), 2);
+		TestTrue(TEXT("along: no alley under the road"), Clear(N, FVector3d(-40.0, 0.0, 3.0), FVector3d(40.0, 0.0, 3.0)));
+		// Each part ends on the main road.
+		int32 Joined = 0;
+		for (const FRoadSpec& Road : N.Roads)
+		{
+			if (Road.Prefab != TEXT("Alley")) continue;
+			for (const FRoadSpec& Other : N.Roads)
+			{
+				if (Other.Prefab == TEXT("Alley")) continue;
+				if (Road.SourceStart == Other.SourceStart || Road.SourceStart == Other.SourceEnd || Road.SourceEnd == Other.SourceStart || Road.SourceEnd == Other.SourceEnd)
+				{
+					Joined++;
+					break;
+				}
+			}
+		}
+		TestEqual(TEXT("along: both parts join the main road"), Joined, 2);
+	}
+	{
+		FCSRoadSplineTests_Network Alone;
+		FCSRoadSplineTests_Network Over;
+		const FSplineRoad Lane = Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) });
+		if (!CSRoadSplineTests_Build(*this, TEXT("alone"), { Lane }, Settings, Alone)) return false;
+		if (!CSRoadSplineTests_Build(*this, TEXT("overpass"), { Lane, Main({ FVector3d(0.0, 10.0, -100.0), FVector3d(0.0, 10.0, 100.0) }) }, Settings, Over)) return false;
+		TestEqual(TEXT("overpass: nothing cut"), Over.Stats.AlleyCuts, 0);
+		TestEqual(TEXT("overpass: the alley whole"), Count(Over, TEXT("Alley")), 1);
+		bool bSame = Count(Alone, TEXT("Alley")) == 1;
+		for (const FRoadSpec& Road : Over.Roads) if (Road.Prefab == TEXT("Alley")) bSame &= CSRoadSplineTests_Key(Road.Curve) == CSRoadSplineTests_Key(Alone.Roads[0].Curve);
+		TestTrue(TEXT("overpass: the alley as drawn"), bSame);
+	}
+	return true;
+}
+
 // The actor in a level, placed off the origin and turned: two spline roads under it become roads
 // where the splines are, and follow it when it moves or a spline changes. The meshes are
 // world-space, so their components stay at identity wherever the actor is.

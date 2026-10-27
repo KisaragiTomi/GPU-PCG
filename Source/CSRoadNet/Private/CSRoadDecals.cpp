@@ -130,9 +130,12 @@ void CreateCrosswalks(const FGraph& Graph, const FAssets& Assets, const FGpuGeom
 	}
 }
 
-bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGpuGeometryResult& Geometry, const FGpuRoadMeshInput& Mesh, const FString& AssetDirectory, FString& OutError)
+bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGpuGeometryResult& Geometry, const FGpuRoadMeshInput& Mesh, const FString& AssetDirectory, FString& OutError,
+	const FDecalScope* Scope)
 {
-	Lanes.Build(Graph, Assets, Geometry);
+	if (!Scope || !Scope->Lanes) Lanes.Build(Graph, Assets, Geometry);
+	const FRoadLanes& Graphed = Scope && Scope->Lanes ? *Scope->Lanes : Lanes;
+	auto Kept = [Scope](int32 Road) { return !Scope || !Scope->Keep || (*Scope->Keep)[Road]; };
 	Items.Reset();
 	ItemBlocks.Reset();
 	NumBlocks = 0;
@@ -156,12 +159,17 @@ bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGp
 		const FGpuMeshInstance& Item = Mesh.Instances[Instance];
 		return Item.RefinedTriangleCount > 0 ? Item.RefinedTriangleCount : Mesh.Meshes[Item.Mesh].IndexCount / 3u;
 	};
-	auto AddSegment = [this, &Triangles](uint32 Instance) -> FGpuReceiverSegment&
+	// Segments point at the mesh input's instances by parameter slot (road * 3 + kind); a scoped build
+	// must have written every one its nodes need.
+	int32 MissingSlot = INDEX_NONE;
+	auto AddSegment = [this, &Triangles, &Mesh, &MissingSlot](int32 Slot) -> FGpuReceiverSegment&
 	{
+		const int32 Instance = Mesh.InstanceOfSlot.IsValidIndex(Slot) ? Mesh.InstanceOfSlot[Slot] : INDEX_NONE;
+		if (Instance == INDEX_NONE && MissingSlot == INDEX_NONE) MissingSlot = Slot;
 		FGpuReceiverSegment& Segment = Segments.AddDefaulted_GetRef();
-		Segment.Instance = Instance;
+		Segment.Instance = Instance == INDEX_NONE ? 0u : uint32(Instance);
 		Segment.Offset = Align(NumReceiverSlots, ReceiverChunk);
-		Segment.Capacity = Triangles(Instance);
+		Segment.Capacity = Instance == INDEX_NONE ? 0u : Triangles(uint32(Instance));
 		NumReceiverSlots = Segment.Offset + Segment.Capacity;
 		return Segment;
 	};
@@ -183,14 +191,14 @@ bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGp
 			const float Radius = Graph.Roads[Road].EdgeComposition->Data.m_Width * 2.0f;
 			const bool bStartHere = RoadEdge.m_Start == Node;
 			const bool bEndHere = RoadEdge.m_End == Node;
-			FGpuReceiverSegment& Near = AddSegment(uint32(Road * 3));
+			FGpuReceiverSegment& Near = AddSegment(Road * 3);
 			Near.Filter = 1;
 			Near.Centre = bStartHere ? StartCentre : EndCentre;
 			Near.OtherCentre = EndCentre;
 			Near.bTwoCentres = bStartHere && bEndHere ? 1u : 0u;
 			Near.Radius2 = Radius * Radius;
-			if (bStartHere) AddSegment(uint32(Road * 3 + 1));
-			if (bEndHere) AddSegment(uint32(Road * 3 + 2));
+			if (bStartHere) AddSegment(Road * 3 + 1);
+			if (bEndHere) AddSegment(Road * 3 + 2);
 		}
 		ReceiverSegments.Add(FUintVector2(First, uint32(Segments.Num()) - First));
 		return Index;
@@ -248,22 +256,23 @@ bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGp
 	// Edge lanes of the graph by road, one per lane definition (a two-way lane's reverse is skipped).
 	TArray<TArray<int32>> EdgeLanesOfRoad;
 	EdgeLanesOfRoad.SetNum(Graph.Roads.Num());
-	for (int32 I = 0; I < Lanes.Lanes.Num(); I++)
+	for (int32 I = 0; I < Graphed.Lanes.Num(); I++)
 	{
-		const FRoadLane& Lane = Lanes.Lanes[I];
+		const FRoadLane& Lane = Graphed.Lanes[I];
 		if (Lane.bConnector) continue;
 		TArray<int32>& OfRoad = EdgeLanesOfRoad[Lane.Road];
-		if (!OfRoad.ContainsByPredicate([this, &Lane](int32 Other) { return Lanes.Lanes[Other].Definition.m_Index == Lane.Definition.m_Index; })) OfRoad.Add(I);
+		if (!OfRoad.ContainsByPredicate([&Graphed, &Lane](int32 Other) { return Graphed.Lanes[Other].Definition.m_Index == Lane.Definition.m_Index; })) OfRoad.Add(I);
 	}
 	TArray<FCrossing> Crossings;
 	for (int32 Road = 0; Road < Graph.Roads.Num(); Road++)
 	{
 		Block = Road;
+		if (!Kept(Road)) continue;
 		const FRoadInstance& Instance = Graph.Roads[Road];
 		const Edge& RoadEdge = Graph.EdgeData[Instance.Entity];
 		for (int32 LaneIndex : EdgeLanesOfRoad[Road])
 		{
-			const FRoadLane& Lane = Lanes.Lanes[LaneIndex];
+			const FRoadLane& Lane = Graphed.Lanes[LaneIndex];
 			const float2 Ends = BatchDataHelpers::ConnectedEnds(Lane.ConnectedStartCount, Lane.ConnectedEndCount);
 			for (int32 I = 0; I < Lane.Curves.Num(); I++) AddLane(Lane.Definition.m_Lane, Lane.Curves[I], INDEX_NONE, float2(1.0f), float2(I == 0 ? Ends.x : 1.0f, I == Lane.Curves.Num() - 1 ? Ends.y : 1.0f), false);
 		}
@@ -288,13 +297,18 @@ bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGp
 	}
 	// RoadDecals.AddConnection: connectors fade by the number of lanes sharing each end.
 	Block = Graph.Roads.Num();
-	for (const FRoadLane& Lane : Lanes.Lanes)
+	for (const FRoadLane& Lane : Graphed.Lanes)
 	{
 		if (!Lane.bConnector) continue;
-		AddLane(Lane.Definition.m_Lane, Lane.Curves[0], Lane.Junction, BatchDataHelpers::SharedWeights(Lane.SharedStartCount, Lane.SharedEndCount), float2(1.0f), false);
+		if (Kept(Lane.Road)) AddLane(Lane.Definition.m_Lane, Lane.Curves[0], Lane.Junction, BatchDataHelpers::SharedWeights(Lane.SharedStartCount, Lane.SharedEndCount), float2(1.0f), false);
 		Block++;
 	}
 	NumBlocks = Block;
+	if (MissingSlot != INDEX_NONE)
+	{
+		OutError = FString::Printf(TEXT("The road mesh input does not write mesh instance %d of road %d, which a decal receiver needs"), MissingSlot % 3, MissingSlot / 3);
+		return false;
+	}
 	return Layout(OutError);
 }
 

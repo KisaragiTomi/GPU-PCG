@@ -245,7 +245,31 @@ bool RunGraphBlocking(TFunctionRef<TArray<FRDGBufferRef>(FRDGBuilder&)> Record, 
 	return bRead;
 }
 
+const FCompositionMesh& FCompositionMeshCache::Get(FAssets& Assets, const FComposition& Composition)
+{
+	if (const TUniquePtr<FCompositionMesh>* Known = Meshes.Find(&Composition)) return **Known;
+	TUniquePtr<FCompositionMesh>& Mesh = Meshes.Add(&Composition, MakeUnique<FCompositionMesh>());
+	GenerateCompositionMesh(Assets, Composition, *Mesh);
+	return *Mesh;
+}
+
 bool FGpuRoadMeshInput::Build(const FGraph& Graph, FAssets& Assets, FString& OutError, bool bRefine)
+{
+	// Edge, start node and end node of every road, in road order (RoadRenderer.BuildSteps).
+	TArray<FGpuInstanceRef> All;
+	All.Reserve(Graph.Roads.Num() * 3);
+	for (int32 Road = 0; Road < Graph.Roads.Num(); Road++) for (int32 Kind = 0; Kind < 3; Kind++) All.Add({ Road, Kind });
+	return BuildInstances(Graph, Assets, All, {}, nullptr, OutError, bRefine);
+}
+
+bool FGpuRoadMeshInput::BuildSubset(const FGraph& Graph, FAssets& Assets, const TArray<FGpuInstanceRef>& Drawn, const TArray<FGpuInstanceRef>& Context, FCompositionMeshCache* Cache,
+	FString& OutError, bool bRefine)
+{
+	return BuildInstances(Graph, Assets, Drawn, Context, Cache, OutError, bRefine);
+}
+
+bool FGpuRoadMeshInput::BuildInstances(const FGraph& Graph, FAssets& Assets, const TArray<FGpuInstanceRef>& Drawn, const TArray<FGpuInstanceRef>& Context, FCompositionMeshCache* Cache,
+	FString& OutError, bool bRefine)
 {
 	Vertices.Reset();
 	Indices.Reset();
@@ -258,11 +282,32 @@ bool FGpuRoadMeshInput::Build(const FGraph& Graph, FAssets& Assets, FString& Out
 	NumMidpoints = 0;
 	NumUnconverged = 0;
 	Meshes.SetNumZeroed(Graph.Compositions.Num());
+	auto CompositionOf = [&Graph](const FGpuInstanceRef& Ref)
+	{
+		const Composition& Compositions = Graph.CompositionData[Graph.Roads[Ref.Road].Entity];
+		return Ref.Kind == 0 ? Compositions.m_Edge : Ref.Kind == 1 ? Compositions.m_StartNode : Compositions.m_EndNode;
+	};
+	TBitArray<> Used(false, Graph.Compositions.Num());
+	for (const TArray<FGpuInstanceRef>* List : { &Drawn, &Context })
+	{
+		for (const FGpuInstanceRef& Ref : *List)
+		{
+			if (!Graph.Roads.IsValidIndex(Ref.Road) || Ref.Kind < 0 || Ref.Kind > 2)
+			{
+				OutError = FString::Printf(TEXT("No mesh instance %d of road %d"), Ref.Kind, Ref.Road);
+				return false;
+			}
+			Used[CompositionOf(Ref)] = true;
+		}
+	}
+	// The compositions the instances draw, in composition order: it numbers the material slots.
 	TMap<int32, int32> SlotOfAtlas;
 	for (int32 Index = 1; Index < Graph.Compositions.Num(); Index++)
 	{
-		FCompositionMesh Mesh;
-		GenerateCompositionMesh(Assets, *Graph.Compositions[Index], Mesh);
+		if (!Used[Index]) continue;
+		FCompositionMesh Generated;
+		if (!Cache) GenerateCompositionMesh(Assets, *Graph.Compositions[Index], Generated);
+		const FCompositionMesh& Mesh = Cache ? Cache->Get(Assets, *Graph.Compositions[Index]) : Generated;
 		FGpuMeshRange& Range = Meshes[Index];
 		Range.VertexOffset = uint32(Vertices.Num());
 		Range.VertexCount = uint32(Mesh.Vertices.Num());
@@ -313,45 +358,56 @@ bool FGpuRoadMeshInput::Build(const FGraph& Graph, FAssets& Assets, FString& Out
 	RoadOfEntity.Init(-1, Graph.NumEntities());
 	for (int32 Road = 0; Road < Graph.Roads.Num(); Road++) RoadOfEntity[Graph.Roads[Road].Entity] = Road;
 
-	// Edge, start node and end node of every road, in road order (RoadRenderer.BuildSteps).
-	Instances.Reset(Graph.Roads.Num() * 3);
+	// Drawn instances first, so the draw counters cover exactly them; the bounds hold only those.
+	InstanceOfSlot.Init(INDEX_NONE, Graph.Roads.Num() * 3);
+	Instances.Reset(Drawn.Num() + Context.Num());
 	FBox Unity(ForceInit);
 	float MaxHalfWidth = 0.0f;
 	float MinHeight = 0.0f;
 	float MaxHeight = 0.0f;
-	for (int32 Road = 0; Road < Graph.Roads.Num(); Road++)
+	TBitArray<> Bounded(false, Graph.Roads.Num());
+	for (const TArray<FGpuInstanceRef>* List : { &Drawn, &Context })
 	{
-		const int32 Entity = Graph.Roads[Road].Entity;
-		const Composition& Compositions = Graph.CompositionData[Entity];
-		const int32 MeshOf[3] = { Compositions.m_Edge, Compositions.m_StartNode, Compositions.m_EndNode };
-		for (int32 Kind = 0; Kind < 3; Kind++)
+		const bool bDrawn = List == &Drawn;
+		for (const FGpuInstanceRef& Ref : *List)
 		{
+			if (InstanceOfSlot[Ref.Slot()] != INDEX_NONE)
+			{
+				OutError = FString::Printf(TEXT("Mesh instance %d of road %d is listed twice"), Ref.Kind, Ref.Road);
+				return false;
+			}
+			const int32 MeshIndex = CompositionOf(Ref);
 			FGpuMeshInstance& Instance = Instances.AddDefaulted_GetRef();
-			Instance.Mesh = uint32(MeshOf[Kind]);
-			Instance.Parameters = uint32(Road * 3 + Kind);
-			Instance.JunctionSlot = Kind == 0 ? FGpuMeshInstance::NoJunction : Instance.Parameters;
-			if (Meshes[MeshOf[Kind]].RefineCount > 0)
+			Instance.Mesh = uint32(MeshIndex);
+			Instance.Parameters = uint32(Ref.Slot());
+			Instance.JunctionSlot = Ref.Kind == 0 ? FGpuMeshInstance::NoJunction : Instance.Parameters;
+			if (Meshes[MeshIndex].RefineCount > 0)
 			{
 				Instance.RefineItemOffset = NumRefineItems;
-				NumRefineItems += Meshes[MeshOf[Kind]].RefineCount;
+				NumRefineItems += Meshes[MeshIndex].RefineCount;
 				RefineInstances.Add(uint32(Instances.Num() - 1));
 			}
-			const NetCompositionData& Data = Graph.Compositions[MeshOf[Kind]]->Data;
+			InstanceOfSlot[Ref.Slot()] = Instances.Num() - 1;
+			if (!bDrawn) continue;
+			const NetCompositionData& Data = Graph.Compositions[MeshIndex]->Data;
 			MaxHalfWidth = FMath::Max(MaxHalfWidth, Data.m_Width * 0.5f);
 			MinHeight = FMath::Min(MinHeight, Data.m_HeightRange.min);
 			MaxHeight = FMath::Max(MaxHeight, Data.m_HeightRange.max);
+			if (Bounded[Ref.Road]) continue;
+			Bounded[Ref.Road] = true;
+			const Bezier4x3& Curve = Graph.CurveData[Graph.Roads[Ref.Road].Entity].m_Bezier;
+			for (const float3& P : { Curve.a, Curve.b, Curve.c, Curve.d }) Unity += FVector(P.x, P.y, P.z);
 		}
-		const Bezier4x3& Curve = Graph.CurveData[Entity].m_Bezier;
-		for (const float3& P : { Curve.a, Curve.b, Curve.c, Curve.d }) Unity += FVector(P.x, P.y, P.z);
 	}
+	NumDrawnInstances = uint32(Drawn.Num());
 	// Nodes widen past the curves by about a road width; terrain-following vertices may drop to the
 	// ground under elevated roads. Refinement only adds points on the same curves.
+	Bounds = FBox(ForceInit);
 	if (Unity.IsValid)
 	{
 		const double Margin = double(MaxHalfWidth) * 2.0 + 2.0;
 		Unity.Min += FVector(-Margin, double(MinHeight) - 100.0, -Margin);
 		Unity.Max += FVector(Margin, double(MaxHeight) + 10.0, Margin);
-		Bounds = FBox(ForceInit);
 		Bounds += FVector(Unity.Min.X, -Unity.Min.Z, Unity.Min.Y) * 100.0;
 		Bounds += FVector(Unity.Max.X, -Unity.Max.Z, Unity.Max.Y) * 100.0;
 	}
@@ -386,17 +442,54 @@ bool FGpuRoadMeshInput::ApplyRefinement(const TArray<FUintVector4>& Totals, FStr
 	return Layout(OutError);
 }
 
+bool FGpuRoadMeshInput::ApplyRefinementFrom(const FGpuRoadMeshInput& Counted, FString& OutError)
+{
+	if (!Counted.bRefinementApplied)
+	{
+		OutError = TEXT("The counted mesh input has no refinement");
+		return false;
+	}
+	TArray<FUintVector4> Totals;
+	Totals.SetNumZeroed(RefineInstances.Num());
+	for (int32 I = 0; I < RefineInstances.Num(); I++)
+	{
+		const int32 Slot = int32(Instances[RefineInstances[I]].Parameters);
+		const int32 Source = Counted.InstanceOfSlot.IsValidIndex(Slot) ? Counted.InstanceOfSlot[Slot] : INDEX_NONE;
+		if (Source == INDEX_NONE)
+		{
+			OutError = FString::Printf(TEXT("Mesh instance slot %d was not counted"), Slot);
+			return false;
+		}
+		const FGpuMeshInstance& From = Counted.Instances[Source];
+		Totals[I] = FUintVector4(From.RefinedTriangleCount, From.RefinedVertexCount, 0u, 0u);
+	}
+	return ApplyRefinement(Totals, OutError);
+}
+
 bool FGpuRoadMeshInput::Layout(FString& OutError)
 {
 	uint64 VertexCount = 0;
 	uint64 IndexCount = 0;
-	for (FGpuMeshInstance& Instance : Instances)
+	uint64 DrawnVertexCount = 0;
+	uint64 DrawnIndexCount = 0;
+	for (int32 I = 0; I < Instances.Num(); I++)
 	{
+		if (uint32(I) == NumDrawnInstances)
+		{
+			DrawnVertexCount = VertexCount;
+			DrawnIndexCount = IndexCount;
+		}
+		FGpuMeshInstance& Instance = Instances[I];
 		const FGpuMeshRange& Range = Meshes[Instance.Mesh];
 		Instance.VertexOffset = uint32(FMath::Min(VertexCount, uint64(MAX_uint32)));
 		Instance.IndexOffset = uint32(FMath::Min(IndexCount, uint64(MAX_uint32)));
 		VertexCount += uint64(Range.VertexCount) + Instance.RefinedVertexCount;
 		IndexCount += Instance.RefinedTriangleCount > 0 ? uint64(Instance.RefinedTriangleCount) * 3u : uint64(Range.IndexCount);
+	}
+	if (NumDrawnInstances >= uint32(Instances.Num()))
+	{
+		DrawnVertexCount = VertexCount;
+		DrawnIndexCount = IndexCount;
 	}
 	if (VertexCount > uint64(MAX_int32) || IndexCount > uint64(MAX_int32))
 	{
@@ -405,6 +498,8 @@ bool FGpuRoadMeshInput::Layout(FString& OutError)
 	}
 	NumVertices = uint32(VertexCount);
 	NumIndices = uint32(IndexCount);
+	NumDrawnVertices = uint32(DrawnVertexCount);
+	NumDrawnIndices = uint32(DrawnIndexCount);
 	return true;
 }
 
