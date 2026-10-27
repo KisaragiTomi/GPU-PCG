@@ -9,9 +9,13 @@
 #include "CSRoadGpuMesh.h"
 #include "CSRoadNet.h"
 #include "CSRoadNetworkFile.h"
+#include "CSRoadNetworkPreview.h"
 #include "CSRoadSplineActor.h"
 #include "CSRoadSplineNetwork.h"
 #include "Components/SplineComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "UObject/ConstructorHelpers.h"
+#include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformMisc.h"
@@ -120,7 +124,25 @@ ACSRoadNetworkActor::ACSRoadNetworkActor()
 	MarkingMesh->bVisibleInRayTracing = false;
 	MarkingMesh->bAffectDistanceFieldLighting = false;
 	MaterialFolder.Path = TEXT("/PCGPlugins/CS2Roads/Materials");
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
+	TrafficBodies = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("TrafficBodies"));
+	TrafficCabins = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("TrafficCabins"));
+	BridgePiers = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("BridgePiers"));
+	for (UInstancedStaticMeshComponent* Component : {TrafficBodies.Get(), TrafficCabins.Get(), BridgePiers.Get()})
+	{
+		Component->SetupAttachment(RootComponent);
+		Component->SetMobility(EComponentMobility::Movable);
+		Component->SetStaticMesh(Cube.Object);
+		Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Component->SetCanEverAffectNavigation(false);
+		// Generated instance transforms must never be serialized into a level.
+		Component->SetFlags(RF_Transient | RF_DuplicateTransient);
+	}
+	TrafficBodies->SetVisibility(false);
+	TrafficCabins->SetVisibility(false);
 }
+
+ACSRoadNetworkActor::~ACSRoadNetworkActor() = default;
 
 FString ACSRoadNetworkActor::ResolveAssetDirectory() const
 {
@@ -148,9 +170,12 @@ void ACSRoadNetworkActor::RequestRebuild()
 void ACSRoadNetworkActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-	if (!bRebuildRequested) return;
-	bRebuildRequested = false;
-	Rebuild();
+	if (bRebuildRequested)
+	{
+		bRebuildRequested = false;
+		Rebuild();
+	}
+	TickPreview(DeltaSeconds);
 }
 
 TArray<FString> ACSRoadNetworkActor::RoadPrefabNames(const ACSRoadNetworkActor* Network)
@@ -317,6 +342,14 @@ void ACSRoadNetworkActor::ConvertToSplines()
 void ACSRoadNetworkActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
+	const FProperty* Property = PropertyChangedEvent.MemberProperty;
+	if (Property && Property->GetMetaData(TEXT("Category")) == TEXT("CS2 Road|Traffic"))
+	{
+		// Visibility and simulation settings do not invalidate the road's GPU buffers.
+		if (PropertyChangedEvent.GetPropertyName() == GET_MEMBER_NAME_CHECKED(ACSRoadNetworkActor, bShowTraffic)) SetShowTraffic(bShowTraffic);
+		else ResetTraffic();
+		return;
+	}
 	// A slider dragged in the details panel changes a property many times a frame: spline networks
 	// build once on the next tick.
 	if (Source == ECSRoadNetworkSource::Splines) RequestRebuild();
@@ -336,6 +369,7 @@ void ACSRoadNetworkActor::PostEditMove(bool bFinished)
 void ACSRoadNetworkActor::Rebuild()
 {
 	const double StartTime = FPlatformTime::Seconds();
+	ClearPreview();
 	// What spline roads asked for until now is in this build.
 	bRebuildRequested = false;
 	FString Error;
@@ -412,7 +446,8 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	// decal setup run on the CPU from the GPU geometry.
 	const bool bMarkings = bBuildMarkings && MarkingMesh;
 	CSRoad::FGpuGeometryResult GeometryResult;
-	if (!CSRoad::RunRefineCountsBlocking(Geometry, MeshInput, OutError, bMarkings ? &GeometryResult : nullptr)) return false;
+	// Cache the lane graph even with markings/traffic hidden, so the visibility switch is instant.
+	if (!CSRoad::RunRefineCountsBlocking(Geometry, MeshInput, OutError, &GeometryResult)) return false;
 	if (MeshInput.NumUnconverged > 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %u node mesh triangles did not converge in 20 refinement passes"), *GetName(), MeshInput.NumUnconverged);
 	const double RefineMs = Lap();
 	CSRoad::FGpuDecalInput Decals;
@@ -528,6 +563,9 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	NumRoads = Graph.Roads.Num();
 	NumVertices = int32(MeshInput.NumVertices);
 	NumTriangles = int32(MeshInput.NumIndices / 3);
+	CSRoad::FRoadLanes PreviewLanes;
+	if (!bMarkings) PreviewLanes.Build(Graph, Library->Assets, GeometryResult);
+	BuildPreview(Graph, bMarkings ? Decals.Lanes : PreviewLanes, GeometryResult, Terrain);
 	if (!bDecals || bMarked) return true;
 	OutError = MarkingError;
 	return false;

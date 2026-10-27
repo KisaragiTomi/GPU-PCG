@@ -14,6 +14,22 @@
 - `bBuildMarkings`（默认开）在 `MarkingMesh` 组件里生成贴花。贴花材质同样按表面的 BaseColor 找 `M_CS2_*`，找不到的表面列在 `MissingMarkingSurfaces`。`AssetDirectory` 里没有 BaseColor 贴图的表面像 RoadLab 一样跳过。Palmsland 的贴花网格要约 690 MiB 显存，`UCSMesh` 只按空闲显存的 70% 分配；装不下时照样建出路面，`LastError` 写明贴花没建成的原因。
 - 属性含义写在 `Source/CSRoadNet/Public/CSRoadNetworkActor.h` 的声明注释里。
 
+### 车流预览与桥墩
+
+主 Actor 的 **CS2 Road → Traffic → Show Traffic** 打开后显示车流；关掉会隐藏并暂停车辆，再打开从原位置继续，不重建道路网格。`Traffic Vehicle Count`、`Traffic Speed`（km/h）、`Traffic Gap`（m）和 `Traffic Seed` 控制数量、速度上限、车距和随机种子。`Reset Traffic` 用同一种子重新布车。`Traffic In Editor` 控制编辑器视口里的动画；编辑器须开启实时刷新。关闭标线仍可显示车流，重建道路后会重新生成车道图与车辆。
+
+车辆使用现有的有向车道曲线与合法路口连接，按 30 Hz 固定步长更新。跟车检查跨越边界的前车与车尾；路口用保守的独占预约避免交叉穿车，出口堵住时在入口等待。带信号灯的节点按进入道路轮换 8 秒绿灯、2 秒清空期。普通车速还受道路 prefab 限速约束，连接段上限 8 m/s。默认车体是实例化的简易车身和车顶，可用 `Traffic Vehicle Mesh` 换成 +X 朝前的车辆网格，并指定 `Traffic Material`。
+
+这是车流可视化预览，尚未移植 CS2 的市民出行、目的地寻路、换道、公交或服务车辆。环岛连接仍受现有 `FRoadLanes` 限制，数量显示在 `Unsupported Traffic Roundabouts`；共享双向车道和专用车辆车道不会生成预览车辆。
+
+**CS2 Road → Bridge → Build Bridge Piers** 为 Elevated 且非 Tunnel 的道路生成柱身、盖梁和埋入地面的基础。`Bridge Pier Spacing`、`Bridge Pier Min Height`、`Bridge Pier Width` 使用米，`Bridge Pier Material` 可覆盖默认材质。支撑沿道路弧长布置，底部优先读取可碰撞静态场景的地面高度（`Trace Bridge Ground`），否则使用快照高度图，无高度图时使用 Actor 局部 Z=0。柱顶连接组合网格的底面；低净空段与路口端部不放柱。
+
+基础会避开下穿道路的完整宽度，并在一个跨度内尝试调整位置；无法放置的数量显示在 `Skipped Bridge Piers`。该计数也包括高度不足的候选位置。生成组件是临时数据，重建会清除旧实例。桥墩目前是可视化构件，不提供碰撞或结构承载计算。
+
+车流与桥墩的核心回归测试直接编译生产头文件：`Scripts/CS2Road/RunTrafficBridgeTests.ps1`（MSVC 14.38 / Windows SDK 10.0.22621，与本机 Rider 构建工具链一致）。编辑器验证脚本为 `Scripts/CS2Road/ValidateTrafficBridge.py`；启动方式写在文件头，结果写入 `Saved/CodexTrafficBridge/editor-validation.json`，测试关卡不保存。仅核心测试或单文件编译通过不代表编辑器验证已通过。
+
+2026-10-27 验证：Rider `Development_Editor / x64` 对应的 Editor 与 ShaderCompileWorker 目标增量构建、链接通过；核心回归通过。独立编辑器的 30 项检查通过，测试路网为 12 条边、46 条可行驶车道/连接、32 辆车、12 个桥墩、0 个跳过支撑。验证覆盖显示开关、暂停/恢复、重复种子、道路重建、标线独立性、静态地面射线、自定义车辆网格切换；4 张截图保存在同一 `Saved/CodexTrafficBridge` 目录并已检查。核心布局性能样例：6,000 条合成道路生成 18,000 个桥墩约 10 ms，不含 UE 射线和渲染开销。编辑器启动仍有其它模块原有的结构体未初始化警告，不影响本次脚本结果。
+
 ## 样条路网
 
 `Source` 为 `Splines` 时，路网来自样条，`NetworkFile` 只提供地形；不设文件就以 y = 0 为地面。`CSRoadSplineNetwork.cpp` 把样条转成快照的形式（带 id 的节点、引用节点的边），后面的流程与读文件相同。

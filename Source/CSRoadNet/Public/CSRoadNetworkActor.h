@@ -15,6 +15,9 @@ class ULevel;
 class UCSMesh;
 class UCSMeshRenderComponent;
 class UMaterialInterface;
+class UInstancedStaticMeshComponent;
+class UStaticMesh;
+struct FCSRoadNetworkPreview;
 namespace CSRoad
 {
 class FAssets;
@@ -22,6 +25,10 @@ struct FGpuDecalInput;
 struct FPooledDecalReceivers;
 struct FGpuRoadMeshInput;
 struct FSplineRoad;
+class FGraph;
+class FRoadLanes;
+struct FGpuGeometryResult;
+struct FSavedTerrain;
 }
 
 UENUM()
@@ -68,6 +75,7 @@ class CSROADNET_API ACSRoadNetworkActor : public AActor
 
 public:
 	ACSRoadNetworkActor();
+	virtual ~ACSRoadNetworkActor() override;
 
 	/** Where the roads come from. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road")
@@ -101,6 +109,89 @@ public:
 	/** Lane markings, tire tracks and crosswalks: RoadLab's decals, drawn with the M_CS2 decal materials. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road")
 	bool bBuildMarkings = true;
+
+	/** Show and animate passenger cars. Switching this off pauses the preview without rebuilding roads. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, BlueprintSetter = SetShowTraffic, Category = "CS2 Road|Traffic", meta = (DisplayName = "Show Traffic"))
+	bool bShowTraffic = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS2 Road|Traffic", meta = (ClampMin = "0", ClampMax = "4096"))
+	int32 TrafficVehicleCount = 256;
+
+	/** Upper speed limit for the preview; junction connectors also impose a turn speed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS2 Road|Traffic", meta = (ClampMin = "0", ClampMax = "198", Units = "km/h"))
+	float TrafficSpeed = 50.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS2 Road|Traffic", meta = (ClampMin = "0.5", ClampMax = "20", Units = "m"))
+	float TrafficGap = 2.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS2 Road|Traffic")
+	int32 TrafficSeed = 12345;
+
+	/** Preview signal phases for nodes marked with traffic lights. Conflict reservations always apply. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS2 Road|Traffic")
+	bool bTrafficSignals = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS2 Road|Traffic")
+	bool bTrafficInEditor = true;
+
+	/** Optional +X-forward vehicle mesh, fitted to 4.2 x 1.8 x 1.5 m. Empty uses a simple body/cabin proxy. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Traffic")
+	TObjectPtr<UStaticMesh> TrafficVehicleMesh;
+
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Traffic")
+	TObjectPtr<UMaterialInterface> TrafficMaterial;
+
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Bridge", meta = (DisplayName = "Build Bridge Piers"))
+	bool bBuildBridgePiers = true;
+
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Bridge", meta = (ClampMin = "8", ClampMax = "100", Units = "m"))
+	float BridgePierSpacing = 30.0f;
+
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Bridge", meta = (ClampMin = "1", Units = "m"))
+	float BridgePierMinHeight = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Bridge", meta = (ClampMin = "0.5", ClampMax = "5", Units = "m"))
+	float BridgePierWidth = 1.5f;
+
+	/** Optional visible-world ground trace, falling back to snapshot terrain or local Z=0. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Bridge")
+	bool bTraceBridgeGround = true;
+
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Bridge")
+	TObjectPtr<UMaterialInterface> BridgePierMaterial;
+
+	UPROPERTY(VisibleAnywhere, Category = "CS2 Road|Traffic")
+	TObjectPtr<UInstancedStaticMeshComponent> TrafficBodies;
+
+	UPROPERTY(VisibleAnywhere, Category = "CS2 Road|Traffic")
+	TObjectPtr<UInstancedStaticMeshComponent> TrafficCabins;
+
+	/** Columns, caps and footings, generated as one instanced component. */
+	UPROPERTY(VisibleAnywhere, Category = "CS2 Road|Bridge")
+	TObjectPtr<UInstancedStaticMeshComponent> BridgePiers;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 NumTrafficVehicles = 0;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 NumTrafficLanes = 0;
+
+	/** The existing lane builder does not yet connect roundabouts. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 UnsupportedTrafficRoundabouts = 0;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 NumBridgePiers = 0;
+
+	/** Candidate spans with insufficient height or no safe foundation position. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 SkippedBridgePiers = 0;
+
+	UFUNCTION(BlueprintCallable, BlueprintSetter, Category = "CS2 Road|Traffic")
+	void SetShowTraffic(bool bShow);
+
+	UFUNCTION(CallInEditor, BlueprintCallable, Category = "CS2 Road|Traffic")
+	void ResetTraffic();
 
 	/** The prefab of spline components that are not UCSRoadSplineComponents. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Splines", meta = (GetOptions = "GetRoadPrefabOptions"))
@@ -188,6 +279,11 @@ private:
 	TObjectPtr<UCSMesh> Markings;
 
 	bool bRebuildRequested = false;
+	TUniquePtr<FCSRoadNetworkPreview> Preview;
+	void BuildPreview(const CSRoad::FGraph& Graph, const CSRoad::FRoadLanes& Lanes, const CSRoad::FGpuGeometryResult& Geometry, const CSRoad::FSavedTerrain* Terrain);
+	void TickPreview(float DeltaSeconds);
+	void RenderTraffic();
+	void ClearPreview();
 
 	FString ResolveAssetDirectory() const;
 	// The spline roads this network builds, in its space (Unity metres).
