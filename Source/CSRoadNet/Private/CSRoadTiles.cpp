@@ -43,7 +43,7 @@ uint64 CSRoadTiles_NodeKey(const FGraph& Graph, int32 Node)
 }
 }
 
-FTilePlan FTileState::Plan(const FGraph& Graph, const FGpuGeometryResult& Geometry, double TileSize, uint64 Signature) const
+FTilePlan FTileState::Plan(const FGraph& Graph, const FGpuGeometryResult& Geometry, double TileSize, uint64 Signature, const TArray<FIntPoint>& Existing) const
 {
 	FTilePlan Plan;
 	Plan.Roads.SetNum(Graph.Roads.Num());
@@ -106,39 +106,40 @@ FTilePlan FTileState::Plan(const FGraph& Graph, const FGpuGeometryResult& Geomet
 		Changed.Add(Road.StartNode);
 		Changed.Add(Road.EndNode);
 	}
-	TSet<FIntPoint> Tiles;
+	TSet<FIntPoint> Fresh;
 	for (const TPair<uint64, FTileRoad>& Pair : Last)
 	{
 		if (Present.Contains(Pair.Key)) continue;
 		Changed.Add(Pair.Value.StartNode);
 		Changed.Add(Pair.Value.EndNode);
-		Tiles.Add(Pair.Value.Tile);
+		Fresh.Add(Pair.Value.Tile);
 	}
-	if (bEverything) Tiles.Append(Built);
-	for (const FTileRoad& Road : Plan.Roads) if (bEverything || Changed.Contains(Road.StartNode) || Changed.Contains(Road.EndNode)) Tiles.Add(Road.Tile);
+	if (bEverything) Fresh.Append(Existing);
+	for (const FTileRoad& Road : Plan.Roads) if (bEverything || Changed.Contains(Road.StartNode) || Changed.Contains(Road.EndNode)) Fresh.Add(Road.Tile);
 
-	// Every road of a tile to rebuild is drawn again.
-	for (const FIntPoint& Tile : Tiles) Plan.Dirty.Add(Tile);
-	Plan.Dirty.KeySort([](const FIntPoint& A, const FIntPoint& B) { return A.Y != B.Y ? A.Y < B.Y : A.X < B.X; });
-	for (int32 Road = 0; Road < Plan.Roads.Num(); Road++)
+	// Every road of a tile to rebuild is drawn again. What this edit changed goes before what earlier
+	// batches left, so a drag keeps up however much is pending.
+	for (const FIntPoint& Tile : Fresh) Plan.Dirty.Add(Tile);
+	for (const FIntPoint& Tile : Pending) Plan.Dirty.Add(Tile);
+	Plan.Dirty.KeySort([&Fresh](const FIntPoint& A, const FIntPoint& B)
 	{
-		TArray<int32>* Drawn = Plan.Dirty.Find(Plan.Roads[Road].Tile);
-		if (!Drawn) continue;
-		Drawn->Add(Road);
-		Plan.NumDirtyRoads++;
-	}
+		const bool bFreshA = Fresh.Contains(A);
+		if (bFreshA != Fresh.Contains(B)) return bFreshA;
+		return A.Y != B.Y ? A.Y < B.Y : A.X < B.X;
+	});
+	for (int32 Road = 0; Road < Plan.Roads.Num(); Road++) if (TArray<int32>* Drawn = Plan.Dirty.Find(Plan.Roads[Road].Tile)) Drawn->Add(Road);
 	return Plan;
 }
 
-void FTileState::Commit(const FTilePlan& Plan, uint64 Signature)
+void FTileState::Commit(const FTilePlan& Plan, uint64 Signature, const TArray<FIntPoint>& Written)
 {
 	Last.Reset();
-	Built.Reset();
-	for (const FTileRoad& Road : Plan.Roads)
-	{
-		Last.Add(Road.Key, Road);
-		Built.Add(Road.Tile);
-	}
+	for (const FTileRoad& Road : Plan.Roads) Last.Add(Road.Key, Road);
+	// The tiles not written keep whatever they drew before: rebuilt by a later batch even though the
+	// roads they hold now compare equal.
+	Pending.Reset();
+	for (const TPair<FIntPoint, TArray<int32>>& Pair : Plan.Dirty) Pending.Add(Pair.Key);
+	for (const FIntPoint& Tile : Written) Pending.Remove(Tile);
 	LastSignature = Signature;
 	bValid = true;
 }
@@ -146,7 +147,7 @@ void FTileState::Commit(const FTilePlan& Plan, uint64 Signature)
 void FTileState::Reset()
 {
 	Last.Reset();
-	Built.Reset();
+	Pending.Reset();
 	LastSignature = 0;
 	bValid = false;
 }

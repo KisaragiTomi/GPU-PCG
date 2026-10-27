@@ -82,6 +82,8 @@ Palmsland 转成 3,894 根样条后重建，5,667 条边与读文件时逐位一
 
 各 tile 画出的三角形合起来与整网重建逐个相同（`Tiles.Actor`）。
 
+一次重建最多写 `MaxTilesPerBatch` 个 tile（默认 16，0 为不限），批量房子的 tile 另算一份上限。其余的 tile 留到后面的帧，每帧一批，这次编辑弄脏的 tile 排在之前积压的前面，所以拖动时不必等积压写完。积压的 tile 不靠比对输出判断，写完之前一直算脏：它们的路已经记进上次的结果，下次比对会显示没有变化，但它们画的还是旧的。`PendingTiles` 是还没写的 tile 数。分批写完与一次写完逐个相同（`Tiles.Batches`）。
+
 每个 tile 写网格时要与渲染线程同步约 6 次，约 20 ms，所以脏 tile 多时比整网重建还慢。`L_CityDemo` 的 79 条路分在 8 个 128 m 的 tile 里：整网暖重建 58 ms，分 tile 从零建 225 ms，没有改动时 24 ms。斜穿全区的大路挪一个点会弄脏全部 8 个 tile，耗时 194 ms；只挪特殊建筑时，路面不重写，25–30 ms。
 
 Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路）后用 1024 m 的 tile，共 80 个 tile，另有 84 个 tile 共 36,591 栋批量房子。测量时 GPU 同时被别的编辑器占着，下面的数字只看相对快慢：
@@ -94,6 +96,8 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 | 挪一个样条点 5 m | 0.66–0.75 s | 重写 1 个路面 tile（89 条路）和 1 个房子 tile。批量房子布局约 250 ms，整网 GPU 几何与车道图约 125 ms，细分计数约 90 ms，tile 网格约 100 ms |
 
 一次重建的所有 tile 都在同一帧里写。D3D12 的上传堆到帧末才回收，RDG 池里的缓冲要闲置 30 帧才释放，而组合网格又由每个用到它的 tile 各传一份，所以从零分 tile 建大路网时，上传内存会一路涨。10-27 用 256 m 的 tile 从零建 Palmsland 时，D3D12 报显存不足而崩溃，崩在上传堆开新池；当时别的进程占着 GPU，物理内存只剩约 1 GB。同一天显存宽裕一些时，1024 m 的 tile 建成了。
+
+加了每批上限后，用完整编辑器逐帧重测 256 m 的 tile（`LocalUpdateTiming.py`）：771 个路面 tile 和约 840 个房子 tile，每帧各写 16 个，53 帧写完，没有崩溃，但编辑器的提交内存仍从约 7 GB 涨到 16 GB。原因是每个 tile 写网格时，都在自己的图里把整网的 GPU 几何重算一遍、输入重新上传一遍（`WriteMeshes` 里的 `AddGeometryPasses`），而上传堆滞后 20 帧才回收。所以每帧只写一批，也会积下约 20 批的整网几何上传。Palmsland 上每个 tile 约 100 ms，也主要花在这里。同一轮里挪一个点 0.50–0.57 s，重写 2 个路面 tile 和 1 个房子 tile；当时 GPU 仍被别的编辑器占着，整网暖重建慢到 6 s。
 
 ## 大路与小路
 
@@ -194,10 +198,11 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 | `Splines.Actor` | actor 放在离原点几公里处并转 30°，建一次，平移后再建一次：两根样条建成 4 条路；再用代码挪一个样条点，下一次 `Tick` 自己重建 | 两个网格组件保持单位变换；路面包围盒含 4 个路端，中心离路口 < 5 m | 通过 |
 | `Splines.Alleys` | 小路与大路：横穿、斜穿、顺着压、立交 | 裁切段数，十字或 T 形接法，裁后的小路不进大路的覆盖范围 | 通过 |
 | `Tiles.Actor` | 3 条东西向、4 条南北向的路，整网建与分 tile 建；不改动重建；挪一个点；删一条路 | 路面、标线三角形与整网重建逐个相同；不改动时不重写 tile；改动只重写部分 tile，其余网格代数不变 | 通过 |
+| `Tiles.Batches` | 同一路网每批 2 个 tile 逐帧写完；改 tile 尺寸弄脏全部 tile，写了一批后再挪一个点 | 每批不超过 2 个 tile；写完后路面、标线三角形与整网重建逐个相同 | 8 个 tile 分 4 批，通过 |
 | `City.Alleys` | 区域里两块预留位，一块横跨中部 | 小路不进预留位外扩 `Clearance` 的范围、不出区域；同输入同结果；去掉预留位后会穿过它们；换种子结果不同 | 通过 |
 | `City.AlleyJunctions` | `L_CityDemo` 区域的小路建成路网 | 没有断头 | 40 个节点、57 条边，0 个断头 |
 | `City.Lots` | 两条相交的街和一块预留位；在 150 m 外加一条街，再去掉 | 地块离路边至少半个退让、不压预留位、互不重叠；加街后 50 m 外的地块身份和形状不变，新地块只出现在新街旁；去掉后复原 | 通过 |
-| `City.Actor` | 特殊建筑、小路区域、批量房子和分 tile 路网；不改动重建；在区域一角加大路；挪特殊建筑；关掉批量房子 | 小路和批量房子都不进预留位；不改动时不重写房子 tile；加大路只重写附近的房子 tile | 100 栋房子 8 个 tile，加大路后重写 3 个、5 个不动 |
+| `City.Actor` | 特殊建筑、小路区域、批量房子和分 tile 路网；不改动重建；在区域一角加大路；挪特殊建筑；换种子后每批 2 个房子 tile 逐帧写完；关掉批量房子 | 小路和批量房子都不进预留位；不改动时不重写房子 tile；加大路只重写附近的房子 tile；分批写完与一次写完的房子顶点相同 | 100 栋房子 8 个 tile，加大路后重写 3 个、5 个不动 |
 
 `Refine.Palmsland` 有 21.6% 的实例三角形数不同，这在噪声范围内：扰动版 C# 自己就有 27% 的实例不同。`Decals.Scenarios` 里 `elevated-cross` 的裁剪三角形只报告不计入预算（1,504 个里 615 个未配对），原因是它的几何本身处在平局上，见下文。
 
@@ -217,7 +222,7 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 - `Scripts/CS2Road/SplineNetworkShots.py`：在 `L_Palmsland` 离城 900 m 的空地上用样条画一个小路网（十字、T 形、立交、3 m 短段），路网只借 Palmsland 快照的地形，从 5 个机位拍到 `Saved/CS2RoadSplineShots`。运行方式同上。
 - `Scripts/CS2Road/MakeCityDemo.py`：生成示例关卡 `L_CityDemo`，见[城市布局](#城市布局)。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖。
 - `Scripts/CS2Road/CityDemoShots.py`：打开 `L_CityDemo`，给整网、分 tile、挪大路、挪特殊建筑计时，再从 4 个机位拍到 `Saved/CS2CityShots`。用完整编辑器运行，不存盘。
-- `Scripts/CS2Road/LocalUpdateTiming.py`：把 Palmsland 转成样条，开批量房子，给整网和分 tile 重建计时，结果写到 `Saved/CS2LocalUpdateTiming_<tile>.json`。`CS2ROAD_TILE` 设 tile 尺寸（米，默认 1024）。用无头编辑器的 `-ExecutePythonScript` 运行，不存盘。
+- `Scripts/CS2Road/LocalUpdateTiming.py`：把 Palmsland 转成样条，开批量房子，给整网和分 tile 重建计时；从零建时每帧一批，直到没有积压。结果写到 `Saved/CS2LocalUpdateTiming_<tile>_<batch>.json`。`CS2ROAD_TILE` 设 tile 尺寸（米，默认 256），`CS2ROAD_BATCH` 设每批 tile 数（默认 16）。要让帧在批与批之间过去，所以用完整编辑器的 `-ExecCmds="py <脚本>"` 运行，不存盘。
 
 ## 重新生成
 

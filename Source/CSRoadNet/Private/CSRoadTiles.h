@@ -9,6 +9,9 @@
 // tile holding a road at such a node is rebuilt. A road's node meshes, seams and connectors depend
 // on the roads at its nodes, so those are the tiles whose output can differ; comparing the GPU
 // results bit for bit catches however far a change reached through the geometry jobs.
+//
+// A build may write only some of the tiles to rebuild (a batch): the others stay pending, rebuilt
+// by a later build whatever its comparison finds, since the roads they hold are already committed.
 #pragma once
 
 #include "CSRoadGpuMesh.h"
@@ -33,10 +36,9 @@ struct FTilePlan
 	// Per FGraph::Roads index.
 	TArray<FTileRoad> Roads;
 	// The tiles to rebuild, with the roads drawn in each (FGraph::Roads indices, in road order); an
-	// empty list removes the tile. Sorted by row, then column.
+	// empty list removes the tile. The tiles this plan's comparison found come first, then those left
+	// pending by earlier batches; each part by row, then column.
 	TMap<FIntPoint, TArray<int32>> Dirty;
-	// Roads drawn in the tiles to rebuild.
-	int32 NumDirtyRoads = 0;
 };
 
 class FTileState
@@ -46,16 +48,19 @@ public:
 	FCompositionMeshCache Compositions;
 
 	// Signature: whatever else the meshes are made from (tile size, transform, materials, settings);
-	// when it differs from the last build's, every tile is rebuilt.
-	FTilePlan Plan(const FGraph& Graph, const FGpuGeometryResult& Geometry, double TileSize, uint64 Signature) const;
-	// Every tile of the plan was rebuilt.
-	void Commit(const FTilePlan& Plan, uint64 Signature);
+	// when it differs from the last build's, every tile is rebuilt, Existing (the tiles drawn now)
+	// included.
+	FTilePlan Plan(const FGraph& Graph, const FGpuGeometryResult& Geometry, double TileSize, uint64 Signature, const TArray<FIntPoint>& Existing) const;
+	// The plan's roads are the network as built; of its tiles, Written were rebuilt and the others
+	// stay pending.
+	void Commit(const FTilePlan& Plan, uint64 Signature, const TArray<FIntPoint>& Written);
 	// The next plan rebuilds everything.
 	void Reset();
+	int32 NumPending() const { return Pending.Num(); }
 
 private:
 	TMap<uint64, FTileRoad> Last;
-	TSet<FIntPoint> Built;
+	TSet<FIntPoint> Pending;
 	uint64 LastSignature = 0;
 	bool bValid = false;
 };

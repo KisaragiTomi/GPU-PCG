@@ -92,6 +92,26 @@ ACSRoadSplineActor* CSRoadTileTests_Road(UWorld* World, ACSRoadNetworkActor* Net
 	Road->Spline->SetSplinePoints(Points, ESplineCoordinateSpace::Local);
 	return Road;
 }
+
+// Three streets east to west crossed by four north to south, one of them a medium road (cm).
+TArray<ACSRoadSplineActor*> CSRoadTileTests_Grid(UWorld* World, ACSRoadNetworkActor* Network)
+{
+	TArray<ACSRoadSplineActor*> Roads;
+	for (const double Y : { -9000.0, 0.0, 9000.0 }) Roads.Add(CSRoadTileTests_Road(World, Network, { FVector(-21000.0, Y, 0.0), FVector(21000.0, Y, 0.0) }, TEXT("Small Road")));
+	for (const double X : { -18000.0, -6000.0, 6000.0, 18000.0 }) Roads.Add(CSRoadTileTests_Road(World, Network, { FVector(X, -16000.0, 0.0), FVector(X, 0.0, 0.0), FVector(X + 1500.0, 16000.0, 0.0) }, X == 6000.0 ? TEXT("Medium Road") : TEXT("Small Road")));
+	return Roads;
+}
+
+// The tiles draw exactly the triangles of the whole build, roads and decals alike.
+void CSRoadTileTests_Compare(FAutomationTestBase& Test, const FString& Case, const FCSRoadTileTests_Output& Tiled, const FCSRoadTileTests_Output& Whole)
+{
+	Test.TestTrue(Case + TEXT(": the whole build has roads"), Whole.RoadTriangles > 0);
+	Test.TestTrue(Case + TEXT(": the whole build has decals"), Whole.MarkingTriangles > 0);
+	Test.TestEqual(Case + TEXT(": road triangles"), Tiled.RoadTriangles, Whole.RoadTriangles);
+	Test.TestEqual(Case + TEXT(": decal triangles"), Tiled.MarkingTriangles, Whole.MarkingTriangles);
+	Test.TestEqual(Case + TEXT(": road triangles that differ"), CSRoadTileTests_Differences(Test, Case + TEXT(" roads"), Tiled.Roads, Whole.Roads), 0);
+	Test.TestEqual(Case + TEXT(": decal triangles that differ"), CSRoadTileTests_Differences(Test, Case + TEXT(" decals"), Tiled.Markings, Whole.Markings), 0);
+}
 }
 
 // A network of crossing streets drawn whole and in tiles: the tiles together draw exactly the
@@ -115,13 +135,9 @@ bool FCSRoadTilesActorTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("network actor"), Network)) return false;
 	Network->Source = ECSRoadNetworkSource::Splines;
 	Network->TileSize = 128.0f;
-	// Three streets east to west crossed by four north to south, one of them a medium road (cm).
-	TArray<ACSRoadSplineActor*> Roads;
-	for (const double Y : { -9000.0, 0.0, 9000.0 }) Roads.Add(CSRoadTileTests_Road(World, Network, { FVector(-21000.0, Y, 0.0), FVector(21000.0, Y, 0.0) }, TEXT("Small Road")));
-	for (const double X : { -18000.0, -6000.0, 6000.0, 18000.0 })
-	{
-		Roads.Add(CSRoadTileTests_Road(World, Network, { FVector(X, -16000.0, 0.0), FVector(X, 0.0, 0.0), FVector(X + 1500.0, 16000.0, 0.0) }, X == 6000.0 ? TEXT("Medium Road") : TEXT("Small Road")));
-	}
+	// Every tile in one rebuild (Tiles.Batches covers the batches).
+	Network->MaxTilesPerBatch = 0;
+	const TArray<ACSRoadSplineActor*> Roads = CSRoadTileTests_Grid(World, Network);
 
 	auto Build = [&](bool bTiles)
 	{
@@ -130,15 +146,7 @@ bool FCSRoadTilesActorTest::RunTest(const FString& Parameters)
 		TestEqual(FString::Printf(TEXT("%s build: error"), bTiles ? TEXT("tiled") : TEXT("whole")), Network->LastError, FString());
 		return CSRoadTileTests_Read(Network);
 	};
-	auto Compare = [&](const FString& Case, const FCSRoadTileTests_Output& Tiled, const FCSRoadTileTests_Output& Whole)
-	{
-		TestTrue(Case + TEXT(": the whole build has roads"), Whole.RoadTriangles > 0);
-		TestTrue(Case + TEXT(": the whole build has decals"), Whole.MarkingTriangles > 0);
-		TestEqual(Case + TEXT(": road triangles"), Tiled.RoadTriangles, Whole.RoadTriangles);
-		TestEqual(Case + TEXT(": decal triangles"), Tiled.MarkingTriangles, Whole.MarkingTriangles);
-		TestEqual(Case + TEXT(": road triangles that differ"), CSRoadTileTests_Differences(*this, Case + TEXT(" roads"), Tiled.Roads, Whole.Roads), 0);
-		TestEqual(Case + TEXT(": decal triangles that differ"), CSRoadTileTests_Differences(*this, Case + TEXT(" decals"), Tiled.Markings, Whole.Markings), 0);
-	};
+	auto Compare = [this](const FString& Case, const FCSRoadTileTests_Output& Tiled, const FCSRoadTileTests_Output& Whole) { CSRoadTileTests_Compare(*this, Case, Tiled, Whole); };
 	auto Generations = [&]()
 	{
 		TMap<FString, uint32> Out;
@@ -188,6 +196,74 @@ bool FCSRoadTilesActorTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("removed: not every tile rebuilt"), Network->TilesRebuilt < Network->NumTiles);
 	const FCSRoadTileTests_Output Removed = CSRoadTileTests_Read(Network);
 	Compare(TEXT("removed"), Removed, Build(false));
+	return true;
+}
+
+// The same network two tiles a batch: a rebuild writes two tiles and leaves the rest pending, the
+// next ticks write them, and then the tiles draw what a whole build draws. A new tile size dirties
+// every tile; a road moved one batch into that backlog still comes out as a whole build draws it.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadTilesBatchesTest, "PCGPlugins.CSRoadNet.Tiles.Batches",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSRoadTilesBatchesTest::RunTest(const FString& Parameters)
+{
+	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
+	if (!Lib.bLoaded)
+	{
+		AddWarning(Lib.Error + TEXT(" (skipped)"));
+		return true;
+	}
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("editor world"), World)) return false;
+	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>(FVector(-30000.0, 12000.0, 0.0), FRotator(0.0, -20.0, 0.0));
+	if (!TestNotNull(TEXT("network actor"), Network)) return false;
+	Network->Source = ECSRoadNetworkSource::Splines;
+	Network->TileSize = 128.0f;
+	Network->MaxTilesPerBatch = 2;
+	const TArray<ACSRoadSplineActor*> Roads = CSRoadTileTests_Grid(World, Network);
+
+	auto Whole = [&]()
+	{
+		Network->bLocalUpdate = false;
+		Network->Rebuild();
+		TestEqual(TEXT("whole build: error"), Network->LastError, FString());
+		return CSRoadTileTests_Read(Network);
+	};
+	// Ticks until nothing is pending, as the editor does; returns the number of batches.
+	auto Finish = [&](const FString& Case)
+	{
+		int32 Batches = 1;
+		int32 Largest = Network->TilesRebuilt;
+		for (; Network->PendingTiles > 0 && Batches < 100; Batches++)
+		{
+			Network->Tick(0.0f);
+			Largest = FMath::Max(Largest, Network->TilesRebuilt);
+		}
+		TestEqual(Case + TEXT(": error"), Network->LastError, FString());
+		TestEqual(Case + TEXT(": tiles left pending"), Network->PendingTiles, 0);
+		TestTrue(Case + TEXT(": two tiles a batch at most"), Largest <= 2);
+		return Batches;
+	};
+
+	const FCSRoadTileTests_Output Reference = Whole();
+	Network->bLocalUpdate = true;
+	Network->Rebuild();
+	TestEqual(TEXT("first batch: tiles written"), Network->TilesRebuilt, 2);
+	TestTrue(TEXT("first batch: tiles left pending"), Network->PendingTiles > 0);
+	const int32 Batches = Finish(TEXT("placed"));
+	TestTrue(TEXT("placed: several batches"), Batches >= 3);
+	AddInfo(FString::Printf(TEXT("%d tiles in %d batches"), Network->NumTiles, Batches));
+	CSRoadTileTests_Compare(*this, TEXT("placed"), CSRoadTileTests_Read(Network), Reference);
+
+	// A new tile size: the old tiles go and the new ones come, a batch at a time; one batch in, the
+	// easternmost street's north end moves.
+	Network->TileSize = 96.0f;
+	Network->Rebuild();
+	TestTrue(TEXT("resized: tiles left pending"), Network->PendingTiles > 0);
+	Roads.Last()->Spline->SetLocationAtSplinePoint(2, FVector(18000.0 + 4000.0, 15000.0, 0.0), ESplineCoordinateSpace::Local);
+	Finish(TEXT("resized and edited"));
+	const FCSRoadTileTests_Output Edited = CSRoadTileTests_Read(Network);
+	CSRoadTileTests_Compare(*this, TEXT("resized and edited"), Edited, Whole());
 	return true;
 }
 

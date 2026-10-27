@@ -202,6 +202,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Local Update", meta = (ClampMin = "16", Units = "m", EditCondition = "bLocalUpdate"))
 	float TileSize = 256.0f;
 
+	/** Road tiles, and batch building tiles, a rebuild writes at most (0: no limit). The rest wait for the next ticks, a
+	 *  batch a tick, the tiles the latest edit changed first. Everything a rebuild writes goes up in one frame, and the
+	 *  upload memory and pooled buffers it takes come back only after the frame: the limit bounds them. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Local Update", meta = (ClampMin = "0"))
+	int32 MaxTilesPerBatch = 16;
+
 	/** Tiles with roads. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumTiles = 0;
@@ -209,6 +215,10 @@ public:
 	/** Tiles the last rebuild wrote or removed. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 TilesRebuilt = 0;
+
+	/** Road and building tiles left for the next batches. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 PendingTiles = 0;
 
 	/** Roads drawn in the tiles the last rebuild wrote. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
@@ -461,6 +471,9 @@ private:
 	// As Tiles, by the same (column, row).
 	UPROPERTY(Transient, NonTransactional)
 	TMap<FIntPoint, FCSCityBuildingTile> BuildingTiles;
+
+	// Building tiles whose buildings changed but were left for a later batch.
+	int32 PendingBuildingTiles = 0;
 
 	// The batch buildings along the roads as built (Roads, the network's space). The plots face the
 	// segments of Splines, or building from a snapshot the roads themselves.

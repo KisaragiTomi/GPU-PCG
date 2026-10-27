@@ -394,6 +394,9 @@ void ACSRoadNetworkActor::Rebuild()
 		LastError = Error;
 		UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %s"), *GetName(), *Error);
 	}
+	PendingTiles = (TileState ? TileState->NumPending() : 0) + PendingBuildingTiles;
+	// The tiles past the batch go on the next ticks, until none are left or a build fails.
+	if (PendingTiles > 0 && LastError.IsEmpty()) bRebuildRequested = true;
 	BuildMilliseconds = float((FPlatformTime::Seconds() - StartTime) * 1000.0);
 }
 
@@ -545,8 +548,10 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 	const double GeometryMs = Lap();
 
 	const uint64 Signature = TileSignature(Graph.bLeftHandTraffic);
-	const CSRoad::FTilePlan Plan = TileState->Plan(Graph, GeometryResult, double(TileSize), Signature);
-	// What each tile writes; every refined instance among them is counted in one graph.
+	TArray<FIntPoint> Existing;
+	Tiles.GetKeys(Existing);
+	const CSRoad::FTilePlan Plan = TileState->Plan(Graph, GeometryResult, double(TileSize), Signature, Existing);
+	// What each tile of the batch writes; every refined instance among them is counted in one graph.
 	TArray<int32> RoadOfEntity;
 	RoadOfEntity.Init(INDEX_NONE, Graph.NumEntities());
 	for (int32 Road = 0; Road < Graph.Roads.Num(); Road++) RoadOfEntity[Graph.Roads[Road].Entity] = Road;
@@ -558,10 +563,16 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 		TArray<CSRoad::FGpuInstanceRef> Context;
 	};
 	TArray<FWork> Work;
+	TArray<FIntPoint> Written;
+	int32 WrittenRoads = 0;
 	TArray<CSRoad::FGpuInstanceRef> All;
 	TSet<int32> Listed;
 	for (const TPair<FIntPoint, TArray<int32>>& Pair : Plan.Dirty)
 	{
+		// One batch; the tiles after it stay pending for the next ticks.
+		if (MaxTilesPerBatch > 0 && Work.Num() >= MaxTilesPerBatch) break;
+		Written.Add(Pair.Key);
+		WrittenRoads += Pair.Value.Num();
 		FWork& Item = Work.AddDefaulted_GetRef();
 		Item.Key = Pair.Key;
 		Item.Roads = &Pair.Value;
@@ -628,13 +639,13 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 		Tile.MarkingTriangles = Targets.MarkingTriangles;
 		if (MarkingError.IsEmpty()) MarkingError = Targets.MarkingError;
 	}
-	TileState->Commit(Plan, Signature);
+	TileState->Commit(Plan, Signature, Written);
 	const double TileMs = Lap();
 
 	NumRoads = Graph.Roads.Num();
 	NumTiles = Tiles.Num();
 	TilesRebuilt = Work.Num();
-	RoadsRebuilt = Plan.NumDirtyRoads;
+	RoadsRebuilt = WrittenRoads;
 	NumVertices = 0;
 	NumTriangles = 0;
 	NumMarkingTriangles = 0;
@@ -644,8 +655,8 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 		NumTriangles += Pair.Value.Triangles;
 		NumMarkingTriangles += Pair.Value.MarkingTriangles;
 	}
-	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads in %d tiles, %d tiles (%d roads) rebuilt; geometry and lanes %.0f ms, refinement counts %.0f ms, tile meshes %.0f ms"),
-		*GetName(), NumRoads, NumTiles, TilesRebuilt, RoadsRebuilt, GeometryMs, CountMs, TileMs);
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads in %d tiles, %d tiles (%d roads) rebuilt, %d pending; geometry and lanes %.0f ms, refinement counts %.0f ms, tile meshes %.0f ms"),
+		*GetName(), NumRoads, NumTiles, TilesRebuilt, RoadsRebuilt, TileState->NumPending(), GeometryMs, CountMs, TileMs);
 	BuildPreview(Graph, Lanes, GeometryResult, Terrain);
 	if (MarkingError.IsEmpty()) return true;
 	OutError = MarkingError;
@@ -1020,8 +1031,12 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		const FVector Local = NetworkToWorld.InverseTransformPosition(FVector(Lot.Centre, Lot.Base));
 		ByTile.FindOrAdd(FIntPoint(FMath::FloorToInt32(Local.X / TileCm), FMath::FloorToInt32(-Local.Y / TileCm))).Add(&Lot);
 	}
+	// Tiles in row order, a batch of them rewritten at most: the others keep their old buildings, and
+	// hash, until a later tick.
+	ByTile.KeySort([](const FIntPoint& A, const FIntPoint& B) { return A.Y != B.Y ? A.Y < B.Y : A.X < B.X; });
 	UMaterialInterface* Surface = BuildingMaterial ? BuildingMaterial.Get() : ACSCityBuildingActor::DefaultMaterial();
 	int32 Rebuilt = 0;
+	PendingBuildingTiles = 0;
 	for (TPair<FIntPoint, TArray<const CSCity::FLot*>>& Pair : ByTile)
 	{
 		TArray<const CSCity::FLot*>& TileLots = Pair.Value;
@@ -1037,8 +1052,14 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 			Hash.Update(Lot->Corners.GetData(), Lot->Corners.Num() * sizeof(FVector2D));
 		}
 		const uint64 Value = Hash.Finalize().Hash;
+		const FCSCityBuildingTile* Known = BuildingTiles.Find(Pair.Key);
+		if (Known && Known->Component && Known->Mesh && Known->Hash == Value) continue;
+		if (MaxTilesPerBatch > 0 && Rebuilt >= MaxTilesPerBatch)
+		{
+			PendingBuildingTiles++;
+			continue;
+		}
 		FCSCityBuildingTile& Tile = BuildingTiles.FindOrAdd(Pair.Key);
-		if (Tile.Component && Tile.Mesh && Tile.Hash == Value) continue;
 		if (!Tile.Component)
 		{
 			// As the road tiles: made at build time, never saved or copied.
@@ -1070,8 +1091,8 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	}
 	NumBuildings = Plots.Num();
 	BuildingTilesRebuilt = Rebuilt + Gone.Num();
-	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d batch buildings in %d tiles around %d reserved plots, %d tiles rebuilt; %.0f ms"),
-		*GetName(), NumBuildings, BuildingTiles.Num(), Reserved.Num(), BuildingTilesRebuilt, (FPlatformTime::Seconds() - StartTime) * 1000.0);
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d batch buildings in %d tiles around %d reserved plots, %d tiles rebuilt, %d pending; %.0f ms"),
+		*GetName(), NumBuildings, BuildingTiles.Num(), Reserved.Num(), BuildingTilesRebuilt, PendingBuildingTiles, (FPlatformTime::Seconds() - StartTime) * 1000.0);
 }
 
 void ACSRoadNetworkActor::ClearBuildingTiles()
@@ -1080,4 +1101,5 @@ void ACSRoadNetworkActor::ClearBuildingTiles()
 	BuildingTiles.Reset();
 	NumBuildings = 0;
 	BuildingTilesRebuilt = 0;
+	PendingBuildingTiles = 0;
 }

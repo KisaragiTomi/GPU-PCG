@@ -266,6 +266,8 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	Network->bLocalUpdate = true;
 	Network->TileSize = 128.0f;
 	Network->bBatchBuildings = true;
+	// Every tile in one rebuild: the counts below are per rebuild.
+	Network->MaxTilesPerBatch = 0;
 
 	ACSCityBuildingActor* Special = World->SpawnActor<ACSCityBuildingActor>(FVector(-3000.0, 2000.0, 0.0), FRotator(0.0, 20.0, 0.0));
 	ACSCityAlleyRegion* Region = World->SpawnActor<ACSCityAlleyRegion>();
@@ -329,6 +331,28 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("moved: error"), Network->LastError, FString());
 	TestTrue(TEXT("moved: some building tiles rebuilt"), Network->BuildingTilesRebuilt > 0);
 	TestEqual(TEXT("moved: batch buildings in the special building's plot"), InPlot(), 0);
+
+	// Two building tiles a batch: a new seed changes every building, the next ticks write the rest,
+	// and they end as one rebuild with no limit draws them.
+	auto Sorted = [&]()
+	{
+		TArray<FVector3f> Vertices = CSCityTests_BuildingVertices(Network);
+		Vertices.Sort([](const FVector3f& A, const FVector3f& B) { return A.X != B.X ? A.X < B.X : A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z; });
+		return Vertices;
+	};
+	Network->MaxTilesPerBatch = 2;
+	Network->Lots.Seed = 7;
+	Network->Rebuild();
+	TestTrue(TEXT("batched: building tiles left pending"), Network->PendingTiles > 0);
+	for (int32 Tick = 0; Tick < 50 && Network->PendingTiles > 0; Tick++) Network->Tick(0.0f);
+	TestEqual(TEXT("batched: tiles left pending"), Network->PendingTiles, 0);
+	const TArray<FVector3f> Batched = Sorted();
+	Network->MaxTilesPerBatch = 0;
+	Network->bBatchBuildings = false;
+	Network->Rebuild();
+	Network->bBatchBuildings = true;
+	Network->Rebuild();
+	TestTrue(TEXT("batched: the same buildings as one rebuild"), Batched.Num() > 0 && Batched == Sorted());
 
 	// Batch buildings switched off: their tiles go.
 	Network->bBatchBuildings = false;

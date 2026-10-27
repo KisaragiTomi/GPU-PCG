@@ -1,18 +1,18 @@
 # -*- coding: utf-8 -*-
-"""Times the local update (bLocalUpdate) on Palmsland converted to spline roads.
+"""Times the local update (bLocalUpdate) on Palmsland converted to spline roads, a batch a frame.
 
-  UnrealEditor-Cmd.exe <project> -ExecutePythonScript=<this file> -unattended -RenderOffscreen
+  UnrealEditor.exe <project> -ExecCmds="py <this file>"
 
-Spawns a network in the startup level (nothing is saved), converts the Palmsland snapshot to spline
-roads (ConvertToSplines) and times warm rebuilds: whole; in tiles with batch buildings from scratch;
-with nothing changed; and after moving one spline point near the middle of the network 5 m and back,
-three times. CS2ROAD_NETWORK overrides the snapshot, CS2ROAD_TILE the tile size in metres (1024).
+Runs in the full editor so that frames go by between batches, as when editing: the upload memory
+and pooled buffers a batch takes come back only after its frame. Spawns a network in the startup
+level (nothing is saved), converts the Palmsland snapshot to spline roads (ConvertToSplines) and
+times warm rebuilds: whole; in tiles with batch buildings from scratch, one rebuild (a batch of
+MaxTilesPerBatch tiles) per frame until nothing is pending; with nothing changed; and after moving
+one spline point near the middle of the network 5 m and back, three times. The network's own tick
+is off, so a frame holds exactly one batch. CS2ROAD_NETWORK overrides the snapshot, CS2ROAD_TILE the
+tile size in metres (256), CS2ROAD_BATCH the tiles per batch (16).
 
-Building every tile in one call holds each tile's uploads and RDG buffers until the frame ends, and
-the composition meshes are uploaded once per tile using them: with small tiles on a crowded GPU the
-first tiled build can run out of video memory.
-
-Output: CS2LOCALTIMING log lines and Saved/CS2LocalUpdateTiming_<tile>.json.
+Output: CS2LOCALTIMING log lines and Saved/CS2LocalUpdateTiming_<tile>_<batch>.json.
 """
 import json
 import os
@@ -20,47 +20,99 @@ import os
 import unreal
 
 NETWORK = os.environ.get("CS2ROAD_NETWORK", r"D:/MyProject/CitiesSkylines-Road2-C#/Artifacts/public-saves/palmsland-3/network.json")
-TILE = float(os.environ.get("CS2ROAD_TILE", "1024"))
-OUT = os.path.join(unreal.Paths.project_saved_dir(), "CS2LocalUpdateTiming_{:.0f}.json".format(TILE))
+TILE = float(os.environ.get("CS2ROAD_TILE", "256"))
+BATCH = int(os.environ.get("CS2ROAD_BATCH", "16"))
+OUT = os.path.join(unreal.Paths.project_saved_dir(), "CS2LocalUpdateTiming_{:.0f}_{}.json".format(TILE, BATCH))
 NEVER = unreal.PropertyAccessChangeNotifyMode.NEVER
+KEYS = ("build_milliseconds", "num_tiles", "tiles_rebuilt", "roads_rebuilt", "num_buildings", "building_tiles_rebuilt", "pending_tiles", "last_error")
 
 ACTORS = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-network = ACTORS.spawn_actor_from_class(unreal.load_class(None, "/Script/CSRoadNet.CSRoadNetworkActor"), unreal.Vector(0.0, 0.0, 0.0))
-network.set_editor_property("network_file", unreal.FilePath(NETWORK), notify_mode=NEVER)
-network.set_editor_property("source", unreal.CSRoadNetworkSource.NETWORK_FILE, notify_mode=NEVER)
-network.convert_to_splines()
-results = {"network": NETWORK, "tile_size": TILE, "splines": network.get_editor_property("num_splines"), "roads": network.get_editor_property("num_roads")}
+results = {"network": NETWORK, "tile_size": TILE, "max_tiles_per_batch": BATCH}
+STATE = {"handle": None, "step": 0, "batches": [], "edit": None}
+
+
+def stats():
+    return {k: network.get_editor_property(k) for k in KEYS}
 
 
 def timed(label):
     network.rebuild()
-    keys = ("build_milliseconds", "num_tiles", "tiles_rebuilt", "roads_rebuilt", "num_buildings", "building_tiles_rebuilt", "last_error")
-    result = {k: network.get_editor_property(k) for k in keys}
+    result = stats()
     unreal.log("CS2LOCALTIMING {} {}".format(label, json.dumps(result)))
     results[label] = result
+    return result
 
 
-timed("whole (warming up)")
-timed("whole")
-network.set_editor_property("local_update", True, notify_mode=NEVER)
-network.set_editor_property("tile_size", TILE, notify_mode=NEVER)
-network.set_editor_property("batch_buildings", True, notify_mode=NEVER)
-timed("tiles from scratch")
-timed("tiles unchanged")
+def setup():
+    global network
+    network = ACTORS.spawn_actor_from_class(unreal.load_class(None, "/Script/CSRoadNet.CSRoadNetworkActor"), unreal.Vector(0.0, 0.0, 0.0))
+    network.set_actor_tick_enabled(False)
+    network.set_editor_property("network_file", unreal.FilePath(NETWORK), notify_mode=NEVER)
+    network.set_editor_property("source", unreal.CSRoadNetworkSource.NETWORK_FILE, notify_mode=NEVER)
+    network.convert_to_splines()
+    results["splines"] = network.get_editor_property("num_splines")
+    results["roads"] = network.get_editor_property("num_roads")
+    timed("whole (warming up)")
+    timed("whole")
+    network.set_editor_property("local_update", True, notify_mode=NEVER)
+    network.set_editor_property("tile_size", TILE, notify_mode=NEVER)
+    network.set_editor_property("max_tiles_per_batch", BATCH, notify_mode=NEVER)
+    network.set_editor_property("batch_buildings", True, notify_mode=NEVER)
 
-# The spline road whose first point is nearest the middle of all of them.
-roads = [a for a in ACTORS.get_all_level_actors() if a.get_class().get_name() == "CSRoadSplineActor"]
-firsts = [r.get_editor_property("spline").get_location_at_spline_point(0, unreal.SplineCoordinateSpace.WORLD) for r in roads]
-middle = unreal.Vector(sum(p.x for p in firsts) / len(firsts), sum(p.y for p in firsts) / len(firsts), 0.0)
-road = min(zip(roads, firsts), key=lambda pair: (pair[1].x - middle.x) ** 2 + (pair[1].y - middle.y) ** 2)[0]
-spline = road.get_editor_property("spline")
-results["edited"] = road.get_actor_label()
-for round_index in range(3):
-    for dx in (500.0, -500.0):
+
+def edit_target():
+    """The spline road whose first point is nearest the middle of all of them."""
+    roads = [a for a in ACTORS.get_all_level_actors() if a.get_class().get_name() == "CSRoadSplineActor"]
+    firsts = [r.get_editor_property("spline").get_location_at_spline_point(0, unreal.SplineCoordinateSpace.WORLD) for r in roads]
+    middle = unreal.Vector(sum(p.x for p in firsts) / len(firsts), sum(p.y for p in firsts) / len(firsts), 0.0)
+    return min(zip(roads, firsts), key=lambda pair: (pair[1].x - middle.x) ** 2 + (pair[1].y - middle.y) ** 2)[0]
+
+
+def finish():
+    unreal.unregister_slate_post_tick_callback(STATE["handle"])
+    with open(OUT, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    unreal.log("CS2LOCALTIMING saved " + OUT)
+    unreal.SystemLibrary.quit_editor()
+
+
+def tick(delta):
+    STATE["step"] += 1
+    step = STATE["step"]
+    # Let the editor settle first.
+    if step < 30:
+        return
+    if step == 30:
+        setup()
+        return
+    # From scratch: one batch a frame until nothing is pending.
+    if "tiles from scratch" not in results:
+        batch = timed("batch {}".format(len(STATE["batches"]) + 1))
+        STATE["batches"].append(batch["build_milliseconds"])
+        if batch["last_error"] or (batch["pending_tiles"] == 0) or len(STATE["batches"]) >= 1000:
+            results["tiles from scratch"] = {"batches": len(STATE["batches"]), "total_milliseconds": sum(STATE["batches"]), "largest_batch_milliseconds": max(STATE["batches"]), "last_error": batch["last_error"]}
+            unreal.log("CS2LOCALTIMING tiles from scratch " + json.dumps(results["tiles from scratch"]))
+            if batch["last_error"]:
+                finish()
+        return
+    if "tiles unchanged" not in results:
+        timed("tiles unchanged")
+        STATE["edit"] = edit_target()
+        results["edited"] = STATE["edit"].get_actor_label()
+        STATE["moves"] = [500.0, -500.0] * 3
+        return
+    # An edit that dirtied more than a batch finishes before the next one.
+    if network.get_editor_property("pending_tiles") > 0:
+        timed("draining")
+        return
+    if STATE["moves"]:
+        dx = STATE["moves"].pop(0)
+        spline = STATE["edit"].get_editor_property("spline")
         point = spline.get_location_at_spline_point(0, unreal.SplineCoordinateSpace.LOCAL)
         spline.set_location_at_spline_point(0, point + unreal.Vector(dx, 0.0, 0.0), unreal.SplineCoordinateSpace.LOCAL, True)
-        timed("point moved {:+.0f} m, round {}".format(dx / 100.0, round_index + 1))
+        timed("point moved {:+.0f} m, {} left".format(dx / 100.0, len(STATE["moves"])))
+        return
+    finish()
 
-with open(OUT, "w", encoding="utf-8") as f:
-    json.dump(results, f, indent=2, ensure_ascii=False)
-unreal.log("CS2LOCALTIMING saved " + OUT)
+
+STATE["handle"] = unreal.register_slate_post_tick_callback(tick)
