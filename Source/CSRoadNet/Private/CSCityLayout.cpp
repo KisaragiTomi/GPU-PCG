@@ -453,6 +453,33 @@ TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine
 	return Out;
 }
 
+// A plot is a Frontage - Gap by depth rectangle centred on its centre: it lies within LotRadius of it.
+// A road point clears a plot within its half width and half the setback of it; a reserved plot clears
+// the plots it overlaps; an anchor line's plots lie within its half width, the setback and the depth
+// of it. Each of these also changes the standing of the plots overlapping the ones it touches: two
+// more radii. The extra metre absorbs rounding.
+double LotRadius(const FLotSettings& Settings)
+{
+	const double Width = Settings.Frontage - Settings.Gap;
+	const double Depth = FMath::Max(Settings.MinDepth, Settings.MaxDepth);
+	return 0.5 * FMath::Sqrt(Width * Width + Depth * Depth);
+}
+
+double AnchorReach(const FLotSettings& Settings, double HalfWidth)
+{
+	return HalfWidth + Settings.Setback + FMath::Max(Settings.MinDepth, Settings.MaxDepth) + 2.0 * LotRadius(Settings) + 100.0;
+}
+
+double RoadReach(const FLotSettings& Settings, double HalfWidth)
+{
+	return HalfWidth + Settings.Setback * 0.5 + 3.0 * LotRadius(Settings) + 100.0;
+}
+
+double ReservedReach(const FLotSettings& Settings)
+{
+	return 3.0 * LotRadius(Settings) + 100.0;
+}
+
 void AppendPrism(FCSGpuMeshCPUData& Out, const FPolygon& Footprint, double Base, double Height, const FLinearColor& Color)
 {
 	if (Footprint.Num() < 3 || Height <= 0.0) return;

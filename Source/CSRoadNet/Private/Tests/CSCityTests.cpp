@@ -242,6 +242,72 @@ bool FCSCityLotsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// A street grid with a diagonal, wide and narrow streets and reserved plots, laid out whole, then only
+// from the inputs within reach (CSCity::AnchorReach and the like) of each of several windows: every plot
+// centred in a window comes out the same, id, corners, base and height.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityLotsWindowsTest, "PCGPlugins.CSRoadNet.City.LotsWindows",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSCityLotsWindowsTest::RunTest(const FString& Parameters)
+{
+	TArray<CSCity::FRoadLine> Streets;
+	for (int32 I = 0; I < 5; I++) Streets.Add(CSCityTests_Street(10 + I, FVector(-30000.0, -24000.0 + I * 12000.0, 0.0), FVector(30000.0, -24000.0 + I * 12000.0 + 800.0 * I, 0.0), I == 2 ? 700.0 : 400.0));
+	for (int32 I = 0; I < 5; I++) Streets.Add(CSCityTests_Street(20 + I, FVector(-24000.0 + I * 12000.0, -30000.0, 0.0), FVector(-24000.0 + I * 12000.0 - 600.0 * I, 30000.0, 0.0), 400.0));
+	Streets.Add(CSCityTests_Street(30, FVector(-30000.0, -30000.0, 0.0), FVector(30000.0, 26000.0, 0.0), 600.0));
+	const TArray<CSCity::FPolygon> Reserved = {
+		CSCityTests_Box(FVector2D(6000.0, 6000.0), FVector2D(2500.0, 1500.0), 15.0),
+		CSCityTests_Box(FVector2D(-13000.0, -5000.0), FVector2D(1800.0, 1800.0), 40.0),
+		CSCityTests_Box(FVector2D(18000.0, -17000.0), FVector2D(3000.0, 1200.0)) };
+	CSCity::FLotSettings Settings;
+	const TArray<CSCity::FLot> Whole = CSCity::LayoutLots(Streets, Streets, Reserved, Settings);
+	TestTrue(TEXT("plots laid out"), Whole.Num() > 200);
+
+	auto Bounds = [](const CSCity::FRoadLine& Line)
+	{
+		FBox2D Box(ForceInit);
+		for (const FVector& P : Line.Points) Box += FVector2D(P);
+		return Box;
+	};
+	auto Same = [](const CSCity::FLot& A, const CSCity::FLot& B) { return A.Id == B.Id && A.Corners == B.Corners && A.Base == B.Base && A.Height == B.Height && A.Color == B.Color; };
+	const FBox2D Windows[] = {
+		FBox2D(FVector2D(-6000.0, -6000.0), FVector2D(6000.0, 6000.0)),
+		FBox2D(FVector2D(2000.0, 3000.0), FVector2D(9000.0, 9000.0)),
+		FBox2D(FVector2D(-30000.0, -30000.0), FVector2D(-18000.0, -20000.0)),
+		FBox2D(FVector2D(11000.0, -23000.0), FVector2D(25000.0, -11000.0)),
+		FBox2D(FVector2D(-1000.0, -26000.0), FVector2D(1000.0, 26000.0)) };
+	for (int32 W = 0; W < UE_ARRAY_COUNT(Windows); W++)
+	{
+		const FBox2D& Window = Windows[W];
+		TArray<CSCity::FRoadLine> Anchors;
+		TArray<CSCity::FRoadLine> Roads;
+		TArray<CSCity::FPolygon> Plots;
+		for (const CSCity::FRoadLine& Street : Streets)
+		{
+			if (Bounds(Street).ExpandBy(CSCity::AnchorReach(Settings, Street.HalfWidth)).Intersect(Window)) Anchors.Add(Street);
+			if (Bounds(Street).ExpandBy(CSCity::RoadReach(Settings, Street.HalfWidth)).Intersect(Window)) Roads.Add(Street);
+		}
+		for (const CSCity::FPolygon& Plot : Reserved) if (FBox2D(Plot).ExpandBy(CSCity::ReservedReach(Settings)).Intersect(Window)) Plots.Add(Plot);
+		const TArray<CSCity::FLot> Local = CSCity::LayoutLots(Anchors, Roads, Plots, Settings);
+		TMap<uint64, const CSCity::FLot*> LocalById;
+		for (const CSCity::FLot& Lot : Local) if (Window.IsInside(Lot.Centre)) LocalById.Add(Lot.Id, &Lot);
+		int32 Inside = 0;
+		int32 Different = 0;
+		for (const CSCity::FLot& Lot : Whole)
+		{
+			if (!Window.IsInside(Lot.Centre)) continue;
+			Inside++;
+			const CSCity::FLot* Mine = LocalById.FindRef(Lot.Id);
+			Different += Mine && Same(*Mine, Lot) ? 0 : 1;
+		}
+		const FString Case = FString::Printf(TEXT("window %d"), W);
+		TestTrue(Case + TEXT(": plots in it"), Inside > 0);
+		TestEqual(Case + TEXT(": plots the window lays out differently"), Different, 0);
+		TestEqual(Case + TEXT(": plots only the window lays out"), LocalById.Num(), Inside);
+		AddInfo(FString::Printf(TEXT("%s: %d plots from %d of %d streets and %d of %d reserved plots"), *Case, Inside, Roads.Num(), Streets.Num(), Plots.Num(), Reserved.Num()));
+	}
+	return true;
+}
+
 // The city on a network built in tiles: a special building placed first, alleys laid out around it,
 // batch buildings along every road. The alleys and the batch buildings keep out of the special
 // building's plot; an unchanged rebuild writes no building tile; a main road drawn over a corner
@@ -359,6 +425,85 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	Network->Rebuild();
 	TestEqual(TEXT("switched off: building tiles"), CSCityTests_BuildingGenerations(Network).Num(), 0);
 	TestEqual(TEXT("switched off: batch buildings"), Network->NumBuildings, 0);
+	return true;
+}
+
+// The batch buildings laid out again only near what an edit changed, on a turned network in small
+// tiles: a main road drawn over the alleys, one of its points moved, the special building moved, the
+// main road deleted. After each edit the buildings change and equal those of a layout from scratch;
+// moving the special building lays out only some of the tiles.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityLocalUpdateTest, "PCGPlugins.CSRoadNet.City.LocalUpdate",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSCityLocalUpdateTest::RunTest(const FString& Parameters)
+{
+	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
+	if (!Lib.bLoaded)
+	{
+		AddWarning(Lib.Error + TEXT(" (skipped)"));
+		return true;
+	}
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("editor world"), World)) return false;
+	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>(FVector(2000.0, -1500.0, 0.0), FRotator(0.0, 10.0, 0.0));
+	if (!TestNotNull(TEXT("network actor"), Network)) return false;
+	Network->Source = ECSRoadNetworkSource::Splines;
+	Network->bLocalUpdate = true;
+	Network->TileSize = 64.0f;
+	Network->MaxTilesPerBatch = 0;
+	Network->bBatchBuildings = true;
+	ACSCityBuildingActor* Special = World->SpawnActor<ACSCityBuildingActor>(FVector(-3000.0, 2000.0, 0.0), FRotator(0.0, 20.0, 0.0));
+	ACSCityAlleyRegion* Region = World->SpawnActor<ACSCityAlleyRegion>();
+	if (!TestNotNull(TEXT("special building"), Special) || !TestNotNull(TEXT("alley region"), Region)) return false;
+	Region->Bounds->SetBoxExtent(FVector(12000.0, 8000.0, 500.0));
+	Region->Generate();
+	Network->Rebuild();
+	TestEqual(TEXT("built: error"), Network->LastError, FString());
+
+	auto Sorted = [&]()
+	{
+		TArray<FVector3f> Vertices = CSCityTests_BuildingVertices(Network);
+		Vertices.Sort([](const FVector3f& A, const FVector3f& B) { return A.X != B.X ? A.X < B.X : A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z; });
+		return Vertices;
+	};
+	// Every building laid out from scratch: what the local layout must come out as.
+	auto Scratch = [&]()
+	{
+		Network->bBatchBuildings = false;
+		Network->Rebuild();
+		Network->bBatchBuildings = true;
+		Network->Rebuild();
+		return Sorted();
+	};
+	TArray<FVector3f> Current = Sorted();
+	TestTrue(TEXT("built: batch buildings"), Current.Num() > 0);
+	auto Check = [&](const FString& Case)
+	{
+		Network->Tick(0.0f);
+		TestEqual(Case + TEXT(": error"), Network->LastError, FString());
+		const int32 LaidOut = Network->BuildingTilesLaidOut;
+		const int32 Tiles = CSCityTests_BuildingGenerations(Network).Num();
+		const TArray<FVector3f> Local = Sorted();
+		TestTrue(Case + TEXT(": the buildings changed"), Local != Current);
+		TestTrue(Case + TEXT(": tiles laid out"), LaidOut > 0);
+		TestTrue(Case + TEXT(": the same buildings as a layout from scratch"), Local == Scratch());
+		AddInfo(FString::Printf(TEXT("%s: %d tiles laid out, %d building tiles"), *Case, LaidOut, Tiles));
+		Current = Local;
+		return LaidOut < Tiles;
+	};
+
+	ACSRoadSplineActor* Main = World->SpawnActor<ACSRoadSplineActor>();
+	Main->AttachToActor(Network, FAttachmentTransformRules::KeepRelativeTransform);
+	Main->Spline->Prefab = TEXT("Medium Road");
+	Main->Spline->SetSplinePoints({ FVector(-16000.0, 3000.0, 0.0), FVector(-9000.0, 7000.0, 0.0), FVector(-3000.0, 11000.0, 0.0) }, ESplineCoordinateSpace::Local);
+	Check(TEXT("main road drawn"));
+	Main->Spline->SetLocationAtSplinePoint(1, FVector(-9500.0, 5500.0, 0.0), ESplineCoordinateSpace::Local);
+	Check(TEXT("main road point moved"));
+	Special->SetActorLocation(FVector(6000.0, -3000.0, 0.0));
+	Special->Rebuild();
+	TestTrue(TEXT("special building moved: only some tiles laid out"), Check(TEXT("special building moved")));
+	Main->Destroy();
+	Check(TEXT("main road deleted"));
 	return true;
 }
 

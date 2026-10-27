@@ -92,6 +92,35 @@ struct FLot
 // and place depend only on its anchor line, side and slot, so an edit elsewhere leaves it as it was.
 TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine>& Roads, const TArray<FPolygon>& Reserved, const FLotSettings& Settings);
 
+// How far past an input's bounds the centres of the plots it can change lie (cm). A plot depends on its
+// anchor line, on the roads and reserved plots near it or near a plot it overlaps (a rival), and on
+// those rivals' anchor lines; nothing farther. So LayoutLots run on the inputs whose bounds lie within
+// reach of a window gives every plot centred in the window exactly as a run on all of them does.
+// LotRadius: the plots' largest half diagonal.
+double LotRadius(const FLotSettings& Settings);
+double AnchorReach(const FLotSettings& Settings, double HalfWidth);
+double RoadReach(const FLotSettings& Settings, double HalfWidth);
+double ReservedReach(const FLotSettings& Settings);
+
+// The batch buildings between two layouts, so that the second lays out only the tiles near what
+// changed: what every input could change last time (tiles, inclusive, by the input's fingerprint),
+// and the tiles laid out but not written yet.
+struct FLotState
+{
+	uint64 Signature = 0;
+	bool bValid = false;
+	TMap<uint64, FIntRect> Reach;
+	TSet<FIntPoint> Pending;
+
+	void Reset()
+	{
+		Signature = 0;
+		bValid = false;
+		Reach.Reset();
+		Pending.Reset();
+	}
+};
+
 // A convex footprint pushed up from Base by Height into Out (world space, one material slot): the
 // sides and the top, flat shaded, coloured Color; no floor.
 void AppendPrism(FCSGpuMeshCPUData& Out, const FPolygon& Footprint, double Base, double Height, const FLinearColor& Color);

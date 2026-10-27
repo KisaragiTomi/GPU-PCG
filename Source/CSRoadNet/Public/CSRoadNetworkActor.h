@@ -34,6 +34,10 @@ struct FGpuGeometryInput;
 struct FGpuGeometryResult;
 struct FSavedTerrain;
 }
+namespace CSCity
+{
+struct FLotState;
+}
 
 UENUM()
 enum class ECSRoadNetworkSource : uint8
@@ -245,6 +249,11 @@ public:
 	/** Building tiles the last rebuild wrote or removed. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 BuildingTilesRebuilt = 0;
+
+	/** Building tiles whose plots the last rebuild laid out again: those near what changed, or all of them after the
+	 *  layout's settings changed. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 BuildingTilesLaidOut = 0;
 
 	/** Show and animate passenger cars. Switching this off pauses the preview without rebuilding roads. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, BlueprintSetter = SetShowTraffic, Category = "CS2 Road|Traffic", meta = (DisplayName = "Show Traffic"))
@@ -477,8 +486,12 @@ private:
 	// Building tiles whose buildings changed but were left for a later batch.
 	int32 PendingBuildingTiles = 0;
 
+	// What the batch buildings were last laid out from, and the tiles still to write.
+	TUniquePtr<CSCity::FLotState> LotState;
+
 	// The batch buildings along the roads as built (Roads, the network's space). The plots face the
-	// segments of Splines, or building from a snapshot the roads themselves.
+	// segments of Splines, or building from a snapshot the roads themselves. Only the tiles within reach
+	// of an input that changed are laid out again; the plots there come out as a full layout's would.
 	void BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>& Splines, const TArray<CSRoad::FRoadSpec>& Roads, CSRoad::FAssets& Assets);
 	void ClearBuildingTiles();
 };
