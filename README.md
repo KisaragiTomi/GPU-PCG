@@ -385,7 +385,7 @@ UCSClothSimComponent::TickComponent          # 游戏线程：dt、钉组变换�
 - ⚠️ 已知限制：没有运动矢量（快摆时 TAA / TSR 有拖影）；光追 BLAS 停在 rest 姿态；没有场景网格碰撞与自碰撞；格距 ≤ 2 cm 的细布要把 substep 调到 16~32 才拉得住。
 - **角色碎成布条**：`ACSClothSplitActor` 让骨骼网格角色播动画，按到起点的测地距离把身体切成一圈圈条带（`CSClothBandSplit`），每个布点用一条按曲线收放的绳挂在动画身体上，放开后带着动画速度甩出去、被旋流场带着转，再被收回来 —— Houdini 场景 AnimationFallSplit 的移植，逐节点对照与差异见 [`Docs/HoudiniFallSplit_Port.md`](Docs/HoudiniFallSplit_Port.md)。
 - 📖 设计、实测数据与未做的阶段：[`Docs/GpuClothSim_Plan.md`](Docs/GpuClothSim_Plan.md)
-- 🧪 自动化测试 `CSClothSimTests`（`PCGPlugins.ComputeShaderGenerator.ClothSim` 11 条、`ClothSplit` 4 条，要真 RHI；`VisualCapture` 把真渲染的两张图存到 `Saved/ClothSimShots/`）
+- 🧪 自动化测试 `CSClothSimTests`（`PCGPlugins.ComputeShaderGenerator.ClothSim` 11 条、`ClothSplit` 5 条，要真 RHI；`VisualCapture` 把真渲染的两张图存到 `Saved/ClothSimShots/`）
 
 ### 🖌️ PointBrush · 绘制点 → GPU 可直读 buffer
 

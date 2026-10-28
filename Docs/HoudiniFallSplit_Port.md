@@ -89,9 +89,11 @@ f@stiffness  = lerp(1000, 0, chf('stiffnesschange'));
 ```text
 ACSClothSplitActor（编辑器视口里也跑）
   Body：USkeletalMeshComponent 播动画，藏起来但每帧求骨骼
-  重建：Body 在 StartTime 的蒙皮快照（CPU：ComputeSkinnedPositions / ComputeSkinnedTangentBasis）
+  重建（Restart：第一次、改了属性）：Body 在 StartTime 的蒙皮快照（CPU）
         → CSClothBandSplit::Split → UCSMesh → UCSClothSimComponent（SetVertexBinding + SetupFromMeshSync）
-  每帧：Body 的蒙皮位置 → SetAnchorSourcePositions → 每粒子锚点（CPU 收集、上传）
+  重播（Replay：LoopPeriod 到点）：Body 回到 StartTime + ResetToRestPose，沿用切好的布
+  每帧：Body 的蒙皮位置（CSClothSkinning::ComputeSkinnedPositions，按段并行）→ SetAnchorSourcePositions
+        → 每粒子锚点（CPU 分块并行收集、上传）
   GPU，每 substep：Predict（放开前跟着锚点；放开那一下给初速度；之后往场速度收敛）
                   → SolveAnchors（绳）→ SolveColor（布）→ Collide（地面）
 ```
@@ -126,19 +128,48 @@ ACSClothSplitActor（编辑器视口里也跑）
 
 1. 放一个 `ACSClothSplitActor`，在 `Body` 上设骨骼网格，`Animation` 设要播的动画（单节点模式）。
 2. 布料组件的 `ReleaseDelay` 定放开时刻；`Split` 调条带（`SeedPoints` 为空时从头顶切）。
-3. 编辑器视口里自动播放；`LoopPeriod` > 0 时到点 `Restart`。改任何属性都会在下一帧重建。
+3. 编辑器视口里自动播放；`LoopPeriod` > 0 时到点 `Replay`（沿用切好的布，不重建）。改任何属性都会在下一帧 `Restart` 重建。
 4. 示例关卡 `/Game/ClothSplitDemo/L_FallSplitDemo` 由 [`Scripts/MakeFallSplitDemo.py`](../Scripts/MakeFallSplitDemo.py) 生成：Quinn + `Mage_GroundSlam_RM`，放开时刻取骨盆下落最快的 1.02 s，条带材质仿 Houdini 渲染。资产属于第三人称模板，所以关卡在工程里、不在插件里。
 
 ⚠️ 蒙皮位置在 CPU 上算：编辑器里骨骼网格的 CPU 数据常在；cook 出去的包要在骨骼网格 LOD 0 上勾 Allow CPU Access，否则重建失败并写日志。
 
 ## 验证
 
-- `PCGPlugins.ComputeShaderGenerator.ClothSplit.*` 4 条（`ClothSim.*` 11 条照旧全过）：
+- `PCGPlugins.ComputeShaderGenerator.ClothSplit.*` 5 条（`ClothSim.*` 11 条照旧全过）：
   - `BandSplit`：100 cm 见方、2 cm 一格的竖网格从顶边中点切，27 条带 / 30 块；每个三角只在一条带里；不看焊接键焊回 51² 个点、看键时切口分开；旋流在面内且垂直于半径（沿等距线）；平滑过的点按锚点插回原平面误差 < 1e-3 cm。
   - `SetupKeepsCuts`：setup 后粒子 = (位置, 条带) 的组数，没有一条拉伸 / 弯曲约束跨过切口。
   - `AnchorsFollowAndRelease`：放开前跟着宿主平移误差 < 0.01 cm；满刚度、绳长 20 cm 时整块布被推开 20 ± 2 cm；收绳后回到锚点 < 1 cm。
-  - `SplitActor`：引擎自带的 UE4 小白人（`TutorialTPP`），44 条带 / 229 块 / 4867 粒子；放开前粒子包围盒与参考姿态顶点的包围盒差 < 1.5 cm（切口平滑把指尖往里收约 1.2 cm）；放开 1 s 后有限、不停摆、条带离开身体。
+  - `ParallelSkinning`：给小白人每根骨一个各不相同的刚体变换，`CSClothSkinning::ComputeSkinnedPositions` 与引擎的 `ComputeSkinnedPositions` 逐顶点比，3924 个位置逐位相同。
+  - `SplitActor`：引擎自带的 UE4 小白人（`TutorialTPP`），44 条带 / 229 块 / 4867 粒子；放开前粒子包围盒与参考姿态顶点的包围盒差 < 1.5 cm（切口平滑把指尖往里收约 1.2 cm）；放开 1 s 后有限、不停摆、条带离开身体。之后 `LoopPeriod` 到点重播：同一张网格、同样的块数，模拟帧数接着涨（没有重新 setup），布回到身体上，过了 `ReleaseDelay` 再放开一次。
 - 示例关卡（Quinn）：45 条带 / 110 块 / 50975 粒子，显存 15 MiB。真编辑器里（不进 PIE）从头跑一遍，0.56 s 是在动的角色，放开后 0.5 s 条带成环旋开，2.5 s 时脚下的条带被收回、头顶的仍在外面，全程不停摆。
+
+## 性能
+
+2026-10-28 在示例关卡上实测：RTX 4080 + i7-13700KF，编辑器视口 1102×454，5.1 万粒子、26 万约束。只开一个编辑器，关掉后台降频。
+- `csvprofile` 连录 3 个循环，按跟随 / 放开 / 重播分组。
+- `stat dumpave` 取逐对象的 tick，`ProfileGPU` 取逐 pass。
+- 同一机位把 actor 藏起来、停 tick，当基线。
+
+下表是放开后的中位数，单位 ms，括号里是与同一次测量基线的差：
+
+| | 改前 | 改后 |
+| --- | --- | --- |
+| 游戏线程 | 10.5（+5.5） | 6.2（+1.0） |
+| 渲染线程 | 4.6（+0.8） | 4.7（+0.8） |
+| GPU | 5.1（+1.7） | 5.0（+1.8） |
+| 循环重播那一帧的游戏线程 | 282 | 7 |
+
+- **游戏线程**
+  - 改前，split actor 的 tick 每帧 4.84 ms，是引擎的 `ComputeSkinnedPositions` 单线程蒙皮 4.6 万顶点。改成按段并行的 `CSClothSkinning::ComputeSkinnedPositions` 后是 0.36 ms，结果与引擎逐位相同。
+  - 布料组件收锚点 0.57 → 0.22 ms（分块并行）。
+  - 帧时间从 10.5 ms 回到 8.3 ms，与不放这个效果时一样（编辑器 120 fps 的上限）。
+- **重播**
+  - 改前每个循环都整套 `Restart`：游戏线程卡 ~280 ms，其中 `SetupFromMeshSync` 62 ms，其余是抓快照 + 切带 + 上传，没拆开计时。
+  - 现在到点走 `Replay`，0.8–1.2 ms。`Restart` 只在第一次和改了属性后走，仍是 266–270 ms。
+- **GPU**
+  - 布料解算 1.47 ms，每帧 419 次派发。其中 `SolveColor` 368 次（23 种颜色 × 16 个 substep）合计 0.97 ms，平均每次 2.6 µs：每种颜色约 1.1 万条约束吃不满 GPU，时间花在派发与屏障上。
+  - 跟随阶段整个解算 0.20 ms。阴影多 0.28 ms：布每帧让 VSM 失效重画。
+  - 渲染线程上 `CSClothSimulate` 0.64–0.69 ms，每帧建 424 个 RDG pass。
 
 ## 读取方法
 
@@ -147,7 +178,9 @@ ACSClothSplitActor（编辑器视口里也跑）
 ## 未做与开放问题
 
 - `BackVel` 只移植了表面旋流项；要更像原效果，可以把 Houdini 里的速度场烘成 UE 的 Vector Field，GPU 上按位置采样。
-- 每帧在 CPU 上蒙皮全部 LOD 0 顶点（Quinn 约 4.6 万），耗时没量；要上运行时应改用 GPU 蒙皮缓存或只蒙锚点用到的顶点。
+- 每帧在 CPU 上蒙皮全部 LOD 0 顶点，已按段并行（0.36 ms，见「性能」）。再往下是挪到 GPU：每帧只传骨骼矩阵，锚点在 Predict 前一个 pass 里算，CPU 收集和每帧 0.8 MB 的上传一起省掉。
+- 第一次重建（`Restart`）仍在游戏线程上卡 ~270 ms，放置、开局、改属性时各一次。可以把切带挪到后台线程，或把切分结果存进 actor。
+- GPU 解算受派发次数限制：substep 16 → 8 能减半，但 16 是为了条带不出锯齿定的，要看效果；颜色数的下限是单个粒子挂的约束数。
 - 条带只在 `StartTime` 的姿态上切一次；Houdini 也是在冻结的第 1 帧上切。
 - 没有自碰撞（Houdini 的 Vellum 同样关着自碰撞）；运动矢量、光追 BLAS 的限制同 [`GpuClothSim_Plan.md`](GpuClothSim_Plan.md)。
 - 倒放（条带汇聚成人）在实时里不能直接倒着解；用曲线让绳从长收到 0 可以做出「汇聚」，没做成默认。
