@@ -7,7 +7,7 @@
 ## 用法
 
 - 关卡里放 `ACSRoadNetworkActor`，`NetworkFile` 指向 `cs2-road-network-v1` 快照，例如 `D:\MyProject\CitiesSkylines-Road2-C#\Artifacts\public-saves\palmsland-3\network.json`。
-- 要用样条画路，把 `Source` 设为 `Splines`，在 actor 下挂 `ACSRoadSplineActor`，一根样条是一条路，见[样条路网](#样条路网)。`ConvertToSplines` 把快照转成这样的样条路。示例关卡 `/PCGPlugins/CSRoadNet/L_SplineRoadDemo` 由 8 根样条组成，打开后拖样条点即可看到路网实时重建。
+- 要用样条画路，把 `Source` 设为 `Splines`，在 actor 下挂 `ACSRoadSplineActor`，一根样条是一条路，见[样条路网](#样条路网)。`ConvertToSplines` 把快照转成这样的样条路。示例关卡 `/PCGPlugins/CSRoadNet/L_SplineRoadDemo` 由 8 根样条组成，打开后拖样条点即可看到路网实时重建。Palmsland 整张图转好的样条在 `/PCGPlugins/CSRoadNet/L_PalmslandSplines`，见[从快照转换](#从快照转换)。
 - 城市局部更新：`bLocalUpdate` 让路网分 tile 重建，见[局部更新](#局部更新)；样条路分大路和小路，见[大路与小路](#大路与小路)；特殊建筑、小路生成和批量补房见[城市布局](#城市布局)。示例关卡 `/PCGPlugins/CSRoadNet/L_CityDemo`。
 - 改属性、移动松手、关卡加载或复制 actor 时自动重建，也可以点 `Rebuild`。常驻网格不存盘，加载后重新生成。
 - `AssetDirectory` 留空时读 `<CS2ROADLAB 或 D:/MyProject/CitiesSkylines-Road2-C#>/Assets/CS2` 下的 `prefabs.json`、`raw-prefabs.json`、`pieces.bin`。同一目录每个进程只加载一次。
@@ -68,6 +68,8 @@
 - 有没有 owner（`bNodeOwned`、`bSegmentOwned`）：GPU 几何不压平有 owner 的节点和边端。owner 是谁不保留，样条路网里有 owner 的节点和边共用一个 owner。owner 是谁只在两处起作用：owner 本身是一条边（CS2 的子路网，读快照时也不再支持，遇到会警告），以及只有轨道车道的边在节点上比较顶层 owner。Palmsland 两种都没有。
 
 边的顺序不保留，样条路网的边按内容排序，与快照文件里的顺序不同。几何 job 遇到平局、按边的顺序累加时，结果因此略有出入。Palmsland 转成 3,894 根样条后重建，与读文件时比：5,667 条边、4,576 个节点的数据和全部组合都相同；GPU 几何 132.6 万个值里 52 个偏差超过 1 cm，最大 2.7 cm，没有超过 0.1 m 的。把文件里的边按内容排序、倒序或打乱再建，偏差完全一样，可见这是边序本身带来的。不保留有没有 owner 时，那组 owner 附近有 61 个值偏差超过 0.1 m，最大 0.47 m。打乱样条的先后再建，得到的边和节点逐个相同。转换后暖重建约 1.0–1.1 s，与读文件相当。
+
+Palmsland 已经转好存成关卡 `/PCGPlugins/CSRoadNet/L_PalmslandSplines`（`Scripts/CS2Road/MakePalmslandSplines.py` 生成，29 MB）。一个路网 actor 下挂 3,894 根样条，路的数据都在样条点上；`NetworkFile` 仍指向快照，但只提供地形：路面顶点贴着它，新画的路按它量高程。路网按 256 m 的 tile 局部更新，打开关卡后每帧写 16 个 tile，约 50 帧写完。整张 Palmsland 一次建完要约 1,500 万个路面顶点和 1,000 万个标线顶点，显存紧张时标线会分配失败（10-28 生成关卡时遇到过），所以关卡默认分 tile。重新加载后，样条与现场转换的结果逐个相同；只建路面时整网 14,755,860 个顶点，比读文件少 24 个，来自边序不同。
 
 ## 局部更新
 
@@ -233,6 +235,7 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 - `Scripts/CS2Road/MakeSplineRoadDemo.py`：生成示例关卡 `L_SplineRoadDemo`，用无头编辑器的 `-ExecutePythonScript` 运行。关卡基于引擎的 Basic 模板（太阳、天空、雾），地面比样条低 0.25 m（路面比样条低 0.2 m）；8 根样条包括主路、十字路口、弯道 T 形路口、两端坡道各落在一条街上的 12 m 高架，以及一条带连接路的环路。关卡已存在时脚本会拒绝覆盖。
 - `Scripts/CS2Road/SplineNetworkShots.py`：在 `L_Palmsland` 离城 900 m 的空地上用样条画一个小路网（十字、T 形、立交、3 m 短段），路网只借 Palmsland 快照的地形，从 5 个机位拍到 `Saved/CS2RoadSplineShots`。运行方式同上。
 - `Scripts/CS2Road/MakeCityDemo.py`：生成示例关卡 `L_CityDemo`，见[城市布局](#城市布局)。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖。
+- `Scripts/CS2Road/MakePalmslandSplines.py`：把 Palmsland 快照转成样条，存成 `L_PalmslandSplines`，见[从快照转换](#从快照转换)。`CS2ROAD_NETWORK` 可换快照。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖。
 - `Scripts/CS2Road/CityDemoShots.py`：打开 `L_CityDemo`，给整网、分 tile、挪大路、挪特殊建筑计时，再从 4 个机位拍到 `Saved/CS2CityShots`。用完整编辑器运行，不存盘。
 - `Scripts/CS2Road/LocalUpdateTiming.py`：把 Palmsland 转成样条，开批量房子，给整网和分 tile 重建计时；从零建时每帧一批，直到没有积压。最后打开路网自己的 `Tick`、等编辑停下，预览整网重做的耗时记在日志里。结果写到 `Saved/CS2LocalUpdateTiming_<tile>_<batch>.json`。`CS2ROAD_TILE` 设 tile 尺寸（米，默认 256），`CS2ROAD_BATCH` 设每批 tile 数（默认 16）。要让帧在批与批之间过去，所以用完整编辑器的 `-ExecCmds="py <脚本>"` 运行，不存盘；再加上文[样条路网](#样条路网)里那个 `-ini` 参数，编辑器在后台时路网才会 tick，最后一步才测得到。
 
