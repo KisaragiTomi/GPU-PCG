@@ -232,7 +232,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "CS Cloth")
 	bool SetupFromMeshSync();
 
-	/** 回到 rest 姿态（跟着宿主当前的变换摆）、速度清零，并当场写回网格。不重建约束，不阻塞。 */
+	/**
+	 * 回到 rest 姿态（跟着宿主当前的变换摆）、速度清零，并当场写回网格。不重建约束，不阻塞。
+	 * 带锚点的布同时回到跟随阶段：放开计时归零，锚点回到 rest。
+	 */
 	UFUNCTION(BlueprintCallable, Category = "CS Cloth")
 	bool ResetToRestPose();
 

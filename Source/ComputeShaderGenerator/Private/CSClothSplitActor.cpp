@@ -7,6 +7,8 @@
 #include "CSMeshRenderComponent.h"
 
 #include "Animation/AnimationAsset.h"
+#include "Async/ParallelFor.h"
+#include "BoneWeights.h"          // UE::AnimationCore::InvMaxRawBoneWeightFloat
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "CoreGlobals.h"          // IsRunningCommandlet
@@ -18,6 +20,36 @@
 #include "Rendering/SkinWeightVertexBuffer.h"
 #include "RHIGlobals.h"           // GUsingNullRHI
 #include "UObject/UnrealType.h"   // FPropertyChangedEvent
+
+void CSClothSkinning::ComputeSkinnedPositions(const FSkeletalMeshLODRenderData& LODData, const FSkinWeightVertexBuffer& Weights,
+	TConstArrayView<FMatrix44f> RefToLocals, TArray<FVector3f>& OutPositions)
+{
+	OutPositions.SetNumUninitialized(int32(LODData.GetNumVertices()));
+	const FPositionVertexBuffer& RefPositions = LODData.StaticVertexBuffers.PositionVertexBuffer;
+	const int32 MaxInfluences = Weights.GetMaxBoneInfluences();
+	for (const FSkelMeshRenderSection& Section : LODData.RenderSections)
+	{
+		// 逐顶点同引擎的 GetTypedSkinnedVertexPosition<true>：Σ RefToLocal[BoneMap[i]]·p × w，按影响的顺序累加。
+		ParallelFor(TEXT("CSClothSkinning.Positions"), int32(Section.NumVertices), 512, [&](int32 Index)
+		{
+			const uint32 Vertex = Section.BaseVertexIndex + uint32(Index);
+			const FVector3f RefPosition = RefPositions.VertexPosition(Vertex);
+			FVector3f Skinned = FVector3f::ZeroVector;
+			for (int32 Influence = 0; Influence < MaxInfluences; ++Influence)
+			{
+				const uint16 RawWeight = Weights.GetBoneWeight(Vertex, uint32(Influence));
+				if (RawWeight == 0) continue;
+				const int32 BoneMapIndex = int32(Weights.GetBoneIndex(Vertex, uint32(Influence)));
+				if (!Section.BoneMap.IsValidIndex(BoneMapIndex)) continue;
+				const int32 MeshBone = Section.BoneMap[BoneMapIndex];
+				if (!RefToLocals.IsValidIndex(MeshBone)) continue;
+				const float Weight = float(RawWeight) * UE::AnimationCore::InvMaxRawBoneWeightFloat;
+				Skinned += RefToLocals[MeshBone].TransformPosition(RefPosition) * Weight;
+			}
+			OutPositions[int32(Vertex)] = Skinned;
+		});
+	}
+}
 
 ACSClothSplitActor::ACSClothSplitActor()
 {
@@ -101,7 +133,7 @@ bool ACSClothSplitActor::ComputeBodyPositions(TArray<FVector3f>& OutPositions)
 		return false;
 	}
 	Body->CacheRefToLocalMatrices(CachedRefToLocals);
-	USkeletalMeshComponent::ComputeSkinnedPositions(Body, OutPositions, CachedRefToLocals, LODData, *Weights);
+	CSClothSkinning::ComputeSkinnedPositions(LODData, *Weights, CachedRefToLocals, OutPositions);
 	return OutPositions.Num() == int32(LODData.GetNumVertices());
 }
 
@@ -231,6 +263,24 @@ void ACSClothSplitActor::Restart()
 	Body->SetVisibility(false);
 }
 
+void ACSClothSplitActor::Replay()
+{
+	if (!ClothMesh || bRebuildPending || !ClothComponent || ClothComponent->IsHalted() || !ClothComponent->IsSimulationReady())
+	{
+		Restart();
+		return;
+	}
+	TimeSinceRestart = 0.0;
+	PoseBodyAtStart();
+	// 布回到 setup 时的 rest 姿态（就是 StartTime 那一刻的身体），放开计时归零；网格被改过之类的失效退回重建。
+	if (!ClothComponent->ResetToRestPose())
+	{
+		Restart();
+		return;
+	}
+	PushAnchors();
+}
+
 void ACSClothSplitActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
@@ -264,7 +314,7 @@ void ACSClothSplitActor::Tick(float DeltaSeconds)
 	TimeSinceRestart += DeltaSeconds;
 	if (LoopPeriod > 0.0f && TimeSinceRestart >= double(LoopPeriod))
 	{
-		Restart();
+		Replay();
 		return;
 	}
 	PushAnchors();

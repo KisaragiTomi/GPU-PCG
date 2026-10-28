@@ -5,12 +5,25 @@
 #include "GameFramework/Actor.h"
 #include "CSClothSplitActor.generated.h"
 
+class FSkeletalMeshLODRenderData;
+class FSkinWeightVertexBuffer;
 class UAnimationAsset;
 class UCSClothSimComponent;
 class UCSMesh;
 class UCSMeshRenderComponent;
 class UMaterialInterface;
 class USkeletalMeshComponent;
+
+namespace CSClothSkinning
+{
+/**
+ * 一个 LOD 的 CPU 蒙皮位置（组件空间）：USkinnedMeshComponent::ComputeSkinnedPositions 的并行版，逐顶点算式相同
+ * （权重为 0 的骨骼跳过）。引擎那份逐顶点单线程，4.6 万顶点的角色每帧 ~4.8 ms（2026-10-28 实测）。
+ * RefToLocals 来自 USkinnedMeshComponent::CacheRefToLocalMatrices。
+ */
+COMPUTESHADERGENERATOR_API void ComputeSkinnedPositions(const FSkeletalMeshLODRenderData& LODData, const FSkinWeightVertexBuffer& Weights,
+	TConstArrayView<FMatrix44f> RefToLocals, TArray<FVector3f>& OutPositions);
+}
 
 /**
  * 骨骼网格角色碎成布条：Houdini 场景 AnimationFallSplit 的 UE 移植（Docs/HoudiniFallSplit_Port.md）。
@@ -19,8 +32,8 @@ class USkeletalMeshComponent;
  * Body 随后藏起来但接着播 —— 它只用来每帧算锚点；布在放开之前硬跟着锚点走，看上去就是那个角色在动。
  * 放开（布料组件的 ReleaseDelay）之后条带带着动画速度 × 5 甩出去，旋流场、噪声风、按曲线收放的绳把它们留在身边。
  *
- * 编辑器视口里也跑（不进 PIE）；LoopPeriod > 0 时到点从头再来一次。
- * ⚠️ 蒙皮位置在 CPU 上算（USkeletalMeshComponent::ComputeSkinnedPositions）：编辑器里骨骼网格的 CPU 数据常在；
+ * 编辑器视口里也跑（不进 PIE）；LoopPeriod > 0 时到点 Replay() 重播一次（沿用切好的条带，不重建）。
+ * ⚠️ 蒙皮位置在 CPU 上算（CSClothSkinning::ComputeSkinnedPositions）：编辑器里骨骼网格的 CPU 数据常在；
  * cook 出去的包要在骨骼网格的 LOD 0 上勾 Allow CPU Access，否则重建失败并写日志。
  */
 UCLASS(meta = (PrioritizeCategories = "CS Cloth Split"))
@@ -53,7 +66,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Cloth Split", meta = (ClampMin = "0.0"))
 	float PlayRate = 1.0f;
 
-	/** > 0：每隔这么多秒从头再来一次（编辑器里反复看效果）。 */
+	/** > 0：每隔这么多秒 Replay() 一次（编辑器里反复看效果）。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Cloth Split", meta = (ClampMin = "0.0", Units = "s"))
 	float LoopPeriod = 6.0f;
 
@@ -69,9 +82,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Cloth Split")
 	bool bGroundPlane = true;
 
-	/** 从头再来：动画回到 StartTime，重新切分、重新 setup，回到放开之前。 */
+	/**
+	 * 重建：动画回到 StartTime，重新切分、重新 setup，回到放开之前。5 万粒子的演示要占游戏线程 ~280 ms
+	 * （2026-10-28 实测）；只想再放一遍用 Replay()。
+	 */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CS Cloth Split")
 	void Restart();
+
+	/**
+	 * 重播：Body 回到 StartTime，布回到 setup 时的 rest 姿态、重新进入跟随阶段。沿用切好的条带与约束 ——
+	 * 起始姿态每次都一样，不必重新切分、重新 setup。还没建过或布已停摆时退回 Restart()。
+	 */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CS Cloth Split")
+	void Replay();
 
 	UFUNCTION(BlueprintPure, Category = "CS Cloth Split")
 	int32 GetNumPieces() const { return NumPieces; }

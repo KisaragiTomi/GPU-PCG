@@ -7,6 +7,7 @@
 #include "CSMesh.h"
 #include "CSMeshRenderComponent.h"
 
+#include "Async/ParallelFor.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "RenderingThread.h"
@@ -561,37 +562,49 @@ bool UCSClothSimComponent::StepSimulation(float DeltaTime)
 		Params.FieldBlend = (bReleased && FieldDrag > 0.0f) ? 1.0f - FMath::Exp(-FieldDrag * Params.SubstepDt) : 0.0f;
 
 		// 宿主交了源位置：按每粒子的源与权重收成锚点（double 变换到 sim 空间，大世界坐标下不丢精度）。
+		// 5 万粒子单线程 ~0.6 ms（2026-10-28 实测）：分块并行，每块自己的包围盒最后取并集（与顺序无关，结果不变）。
 		if (bPendingAnchors && ParticleAnchorSources.Num() == RestPositionsCopy.Num())
 		{
 			bExternalAnchors = true;
-			FBox AnchorBounds(ForceInit);
-			Params.AnchorTargets.SetNumUninitialized(RestPositionsCopy.Num());
-			for (int32 Particle = 0; Particle < RestPositionsCopy.Num(); ++Particle)
+			const int32 NumParticles = RestPositionsCopy.Num();
+			constexpr int32 ChunkSize = 2048;
+			const int32 NumChunks = FMath::DivideAndRoundUp(NumParticles, ChunkSize);
+			TArray<FBox> ChunkBounds;
+			ChunkBounds.Init(FBox(ForceInit), NumChunks);
+			Params.AnchorTargets.SetNumUninitialized(NumParticles);
+			ParallelFor(TEXT("CSCloth.GatherAnchors"), NumChunks, 1, [this, &Params, &ChunkBounds, NumParticles](int32 Chunk)
 			{
-				const FIntVector Sources = ParticleAnchorSources[Particle];
-				const FVector3f Weights = ParticleAnchorWeights[Particle];
-				FVector3f Local = FVector3f::ZeroVector;
-				float WeightSum = 0.0f;
-				for (int32 K = 0; K < 3; ++K)
+				FBox& Bounds = ChunkBounds[Chunk];
+				const int32 End = FMath::Min((Chunk + 1) * ChunkSize, NumParticles);
+				for (int32 Particle = Chunk * ChunkSize; Particle < End; ++Particle)
 				{
-					if (!PendingAnchorSources.IsValidIndex(Sources[K])) continue;
-					Local += PendingAnchorSources[Sources[K]] * Weights[K];
-					WeightSum += Weights[K];
+					const FIntVector Sources = ParticleAnchorSources[Particle];
+					const FVector3f Weights = ParticleAnchorWeights[Particle];
+					FVector3f Local = FVector3f::ZeroVector;
+					float WeightSum = 0.0f;
+					for (int32 K = 0; K < 3; ++K)
+					{
+						if (!PendingAnchorSources.IsValidIndex(Sources[K])) continue;
+						Local += PendingAnchorSources[Sources[K]] * Weights[K];
+						WeightSum += Weights[K];
+					}
+					if (WeightSum > UE_KINDA_SMALL_NUMBER)
+					{
+						const FVector World = PendingAnchorToWorld.TransformPosition(FVector(Local / WeightSum));
+						Bounds += World;
+						const FVector Sim = World - SimOrigin;
+						Params.AnchorTargets[Particle] = FVector4f(float(Sim.X), float(Sim.Y), float(Sim.Z), 0.0f);
+					}
+					else
+					{
+						// 没有源的粒子（钉住的那些）：锚点停在 rest 位置，反正它们不读锚点。
+						const FVector4f& Rest = RestPositionsCopy[Particle];
+						Params.AnchorTargets[Particle] = FVector4f(Rest.X, Rest.Y, Rest.Z, 0.0f);
+					}
 				}
-				if (WeightSum > UE_KINDA_SMALL_NUMBER)
-				{
-					const FVector World = PendingAnchorToWorld.TransformPosition(FVector(Local / WeightSum));
-					AnchorBounds += World;
-					const FVector Sim = World - SimOrigin;
-					Params.AnchorTargets[Particle] = FVector4f(float(Sim.X), float(Sim.Y), float(Sim.Z), 0.0f);
-				}
-				else
-				{
-					// 没有源的粒子（钉住的那些）：锚点停在 rest 位置，反正它们不读锚点。
-					const FVector4f& Rest = RestPositionsCopy[Particle];
-					Params.AnchorTargets[Particle] = FVector4f(Rest.X, Rest.Y, Rest.Z, 0.0f);
-				}
-			}
+			});
+			FBox AnchorBounds(ForceInit);
+			for (const FBox& Bounds : ChunkBounds) AnchorBounds += Bounds;
 			if (AnchorBounds.IsValid) LastAnchorWorldBounds = AnchorBounds;
 			bPendingAnchors = false;
 		}

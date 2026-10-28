@@ -628,6 +628,12 @@ void ResetToPositions_RenderThread(FRHICommandListImmediate& RHICmdList, FCSClot
 	FRDGBufferRef Upload = CreateStructuredBuffer(GraphBuilder, TEXT("CSCloth.ResetPositions"), Positions);
 	AddCopyBufferPass(GraphBuilder, B.Positions, Upload);
 	AddCopyBufferPass(GraphBuilder, B.PrevPositions, Upload);
+	if (State.bHasAnchors)
+	{
+		// 锚点也回到 rest，与刚 setup 完一样：重置后第一帧不从上一轮末尾的锚点插值过来。
+		AddCopyBufferPass(GraphBuilder, B.AnchorTargets, Upload);
+		AddCopyBufferPass(GraphBuilder, B.PrevAnchorTargets, Upload);
+	}
 	// 法线、写回与每帧同一条尾巴：网格当场回到 rest 姿态，不必等下一帧模拟（暂停时也一样）。
 	CSCloth_AddWriteBackPasses(GraphBuilder, State, B, Resident, SimOrigin);
 	GraphBuilder.Execute();
