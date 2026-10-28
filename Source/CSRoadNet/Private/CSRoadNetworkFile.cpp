@@ -1,5 +1,7 @@
 #include "CSRoadNetworkFile.h"
 
+#include <atomic>
+
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
@@ -190,6 +192,8 @@ bool FSavedNetwork::Load(const FString& Path, const FAssets* Assets, bool bLoadT
 		Terrain.HeightScaleOffset = CSRoadNetworkFile_Pair(TerrainJson->GetArrayField(TEXT("heightScaleOffset")));
 		if (!CSRoadNetworkFile_LoadMap(TerrainJson, Directory, TEXT("playable"), TEXT("playableOffset"), TEXT("playableArea"), Terrain.Playable, OutError)) return false;
 		if (!CSRoadNetworkFile_LoadMap(TerrainJson, Directory, TEXT("world"), TEXT("worldOffset"), TEXT("worldSize"), Terrain.World, OutError)) return false;
+		static std::atomic<uint64> Loads{ 0 };
+		Terrain.Serial = ++Loads;
 	}
 	return true;
 }

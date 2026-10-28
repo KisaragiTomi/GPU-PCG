@@ -1,5 +1,6 @@
 #include "CSRoadSplineNetwork.h"
 
+#include "Algo/BinarySearch.h"
 #include "CSRoadCurves.h"
 
 namespace CSRoad
@@ -995,9 +996,17 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Drawn, const
 	for (int32 P = 0; P < Pieces.Num(); P++) if (Pieces[P].bAlive) Order.Add(P);
 	Order.StableSort([&Pieces](int32 L, int32 R) { return static_cast<uint32>(Pieces[L].Order) < static_cast<uint32>(Pieces[R].Order); });
 	auto Ground = [Terrain](const FVector3d& Point) { return Terrain ? static_cast<double>(Terrain->Sample(CSRoadSplineNetwork_Float(Point))) : 0.0; };
-	// Owners get ids past every node's and edge's; only which ids are equal matters.
-	TMap<int32, int32> OwnerIds;
-	auto OwnerId = [&OwnerIds, Base = Nodes.Num() + Pieces.Num() + 1](int32 Owner) { return Owner == 0 ? 0 : OwnerIds.FindOrAdd(Owner, Base + OwnerIds.Num()); };
+	// Owners get ids past any node's or edge's, in the order of their own: only which ids are equal
+	// matters, and an edit that adds a node or an edge leaves every owner its id (tiles key roads by it).
+	TSet<int32> OwnerSet;
+	for (const int32 P : Order)
+	{
+		const FCSRoadSplineNetwork_Piece& Piece = Pieces[P];
+		for (const int32 Owner : { Piece.Owner, Nodes[Piece.Start].Owner, Nodes[Piece.End].Owner }) if (Owner != 0) OwnerSet.Add(Owner);
+	}
+	TArray<int32> Owners = OwnerSet.Array();
+	Owners.Sort();
+	auto OwnerId = [&Owners](int32 Owner) { return Owner == 0 ? 0 : (1 << 30) + int32(Algo::BinarySearch(Owners, Owner)); };
 	TArray<int32> NodeIndex;
 	NodeIndex.Init(INDEX_NONE, Nodes.Num());
 	for (const int32 P : Order)

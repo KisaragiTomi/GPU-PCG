@@ -199,6 +199,102 @@ bool FCSRoadTilesActorTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// A network far wider than a sub-graph's reach: ten streets east to west crossed by ten north to
+// south, one a medium road, the easternmost owned by something. Edits drawn in tiles from sub-graphs
+// come out as a whole build draws them: a short spur added at the north-west corner (sub-graphs well
+// short of the network, and the new node leaves the owned street's tiles alone), the westernmost
+// street's north end moved (the whole street tilts), a street removed, a diagonal road added. Once
+// edits settle, the traffic preview is made again for the whole network.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadTilesSubgraphTest, "PCGPlugins.CSRoadNet.Tiles.Subgraph",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSRoadTilesSubgraphTest::RunTest(const FString& Parameters)
+{
+	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
+	if (!Lib.bLoaded)
+	{
+		AddWarning(Lib.Error + TEXT(" (skipped)"));
+		return true;
+	}
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("editor world"), World)) return false;
+	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>(FVector(5000.0, -8000.0, 0.0), FRotator(0.0, 7.0, 0.0));
+	if (!TestNotNull(TEXT("network actor"), Network)) return false;
+	Network->Source = ECSRoadNetworkSource::Splines;
+	Network->TileSize = 96.0f;
+	Network->MaxTilesPerBatch = 0;
+	TArray<ACSRoadSplineActor*> EastWest;
+	TArray<ACSRoadSplineActor*> NorthSouth;
+	for (int32 I = 0; I < 10; I++)
+	{
+		const double Y = -27000.0 + I * 6000.0;
+		EastWest.Add(CSRoadTileTests_Road(World, Network, { FVector(-30000.0, Y, 0.0), FVector(30000.0, Y, 0.0) }, I == 4 ? TEXT("Medium Road") : TEXT("Small Road")));
+	}
+	for (int32 I = 0; I < 10; I++)
+	{
+		const double X = -27000.0 + I * 6000.0;
+		NorthSouth.Add(CSRoadTileTests_Road(World, Network, { FVector(X, -30000.0, 0.0), FVector(X, 30000.0, 0.0) }, TEXT("Small Road")));
+	}
+	// At x = 270 m, the column of tiles x = 2.
+	NorthSouth[9]->Spline->RoadMetadata->Points[0].SegmentOwner = 77;
+
+	auto Build = [&](bool bTiles)
+	{
+		Network->bLocalUpdate = bTiles;
+		Network->Rebuild();
+		TestEqual(FString::Printf(TEXT("%s build: error"), bTiles ? TEXT("tiled") : TEXT("whole")), Network->LastError, FString());
+		return CSRoadTileTests_Read(Network);
+	};
+	// The mesh generations of a column of road tiles.
+	auto Column = [&](int32 X)
+	{
+		TMap<FString, uint32> Out;
+		TArray<UCSMeshRenderComponent*> Components;
+		Network->GetComponents<UCSMeshRenderComponent>(Components);
+		const FString Prefix = FString::Printf(TEXT("RoadTile_%d_"), X);
+		for (const UCSMeshRenderComponent* Component : Components) if (Component->GetName().StartsWith(Prefix) && Component->GetGpuMesh()) Out.Add(Component->GetName(), Component->GetGpuMesh()->GetGeneration());
+		return Out;
+	};
+	const FCSRoadTileTests_Output Whole = Build(false);
+	const FCSRoadTileTests_Output Tiled = Build(true);
+	TestEqual(TEXT("first tiled build: every road graphed"), Network->RoadsGraphed, Network->NumRoads);
+	CSRoadTileTests_Compare(*this, TEXT("placed"), Tiled, Whole);
+	AddInfo(FString::Printf(TEXT("%d roads in %d tiles"), Network->NumRoads, Network->NumTiles));
+
+	// Each edit drawn in tiles, then the whole network built again to compare, then back to tiles.
+	// bSmall: the edit keeps to the north-west corner.
+	auto Edit = [&](const FString& Case, TFunctionRef<void()> Change, bool bSmall)
+	{
+		const TMap<FString, uint32> Owned = Column(2);
+		Change();
+		Network->Tick(0.0f);
+		TestEqual(Case + TEXT(": error"), Network->LastError, FString());
+		const int32 Graphed = Network->RoadsGraphed;
+		const int32 Roads = Network->NumRoads;
+		TestTrue(Case + TEXT(": some tiles rebuilt"), Network->TilesRebuilt > 0 && Network->TilesRebuilt < Network->NumTiles);
+		if (bSmall)
+		{
+			TestTrue(Case + TEXT(": sub-graphs together short of the network"), Graphed < Roads);
+			TestTrue(Case + TEXT(": the owned street's tiles"), Owned.Num() > 0);
+			TestTrue(Case + TEXT(": the owned street's tiles keep their meshes"), Column(2).OrderIndependentCompareEqual(Owned));
+		}
+		AddInfo(FString::Printf(TEXT("%s: %d of %d tiles rebuilt, %d roads graphed of %d"), *Case, Network->TilesRebuilt, Network->NumTiles, Graphed, Roads));
+		const FCSRoadTileTests_Output Edited = CSRoadTileTests_Read(Network);
+		// The traffic preview, stale while edits go on, made again once they settle.
+		FPlatformProcess::Sleep(0.35f);
+		Network->Tick(0.0f);
+		const int32 Lanes = Network->NumTrafficLanes;
+		CSRoadTileTests_Compare(*this, Case, Edited, Build(false));
+		TestEqual(Case + TEXT(": traffic lanes once edits settle"), Lanes, Network->NumTrafficLanes);
+		Build(true);
+	};
+	Edit(TEXT("spur added"), [&]() { CSRoadTileTests_Road(World, Network, { FVector(-27000.0, 30000.0, 0.0), FVector(-27000.0, 34000.0, 0.0) }, TEXT("Small Road")); }, true);
+	Edit(TEXT("north end moved"), [&]() { NorthSouth[0]->Spline->SetLocationAtSplinePoint(1, FVector(-27000.0 + 2000.0, 30000.0, 0.0), ESplineCoordinateSpace::Local); }, false);
+	Edit(TEXT("street removed"), [&]() { EastWest[8]->Destroy(); }, false);
+	Edit(TEXT("diagonal added"), [&]() { CSRoadTileTests_Road(World, Network, { FVector(9000.0, -30000.0, 0.0), FVector(30000.0, -9000.0, 0.0) }, TEXT("Small Road")); }, false);
+	return true;
+}
+
 // The same network two tiles a batch: a rebuild writes two tiles and leaves the rest pending, the
 // next ticks write them, and then the tiles draw what a whole build draws. A new tile size dirties
 // every tile; a road moved one batch into that backlog still comes out as a whole build draws it.

@@ -9,6 +9,7 @@
 #include "RHIGPUReadback.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
+#include "RenderResource.h"
 #include "RenderingThread.h"
 #include "ShaderParameterStruct.h"
 
@@ -70,10 +71,46 @@ void CSRoadGpu_AppendRange(TArray<FGpuRange>& Ranges, int32 Index, TArray<T>& Li
 	List.Append(Items);
 }
 
-void CSRoadGpu_PackTerrain(const TArray<uint16>& Samples, TArray<uint32>& Out)
+// The terrain's two height maps on the GPU, uploaded once per load (its serial) and kept: every graph
+// of every rebuild registers them instead of uploading the maps again (2 x 32 MB on Palmsland). Render
+// thread only; let go with the RHI.
+class FCSRoadGpu_TerrainCache : public FRenderResource
 {
-	Out.SetNumZeroed(FMath::Max(1, (Samples.Num() + 1) / 2));
-	FMemory::Memcpy(Out.GetData(), Samples.GetData(), Samples.Num() * sizeof(uint16));
+public:
+	uint64 Serial = 0;
+	TRefCountPtr<FRDGPooledBuffer> Maps[2];
+
+	virtual void ReleaseRHI() override
+	{
+		Serial = 0;
+		Maps[0].SafeRelease();
+		Maps[1].SafeRelease();
+	}
+};
+TGlobalResource<FCSRoadGpu_TerrainCache> GCSRoadGpu_TerrainCache;
+
+// A map's samples, two R16 per uint (low half first): the cached upload, or a fresh one (kept when the
+// terrain has a serial). Without terrain, one zero.
+FRDGBufferSRVRef CSRoadGpu_TerrainMap(FRDGBuilder& GraphBuilder, const FSavedTerrain* Terrain, int32 Map)
+{
+	if (!Terrain) return GraphBuilder.CreateSRV(GpuDetail::Zeroed<uint32>(GraphBuilder, 1, TEXT("CSRoad.NoTerrain")));
+	FCSRoadGpu_TerrainCache& Cache = GCSRoadGpu_TerrainCache;
+	if (Terrain->Serial != 0 && Cache.Serial == Terrain->Serial && Cache.Maps[Map].IsValid()) return GraphBuilder.CreateSRV(GraphBuilder.RegisterExternalBuffer(Cache.Maps[Map]));
+	const TArray<uint16>& Samples = Map == 0 ? Terrain->Playable.Data : Terrain->World.Data;
+	const FRDGBufferRef Buffer = GraphBuilder.CreateBuffer(FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(1, (Samples.Num() + 1) / 2)), Map == 0 ? TEXT("CSRoad.TerrainPlayable") : TEXT("CSRoad.TerrainWorld"));
+	// The snapshot holds the samples until the graph has run; an odd count leaves the last half unread.
+	GraphBuilder.QueueBufferUpload(Buffer, Samples.GetData(), uint64(Samples.Num()) * sizeof(uint16), ERDGInitialDataFlags::NoCopy);
+	if (Terrain->Serial != 0)
+	{
+		if (Cache.Serial != Terrain->Serial)
+		{
+			Cache.Maps[0].SafeRelease();
+			Cache.Maps[1].SafeRelease();
+			Cache.Serial = Terrain->Serial;
+		}
+		GraphBuilder.QueueBufferExtraction(Buffer, &Cache.Maps[Map]);
+	}
+	return GraphBuilder.CreateSRV(Buffer);
 }
 }
 
@@ -158,14 +195,8 @@ bool FGpuGeometryInput::Build(const FGraph& Graph, const FAssets& Assets, const 
 		TerrainWorldOffsetSize = FVector4f(Terrain->World.Offset.x, Terrain->World.Offset.y, Terrain->World.Size.x, Terrain->World.Size.y);
 		TerrainDims = FIntVector4(Terrain->Playable.Width, Terrain->Playable.Height, Terrain->World.Width, Terrain->World.Height);
 		TerrainHeightScaleOffset = FVector2f(Terrain->HeightScaleOffset.x, Terrain->HeightScaleOffset.y);
-		CSRoadGpu_PackTerrain(Terrain->Playable.Data, TerrainPlayable);
-		CSRoadGpu_PackTerrain(Terrain->World.Data, TerrainWorld);
 	}
-	else
-	{
-		TerrainPlayable = { 0u };
-		TerrainWorld = { 0u };
-	}
+	TerrainSource = bHasTerrain ? Terrain : nullptr;
 	return true;
 }
 
@@ -226,8 +257,8 @@ FGpuGeometryOutput AddGeometryPasses(FRDGBuilder& GraphBuilder, const FGpuGeomet
 	Common.TerrainWorldOffsetSize = In.TerrainWorldOffsetSize;
 	Common.TerrainDims = In.TerrainDims;
 	Common.TerrainHeightScaleOffset = In.TerrainHeightScaleOffset;
-	Common.TerrainPlayable = GpuDetail::UploadSRV(GraphBuilder, In.TerrainPlayable, TEXT("CSRoad.TerrainPlayable"));
-	Common.TerrainWorld = GpuDetail::UploadSRV(GraphBuilder, In.TerrainWorld, TEXT("CSRoad.TerrainWorld"));
+	Common.TerrainPlayable = CSRoadGpu_TerrainMap(GraphBuilder, In.TerrainSource, 0);
+	Common.TerrainWorld = CSRoadGpu_TerrainMap(GraphBuilder, In.TerrainSource, 1);
 
 	const int32 NumNodes = In.NodeList.Num();
 	const int32 NumEdges = In.EdgeList.Num();

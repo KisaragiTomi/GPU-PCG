@@ -26,6 +26,8 @@ struct FPooledDecalReceivers;
 struct FGpuRoadMeshInput;
 struct FPooledGeometry;
 struct FRoadSpec;
+struct FSavedNetwork;
+struct FSavedNode;
 struct FSplineRoad;
 class FGraph;
 class FRoadLanes;
@@ -228,6 +230,11 @@ public:
 	/** Roads drawn in the tiles the last rebuild wrote. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 RoadsRebuilt = 0;
+
+	/** Roads the last rebuild in tiles built as a graph through the GPU geometry: those near what changed and near the
+	 *  tiles it wrote (every road the first time, or after a change of settings). */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 RoadsGraphed = 0;
 
 	/** Fill the plots along the roads with buildings (convex hulls pushed up), clear of the roads, of each other and
 	 *  of the plots ACSCityBuildingActors reserve. A plot belongs to the spline it faces (its segment, side and place
@@ -433,6 +440,16 @@ private:
 	void RenderTraffic();
 	void ClearPreview();
 
+	// The traffic lanes and bridge piers need the whole network's lanes and geometry, which a rebuild in
+	// tiles no longer makes: the last preview stays up while edits go on, and is made again for the
+	// network as last built once they settle (no rebuild for a moment).
+	bool bPreviewStale = false;
+	double LastBuildSeconds = 0.0;
+	// The roads and nodes as last built, and the snapshot lending the terrain (null: none).
+	TSharedPtr<const CSRoad::FSavedNetwork> PreviewRoads;
+	TSharedPtr<const CSRoad::FSavedNetwork> PreviewTerrain;
+	void RefreshPreview();
+
 	// Tiles by (column, row) of the network's ground plane, when it builds in tiles. Kept out of undo:
 	// the tiles are rebuilt outside transactions, so a restored map would name components gone since.
 	UPROPERTY(Transient, NonTransactional)
@@ -459,9 +476,9 @@ private:
 	// The spline roads this network builds, in its space (Unity metres).
 	TArray<CSRoad::FSplineRoad> GatherSplines() const;
 	bool BuildRoads(FString& OutError);
-	// BuildRoads in tiles: the graph's geometry decides which tiles to write (CSRoadTiles.h).
-	bool BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGraph& Graph, const CSRoad::FGpuGeometryInput& Geometry, const TMap<FString, UMaterialInterface*>& ByBaseColor,
-		const CSRoad::FSavedTerrain* Terrain, bool bMarkings, FString& OutError);
+	// BuildRoads in tiles, from sub-graphs of the roads near what changed (CSRoadTiles.h).
+	bool BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoad::FRoadSpec>& Specs, const TArray<CSRoad::FSavedNode>& Nodes, bool bLeftHand,
+		const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FSavedTerrain* Terrain, bool bMarkings, FString& OutError);
 	// Allocates the targets and records the road mesh (and the decals, when Decals has items) into them,
 	// on the build's geometry when SharedGeometry holds it (else the graph runs it again).
 	bool WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry, const CSRoad::FPooledGeometry& SharedGeometry, const CSRoad::FGpuRoadMeshInput& MeshInput, CSRoad::FGpuDecalInput* Decals,

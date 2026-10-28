@@ -20,6 +20,8 @@ struct FSavedTerrain
 	FMap Playable;
 	FMap World;
 	float2 HeightScaleOffset;
+	// A fresh number per load (0: none), which the GPU keeps a load's samples by between graphs.
+	uint64 Serial = 0;
 
 	bool IsValid() const { return Playable.Width > 1 && World.Width > 1; }
 	float Sample(float3 Point) const;

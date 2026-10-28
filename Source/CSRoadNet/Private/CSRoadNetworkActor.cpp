@@ -111,6 +111,46 @@ TMap<FString, UMaterialInterface*> CSRoadNetworkActor_Materials(const FString& F
 	}
 	return Result;
 }
+
+// Some of a network's roads (spec indices, in spec order) built on their own: the graph, its GPU
+// geometry read back, and the geometry kept for the build's later graphs.
+struct FCSRoadNetworkActor_Subgraph
+{
+	TArray<int32> Specs;
+	// Graph.Roads index per spec of the network (INDEX_NONE: not in it).
+	TArray<int32> RoadOfSpec;
+	CSRoad::FGraph Graph;
+	CSRoad::FGpuGeometryInput Input;
+	CSRoad::FGpuGeometryResult Result;
+	CSRoad::FPooledGeometry Shared;
+
+	bool Holds(const TArray<int32>& Roads) const
+	{
+		for (const int32 Road : Roads) if (!RoadOfSpec.IsValidIndex(Road) || RoadOfSpec[Road] == INDEX_NONE) return false;
+		return true;
+	}
+};
+
+bool CSRoadNetworkActor_BuildSubgraph(CSRoad::FAssets& Assets, const TArray<CSRoad::FRoadSpec>& Specs, const TArray<CSRoad::FSavedNode>& Nodes, bool bLeftHand,
+	const CSRoad::FSavedTerrain* Terrain, TArray<int32> Taken, FCSRoadNetworkActor_Subgraph& Out, FString& OutError)
+{
+	Out.Specs = MoveTemp(Taken);
+	Out.Graph.bLeftHandTraffic = bLeftHand;
+	bool bBuilt = false;
+	if (Out.Specs.Num() == Specs.Num()) bBuilt = Out.Graph.Build(Assets, Specs, Nodes, OutError);
+	else
+	{
+		TArray<CSRoad::FRoadSpec> Part;
+		Part.Reserve(Out.Specs.Num());
+		for (const int32 Spec : Out.Specs) Part.Add(Specs[Spec]);
+		bBuilt = Out.Graph.Build(Assets, Part, Nodes, OutError);
+	}
+	CSRoad::FGpuRoadMeshInput NoInstances;
+	if (!bBuilt || !Out.Input.Build(Out.Graph, Assets, Terrain, OutError) || !CSRoad::RunRefineCountsBlocking(Out.Input, NoInstances, OutError, &Out.Result, &Out.Shared)) return false;
+	Out.RoadOfSpec.Init(INDEX_NONE, Specs.Num());
+	for (int32 Road = 0; Road < Out.Graph.Roads.Num(); Road++) Out.RoadOfSpec[Out.Specs[Out.Graph.Roads[Road].SpecIndex]] = Road;
+	return true;
+}
 }
 
 ACSRoadNetworkActor::ACSRoadNetworkActor()
@@ -180,6 +220,8 @@ void ACSRoadNetworkActor::Tick(float DeltaSeconds)
 		bRebuildRequested = false;
 		Rebuild();
 	}
+	// Edits have settled: the preview of the whole network as last built.
+	else if (bPreviewStale && FPlatformTime::Seconds() - LastBuildSeconds > 0.3) RefreshPreview();
 	TickPreview(DeltaSeconds);
 }
 
@@ -384,8 +426,8 @@ void ACSRoadNetworkActor::PostEditMove(bool bFinished)
 void ACSRoadNetworkActor::Rebuild()
 {
 	const double StartTime = FPlatformTime::Seconds();
-	ClearPreview();
-	// What spline roads asked for until now is in this build.
+	// What spline roads asked for until now is in this build. The build makes the preview again, or,
+	// building in tiles, RefreshPreview does once edits settle; until then the last one stays up.
 	bRebuildRequested = false;
 	FString Error;
 	if (BuildRoads(Error)) LastError.Reset();
@@ -397,7 +439,38 @@ void ACSRoadNetworkActor::Rebuild()
 	PendingTiles = (TileState ? TileState->NumPending() : 0) + PendingBuildingTiles;
 	// The tiles past the batch go on the next ticks, until none are left or a build fails.
 	if (PendingTiles > 0 && LastError.IsEmpty()) bRebuildRequested = true;
-	BuildMilliseconds = float((FPlatformTime::Seconds() - StartTime) * 1000.0);
+	LastBuildSeconds = FPlatformTime::Seconds();
+	BuildMilliseconds = float((LastBuildSeconds - StartTime) * 1000.0);
+}
+
+void ACSRoadNetworkActor::RefreshPreview()
+{
+	bPreviewStale = false;
+	if (!PreviewRoads || PreviewRoads->Roads.Num() == 0)
+	{
+		ClearPreview();
+		return;
+	}
+	const double StartTime = FPlatformTime::Seconds();
+	FString Error;
+	const TSharedPtr<FCSRoadNetworkActor_Library> Library = CSRoadNetworkActor_Library(ResolveAssetDirectory(), Error);
+	const CSRoad::FSavedTerrain* Terrain = PreviewTerrain && PreviewTerrain->Terrain.IsValid() ? &PreviewTerrain->Terrain : nullptr;
+	CSRoad::FGraph Graph;
+	Graph.bLeftHandTraffic = PreviewRoads->bLeftHandTraffic;
+	CSRoad::FGpuGeometryInput Geometry;
+	CSRoad::FGpuRoadMeshInput NoInstances;
+	CSRoad::FGpuGeometryResult Result;
+	if (!Library || !Graph.Build(Library->Assets, PreviewRoads->Roads, PreviewRoads->Nodes, Error) || !Geometry.Build(Graph, Library->Assets, Terrain, Error)
+		|| !CSRoad::RunRefineCountsBlocking(Geometry, NoInstances, Error, &Result))
+	{
+		UE_LOG(LogCSRoadNet, Warning, TEXT("%s: the traffic and bridge preview could not be made: %s"), *GetName(), *Error);
+		return;
+	}
+	CSRoad::FRoadLanes Lanes;
+	Lanes.Build(Graph, Library->Assets, Result);
+	ClearPreview();
+	BuildPreview(Graph, Lanes, Result, Terrain);
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: traffic and bridge preview of %d roads made again; %.0f ms"), *GetName(), Graph.Roads.Num(), (FPlatformTime::Seconds() - StartTime) * 1000.0);
 }
 
 bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
@@ -453,17 +526,13 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	}
 	const TArray<CSRoad::FSavedNode>& Nodes = bSplines ? FromSplines.Nodes : Snapshot->Nodes;
 	const TArray<CSRoad::FRoadSpec>& Specs = bSplines ? FromSplines.Roads : Snapshot->Roads;
+	const bool bLeftHand = bSplines ? bLeftHandTraffic : Snapshot->bLeftHandTraffic;
 	const double NetworkMs = Lap();
 	// The buildings need only the roads' curves: they stand even if the road meshes fail below. They
 	// log their own time.
 	if (bBatchBuildings) BuildBatchBuildings(Splines, Specs, Library->Assets);
 	else ClearBuildingTiles();
 	(void)Lap();
-	CSRoad::FGraph Graph;
-	Graph.bLeftHandTraffic = bSplines ? bLeftHandTraffic : Snapshot->bLeftHandTraffic;
-	CSRoad::FGpuGeometryInput Geometry;
-	if (!Graph.Build(Library->Assets, Specs, Nodes, OutError) || !Geometry.Build(Graph, Library->Assets, Terrain, OutError)) return false;
-	const double GraphMs = Lap();
 	const bool bMarkings = bBuildMarkings && MarkingMesh;
 	// One material slot per atlas (decal surface); MeshTriangleMaterials indexes these.
 	const TMap<FString, UMaterialInterface*> ByBaseColor = CSRoadNetworkActor_Materials(MaterialFolder.Path);
@@ -472,11 +541,29 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	NumMarkingTriangles = 0;
 	if (bLocalUpdate)
 	{
-		const bool bBuilt = BuildTiles(Library->Assets, Graph, Geometry, ByBaseColor, Terrain, bMarkings, OutError);
-		UE_LOG(LogCSRoadNet, Log, TEXT("%s: prefab data %.0f ms, snapshot %.0f ms, graph and compositions %.0f ms, tiles %.0f ms"), *GetName(), LibraryMs, NetworkMs, GraphMs, Lap());
+		const bool bBuilt = BuildTiles(Library->Assets, Specs, Nodes, bLeftHand, ByBaseColor, Terrain, bMarkings, OutError);
+		// What RefreshPreview makes the preview from once edits settle.
+		if (bSplines)
+		{
+			FromSplines.bLeftHandTraffic = bLeftHand;
+			PreviewRoads = MakeShared<CSRoad::FSavedNetwork>(MoveTemp(FromSplines));
+		}
+		else PreviewRoads = Snapshot;
+		PreviewTerrain = Terrain ? Snapshot : nullptr;
+		UE_LOG(LogCSRoadNet, Log, TEXT("%s: prefab data %.0f ms, snapshot %.0f ms, tiles %.0f ms"), *GetName(), LibraryMs, NetworkMs, Lap());
 		return bBuilt;
 	}
 	ClearTiles();
+	PreviewRoads.Reset();
+	PreviewTerrain.Reset();
+	bPreviewStale = false;
+	CSRoad::FGraph Graph;
+	Graph.bLeftHandTraffic = bLeftHand;
+	CSRoad::FGpuGeometryInput Geometry;
+	if (!Graph.Build(Library->Assets, Specs, Nodes, OutError)) return false;
+	const double GraphMs = Lap();
+	if (!Geometry.Build(Graph, Library->Assets, Terrain, OutError)) return false;
+	const double InputMs = Lap();
 	CSRoad::FGpuRoadMeshInput MeshInput;
 	if (!MeshInput.Build(Graph, Library->Assets, OutError)) return false;
 	const double MeshMs = Lap();
@@ -503,9 +590,9 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	Targets.Markings = MarkingMesh;
 	Targets.MarkingMesh = &Markings;
 	if (!WriteMeshes(Geometry, SharedGeometry, MeshInput, bMarkings ? &Decals : nullptr, ByBaseColor, Library->Assets, Targets, OutError)) return false;
-	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads, %u vertices, %u triangles, %d compositions, %d decals (%d lanes); prefab data %.0f ms, snapshot %.0f ms, graph and compositions %.0f ms, composition meshes %.0f ms, refinement counts %.0f ms, lanes and decal setup %.0f ms, allocation %.0f ms, road GPU build %.0f ms, decals %.0f ms"),
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads, %u vertices, %u triangles, %d compositions, %d decals (%d lanes); prefab data %.0f ms, snapshot %.0f ms, graph and compositions %.0f ms, geometry input %.0f ms, composition meshes %.0f ms, refinement counts %.0f ms, lanes and decal setup %.0f ms, allocation %.0f ms, road GPU build %.0f ms, decals %.0f ms"),
 		*GetName(), Graph.Roads.Num(), MeshInput.NumVertices, MeshInput.NumIndices / 3, Graph.Compositions.Num() - 1, Decals.Items.Num(), Decals.Lanes.Lanes.Num(),
-		LibraryMs, NetworkMs, GraphMs, MeshMs, RefineMs, DecalSetupMs, Targets.AllocationMs, Targets.RoadMs, Targets.MarkingMs);
+		LibraryMs, NetworkMs, GraphMs, InputMs, MeshMs, RefineMs, DecalSetupMs, Targets.AllocationMs, Targets.RoadMs, Targets.MarkingMs);
 
 	NumRoads = Graph.Roads.Num();
 	NumVertices = int32(MeshInput.NumVertices);
@@ -513,14 +600,15 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	NumMarkingTriangles = Targets.MarkingTriangles;
 	CSRoad::FRoadLanes PreviewLanes;
 	if (!bMarkings) PreviewLanes.Build(Graph, Library->Assets, GeometryResult);
+	ClearPreview();
 	BuildPreview(Graph, bMarkings ? Decals.Lanes : PreviewLanes, GeometryResult, Terrain);
 	if (Targets.MarkingError.IsEmpty()) return true;
 	OutError = Targets.MarkingError;
 	return false;
 }
 
-bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGraph& Graph, const CSRoad::FGpuGeometryInput& Geometry, const TMap<FString, UMaterialInterface*>& ByBaseColor,
-	const CSRoad::FSavedTerrain* Terrain, bool bMarkings, FString& OutError)
+bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoad::FRoadSpec>& Specs, const TArray<CSRoad::FSavedNode>& Nodes, bool bLeftHand,
+	const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FSavedTerrain* Terrain, bool bMarkings, FString& OutError)
 {
 	double LapStart = FPlatformTime::Seconds();
 	auto Lap = [&LapStart]()
@@ -531,6 +619,11 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 		return Milliseconds;
 	};
 	if (!TileState) TileState = MakeUnique<CSRoad::FTileState>();
+	auto Fail = [this]()
+	{
+		TileState->Reset();
+		return false;
+	};
 	// The meshes of a whole build give way to the tiles, their VRAM now rather than at the next GC: a
 	// network the size of Palmsland holds over a gigabyte that the tiles are about to ask for again.
 	if (RoadMesh && RoadMesh->GetGpuMesh()) RoadMesh->SetGpuMesh(nullptr);
@@ -539,22 +632,59 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 	Mesh = nullptr;
 	Markings = nullptr;
 
-	// First graph: the whole network's geometry, read back. It tells which roads came out different
-	// from the last build, and the lanes (decals, traffic) are built from it. The geometry is kept:
-	// every later graph of the build (refinement counts, each tile's meshes) registers it instead of
-	// running it, and uploading its tables, again.
-	CSRoad::FGpuRoadMeshInput NoInstances;
-	CSRoad::FGpuGeometryResult GeometryResult;
-	CSRoad::FPooledGeometry SharedGeometry;
-	if (!CSRoad::RunRefineCountsBlocking(Geometry, NoInstances, OutError, &GeometryResult, &SharedGeometry)) return false;
-	CSRoad::FRoadLanes Lanes;
-	Lanes.Build(Graph, Assets, GeometryResult);
-	const double GeometryMs = Lap();
+	const uint64 Signature = TileSignature(bLeftHand);
+	const bool bEverything = !TileState->Matches(Signature);
+	CSRoad::FTileNetwork Network;
+	Network.Build(Specs, Nodes, double(TileSize));
+	TArray<int32> Everything;
+	if (bEverything) for (int32 Road = 0; Road < Specs.Num(); Road++) Everything.Add(Road);
 
-	const uint64 Signature = TileSignature(Graph.bLeftHandTraffic);
+	// The roads whose output may differ from the last build's, built with two rings more: they come out
+	// as in the whole network (Subgraph.Reach). Every road the first time, or after a change of settings.
+	const TArray<int32> Affected = bEverything ? Everything : TileState->Affected(Network);
+	FCSRoadNetworkActor_Subgraph Detected;
+	TArray<uint64> Outputs;
+	if (Affected.Num() > 0)
+	{
+		if (!CSRoadNetworkActor_BuildSubgraph(Assets, Specs, Nodes, bLeftHand, Terrain, bEverything ? Everything : Network.Around(Affected, {}, {}, 2), Detected, OutError)) return Fail();
+		Outputs.Reserve(Affected.Num());
+		for (const int32 Road : Affected) Outputs.Add(CSRoad::TileOutput(Detected.Graph, Detected.Result, Detected.RoadOfSpec[Road], Network.Roads[Road].Key));
+	}
+	const double DetectMs = Lap();
+
 	TArray<FIntPoint> Existing;
 	Tiles.GetKeys(Existing);
-	const CSRoad::FTilePlan Plan = TileState->Plan(Graph, GeometryResult, double(TileSize), Signature, Existing);
+	const TMap<FIntPoint, TArray<int32>> Dirty = TileState->Dirty(Network, Affected, Outputs, bEverything, Existing);
+	// One batch of the tiles to rebuild, the ones this edit dirtied first; the rest stay pending.
+	TArray<FIntPoint> Written;
+	TArray<int32> Batch;
+	for (const TPair<FIntPoint, TArray<int32>>& Pair : Dirty)
+	{
+		if (MaxTilesPerBatch > 0 && Written.Num() >= MaxTilesPerBatch) break;
+		Written.Add(Pair.Key);
+		Batch.Append(Pair.Value);
+	}
+	Batch.Sort();
+	// What the batch draws, the roads at its roads' nodes (decal receivers, lanes) and two rings more:
+	// in a sub-graph of those, the batch and its neighbours come out as in the whole network. The
+	// detection's sub-graph serves when it holds them all.
+	FCSRoadNetworkActor_Subgraph Drawing;
+	FCSRoadNetworkActor_Subgraph* Graphed = &Detected;
+	if (Batch.Num() > 0)
+	{
+		const TArray<int32> Needed = bEverything ? Everything : Network.Around(Batch, {}, {}, 3);
+		if (!Detected.Holds(Needed))
+		{
+			if (!CSRoadNetworkActor_BuildSubgraph(Assets, Specs, Nodes, bLeftHand, Terrain, Needed, Drawing, OutError)) return Fail();
+			Graphed = &Drawing;
+		}
+	}
+	const CSRoad::FGraph& Graph = Graphed->Graph;
+	const double GraphMs = Lap();
+	CSRoad::FRoadLanes Lanes;
+	if (Batch.Num() > 0 && (bMarkings || bEverything)) Lanes.Build(Graph, Assets, Graphed->Result);
+	const double LanesMs = Lap();
+
 	// What each tile of the batch writes; every refined instance among them is counted in one graph.
 	TArray<int32> RoadOfEntity;
 	RoadOfEntity.Init(INDEX_NONE, Graph.NumEntities());
@@ -562,25 +692,21 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 	struct FWork
 	{
 		FIntPoint Key = FIntPoint::ZeroValue;
-		const TArray<int32>* Roads = nullptr;
+		// The tile's roads in the sub-graph, in its (the specs') order.
+		TArray<int32> Roads;
 		TArray<CSRoad::FGpuInstanceRef> Drawn;
 		TArray<CSRoad::FGpuInstanceRef> Context;
 	};
 	TArray<FWork> Work;
-	TArray<FIntPoint> Written;
-	int32 WrittenRoads = 0;
 	TArray<CSRoad::FGpuInstanceRef> All;
 	TSet<int32> Listed;
-	for (const TPair<FIntPoint, TArray<int32>>& Pair : Plan.Dirty)
+	for (const FIntPoint& Key : Written)
 	{
-		// One batch; the tiles after it stay pending for the next ticks.
-		if (MaxTilesPerBatch > 0 && Work.Num() >= MaxTilesPerBatch) break;
-		Written.Add(Pair.Key);
-		WrittenRoads += Pair.Value.Num();
 		FWork& Item = Work.AddDefaulted_GetRef();
-		Item.Key = Pair.Key;
-		Item.Roads = &Pair.Value;
-		CSRoad::TileInstances(Graph, RoadOfEntity, Pair.Value, Item.Drawn, Item.Context);
+		Item.Key = Key;
+		for (const int32 Road : Dirty.FindChecked(Key)) Item.Roads.Add(Graphed->RoadOfSpec[Road]);
+		if (Item.Roads.Num() == 0) continue;
+		CSRoad::TileInstances(Graph, RoadOfEntity, Item.Roads, Item.Drawn, Item.Context);
 		for (const TArray<CSRoad::FGpuInstanceRef>* List : { &Item.Drawn, &Item.Context })
 		{
 			for (const CSRoad::FGpuInstanceRef& Ref : *List)
@@ -592,11 +718,7 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 		}
 	}
 	CSRoad::FGpuRoadMeshInput Counted;
-	if (All.Num() > 0 && (!Counted.BuildSubset(Graph, Assets, All, {}, &TileState->Compositions, OutError) || !CSRoad::RunRefineCountsBlocking(Geometry, Counted, OutError, nullptr, &SharedGeometry)))
-	{
-		TileState->Reset();
-		return false;
-	}
+	if (All.Num() > 0 && (!Counted.BuildSubset(Graph, Assets, All, {}, &TileState->Compositions, OutError) || !CSRoad::RunRefineCountsBlocking(Graphed->Input, Counted, OutError, nullptr, &Graphed->Shared))) return Fail();
 	if (Counted.NumUnconverged > 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %u node mesh triangles did not converge in 20 refinement passes"), *GetName(), Counted.NumUnconverged);
 	const double CountMs = Lap();
 
@@ -605,51 +727,40 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 	for (const FWork& Item : Work)
 	{
 		CSRoad::FGpuRoadMeshInput MeshInput;
-		if (Item.Drawn.Num() > 0 && (!MeshInput.BuildSubset(Graph, Assets, Item.Drawn, Item.Context, &TileState->Compositions, OutError) || !MeshInput.ApplyRefinementFrom(Counted, OutError)))
-		{
-			TileState->Reset();
-			return false;
-		}
+		if (Item.Drawn.Num() > 0 && (!MeshInput.BuildSubset(Graph, Assets, Item.Drawn, Item.Context, &TileState->Compositions, OutError) || !MeshInput.ApplyRefinementFrom(Counted, OutError))) return Fail();
 		if (MeshInput.NumDrawnIndices == 0)
 		{
 			RemoveTile(Item.Key);
 			continue;
 		}
 		TBitArray<> Keep(false, Graph.Roads.Num());
-		for (const int32 Road : *Item.Roads) Keep[Road] = true;
+		for (const int32 Road : Item.Roads) Keep[Road] = true;
 		CSRoad::FDecalScope Scope;
 		Scope.Lanes = &Lanes;
 		Scope.Keep = &Keep;
 		CSRoad::FGpuDecalInput Decals;
-		if (bMarkings && !Decals.Build(Graph, Assets, GeometryResult, MeshInput, ResolveAssetDirectory(), OutError, &Scope))
-		{
-			TileState->Reset();
-			return false;
-		}
+		if (bMarkings && !Decals.Build(Graph, Assets, Graphed->Result, MeshInput, ResolveAssetDirectory(), OutError, &Scope)) return Fail();
 		FCSRoadTile& Tile = EnsureTile(Item.Key);
 		FMeshTargets Targets;
 		Targets.Road = Tile.Road;
 		Targets.RoadMesh = &Tile.RoadMesh;
 		Targets.Markings = Tile.Markings;
 		Targets.MarkingMesh = &Tile.MarkingMesh;
-		if (!WriteMeshes(Geometry, SharedGeometry, MeshInput, bMarkings ? &Decals : nullptr, ByBaseColor, Assets, Targets, OutError))
-		{
-			TileState->Reset();
-			return false;
-		}
-		Tile.Roads = Item.Roads->Num();
+		if (!WriteMeshes(Graphed->Input, Graphed->Shared, MeshInput, bMarkings ? &Decals : nullptr, ByBaseColor, Assets, Targets, OutError)) return Fail();
+		Tile.Roads = Item.Roads.Num();
 		Tile.Vertices = int32(MeshInput.NumDrawnVertices);
 		Tile.Triangles = int32(MeshInput.NumDrawnIndices / 3);
 		Tile.MarkingTriangles = Targets.MarkingTriangles;
 		if (MarkingError.IsEmpty()) MarkingError = Targets.MarkingError;
 	}
-	TileState->Commit(Plan, Signature, Written);
+	TileState->Commit(Network, Affected, Outputs, Signature, Dirty, Written);
 	const double TileMs = Lap();
 
-	NumRoads = Graph.Roads.Num();
+	NumRoads = Specs.Num();
 	NumTiles = Tiles.Num();
 	TilesRebuilt = Work.Num();
-	RoadsRebuilt = WrittenRoads;
+	RoadsRebuilt = Batch.Num();
+	RoadsGraphed = Detected.Graph.Roads.Num() + (Graphed == &Drawing ? Drawing.Graph.Roads.Num() : 0);
 	NumVertices = 0;
 	NumTriangles = 0;
 	NumMarkingTriangles = 0;
@@ -659,9 +770,16 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const CSRoad::FGra
 		NumTriangles += Pair.Value.Triangles;
 		NumMarkingTriangles += Pair.Value.MarkingTriangles;
 	}
-	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads in %d tiles, %d tiles (%d roads) rebuilt, %d pending; geometry and lanes %.0f ms, refinement counts %.0f ms, tile meshes %.0f ms"),
-		*GetName(), NumRoads, NumTiles, TilesRebuilt, RoadsRebuilt, TileState->NumPending(), GeometryMs, CountMs, TileMs);
-	BuildPreview(Graph, Lanes, GeometryResult, Terrain);
+	// The preview needs the whole network: made now when this build had it, else once edits settle.
+	if (bEverything && Batch.Num() > 0)
+	{
+		ClearPreview();
+		BuildPreview(Graph, Lanes, Graphed->Result, Terrain);
+		bPreviewStale = false;
+	}
+	else bPreviewStale = true;
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads in %d tiles, %d tiles (%d roads) rebuilt, %d pending; %d roads graphed (%d affected); detection %.0f ms, drawing graph %.0f ms, lanes %.0f ms, refinement counts %.0f ms, tile meshes %.0f ms, preview %.0f ms"),
+		*GetName(), NumRoads, NumTiles, TilesRebuilt, RoadsRebuilt, TileState->NumPending(), RoadsGraphed, Affected.Num(), DetectMs, GraphMs, LanesMs, CountMs, TileMs, Lap());
 	if (MarkingError.IsEmpty()) return true;
 	OutError = MarkingError;
 	return false;

@@ -52,14 +52,14 @@ struct FGpuGeometryInput
 	TArray<NetCompositionCrosswalk> CrosswalkList;
 	TArray<NetLaneData> LaneDataTable;
 
-	// TerrainHeightData: two R16 maps, two samples per uint (low half first).
+	// TerrainHeightData: two R16 maps, read as two samples per uint (low half first). The samples stay in
+	// TerrainSource (owned by the snapshot, alive while it builds) and go to the GPU as they are, once per load.
 	bool bHasTerrain = false;
 	FVector4f TerrainPlayableOffsetSize = FVector4f::Zero();
 	FVector4f TerrainWorldOffsetSize = FVector4f::Zero();
 	FIntVector4 TerrainDims = FIntVector4(0);
 	FVector2f TerrainHeightScaleOffset = FVector2f::ZeroVector;
-	TArray<uint32> TerrainPlayable;
-	TArray<uint32> TerrainWorld;
+	const FSavedTerrain* TerrainSource = nullptr;
 
 	bool Build(const FGraph& Graph, const FAssets& Assets, const FSavedTerrain* Terrain, FString& OutError);
 };
