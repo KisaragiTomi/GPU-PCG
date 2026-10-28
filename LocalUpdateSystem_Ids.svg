@@ -1,0 +1,392 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1630" height="1312" viewBox="0 0 1630 1312">
+<title>CSRoadNet 与城市层的编号一览</title>
+<defs>
+<style>
+text { font-family: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', 'Source Han Sans SC', sans-serif; }
+.title { font-size: 22px; font-weight: 700; fill: #1f2937; }
+.subtitle { font-size: 13px; fill: #6b6a64; }
+.panel { fill: #f7f6f2; stroke: #d3d1c7; stroke-width: 1; }
+.panel-title { font-size: 15px; font-weight: 700; fill: #2c2c2a; }
+.card-bg { fill: #ffffff; }
+.card-border { fill: none; stroke-width: 1.2; }
+.swatch { stroke-width: 1; }
+.card-name { font-size: 13.5px; font-weight: 700; fill: #1f2937; }
+.pill { fill: #ffffff; stroke-width: 0.8; }
+.pill-text { font-size: 11px; font-weight: 700; }
+.body, .note { font-size: 12px; fill: #374151; }
+.gone-body { fill: #4b5563; }
+.legend { font-size: 12.5px; fill: #374151; }
+.legend-key { font-weight: 700; }
+.code { font-family: Consolas, 'Cascadia Mono', 'Courier New', monospace; fill: #111827; }
+.arrow { fill: none; stroke: #6b7280; stroke-width: 1.4; marker-end: url(#arrowhead); }
+.hdr-eq { fill: url(#id-eq-dot-bg); }
+.border-eq { stroke: #3b82f6; }
+.sep-eq { stroke: #3b82f6; stroke-opacity: 0.55; }
+.pt-eq { fill: #1d4ed8; }
+.hdr-ord { fill: url(#id-ord-stripe-bg); }
+.border-ord { stroke: #f97316; }
+.sep-ord { stroke: #f97316; stroke-opacity: 0.55; }
+.pt-ord { fill: #c2410c; }
+.hdr-seed { fill: url(#id-seed-cross-bg); }
+.border-seed { stroke: #d946ef; }
+.sep-seed { stroke: #d946ef; stroke-opacity: 0.55; }
+.pt-seed { fill: #a21caf; }
+.hdr-key { fill: url(#id-key-hatch-bg); }
+.border-key { stroke: #22c55e; }
+.sep-key { stroke: #22c55e; stroke-opacity: 0.55; }
+.pt-key { fill: #15803d; }
+.hdr-cnt { fill: #f1f5f9; }
+.border-cnt { stroke: #94a3b8; }
+.sep-cnt { stroke: #94a3b8; stroke-opacity: 0.55; }
+.pt-cnt { fill: #475569; }
+.hdr-gone { fill: url(#legacy-hatch); }
+.border-gone { stroke: #94a3b8; }
+.sep-gone { stroke: #94a3b8; stroke-opacity: 0.55; }
+.pt-gone { fill: #475569; }
+</style>
+<marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+  <path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/>
+</marker>
+<pattern id="id-eq-dot-bg" patternUnits="userSpaceOnUse" width="12" height="12">
+  <rect width="12" height="12" fill="#dbeafe"/>
+  <circle cx="3" cy="3" r="1.4" fill="#2563eb" opacity="0.280220"/>
+  <circle cx="9" cy="9" r="1.4" fill="#2563eb" opacity="0.280220"/>
+</pattern>
+<pattern id="id-ord-stripe-bg" patternUnits="userSpaceOnUse" width="10" height="10">
+  <rect width="10" height="10" fill="#ffedd5"/>
+  <rect y="1" width="10" height="2" fill="#ea580c" opacity="0.253731"/>
+  <rect y="6" width="10" height="1.5" fill="#ea580c" opacity="0.253731"/>
+</pattern>
+<pattern id="id-seed-cross-bg" patternUnits="userSpaceOnUse" width="12" height="12">
+  <rect width="12" height="12" fill="#fae8ff"/>
+  <path d="M0 6H12" stroke="#c026d3" stroke-width="1" opacity="0.262887"/>
+  <path d="M6 0V12" stroke="#c026d3" stroke-width="1" opacity="0.262887"/>
+</pattern>
+<pattern id="id-key-hatch-bg" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
+  <rect width="10" height="10" fill="#dcfce7"/>
+  <rect x="0" y="0" width="10" height="2" fill="#16a34a" opacity="0.257576"/>
+</pattern>
+<pattern id="legacy-hatch" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
+  <rect width="10" height="10" fill="#f1f5f9"/>
+  <rect x="0" y="0" width="10" height="2" fill="#64748b" opacity="0.361702"/>
+</pattern>
+</defs>
+<rect width="1630" height="1312" fill="#ffffff"/>
+<text class="title" x="30" y="44">CSRoadNet 与城市层的编号一览</text>
+<text class="subtitle" x="30" y="72">每张卡：编号叫什么、谁生成、谁读、它的值怎么起作用。表头底色见右上图例，灰底斜纹的是 10-28 去掉的；箭头表示编号往下游传。</text>
+<rect class="panel" x="30" y="96" width="380" height="308" rx="12"/>
+<text class="panel-title" x="46" y="121">CS2 快照（<tspan class="code">network.json</tspan>）</text>
+<g class="card" data-card="A">
+<rect class="card-bg" x="46" y="136" width="348" height="112" rx="8"/>
+<path class="hdr hdr-eq" d="M46,164 V144 Q46,136 54,136 H386 Q394,136 394,144 V164 Z"/>
+<line class="sep-eq" x1="46" y1="164" x2="394" y2="164"/>
+<rect class="card-border border-eq" x="46" y="136" width="348" height="112" rx="8"/>
+<text class="card-name" x="58" y="155">节点 id、边 id</text>
+<rect class="pill border-eq" x="326" y="141" width="58" height="18" rx="9"/>
+<text class="pill-text pt-eq" x="355.0" y="154" text-anchor="middle">只比相等</text>
+<text class="body" x="58" y="183"><tspan class="code">nodes[].id</tspan> · <tspan class="code">roads[].id</tspan> · <tspan class="code">start</tspan> / <tspan class="code">end</tspan></text>
+<text class="body" x="58" y="201">快照自带的编号（来自 CS2 存档的实体）</text>
+<text class="body" x="58" y="219">只在读档时用：start / end 换成节点下标，</text>
+<text class="body" x="58" y="237">边 id 查重；读完就丢，不进路网</text>
+</g>
+<g class="card" data-card="B">
+<rect class="card-bg" x="46" y="260" width="348" height="130" rx="8"/>
+<path class="hdr hdr-eq" d="M46,288 V268 Q46,260 54,260 H386 Q394,260 394,268 V288 Z"/>
+<line class="sep-eq" x1="46" y1="288" x2="394" y2="288"/>
+<rect class="card-border border-eq" x="46" y="260" width="348" height="130" rx="8"/>
+<text class="card-name" x="58" y="279">owner id</text>
+<rect class="pill border-eq" x="326" y="265" width="58" height="18" rx="9"/>
+<text class="pill-text pt-eq" x="355.0" y="278" text-anchor="middle">只比相等</text>
+<text class="body" x="58" y="307"><tspan class="code">nodes[].owner</tspan> · <tspan class="code">roads[].owner</tspan></text>
+<text class="body" x="58" y="325">所属建筑等的实体编号，0 = 无；值原样保留</text>
+<text class="body" x="58" y="343">CS2 里 owner 可以是另一条边（子路网）：</text>
+<text class="body" x="58" y="361">现在不支持，读档时警告，只当分组用</text>
+<text class="body" x="58" y="379">Palmsland 只有 1 个，不等于任何节点或边</text>
+</g>
+<rect class="panel" x="30" y="424" width="380" height="432" rx="12"/>
+<text class="panel-title" x="46" y="449">关卡里的样条路</text>
+<g class="card" data-card="D">
+<rect class="card-bg" x="46" y="464" width="348" height="112" rx="8"/>
+<path class="hdr hdr-gone" d="M46,492 V472 Q46,464 54,464 H386 Q394,464 394,472 V492 Z"/>
+<line class="sep-gone" x1="46" y1="492" x2="394" y2="492"/>
+<rect class="card-border border-gone" x="46" y="464" width="348" height="112" rx="8"/>
+<text class="card-name" x="58" y="483">边序</text>
+<rect class="pill border-gone" x="337" y="469" width="47" height="18" rx="9"/>
+<text class="pill-text pt-gone" x="360.5" y="482" text-anchor="middle">已去掉</text>
+<text class="body gone-body" x="58" y="511"><tspan class="code">FCSRoadSplinePoint::SegmentOrder</tspan></text>
+<text class="body gone-body" x="58" y="529">原来记这段边排在全网第几，保住快照的边序</text>
+<text class="body gone-body" x="58" y="547">现在样条和边都按内容排序，与收集先后无关</text>
+<text class="body gone-body" x="58" y="565">Palmsland 转样条后最大偏差 2.7 cm</text>
+</g>
+<g class="card" data-card="E">
+<rect class="card-bg" x="46" y="588" width="348" height="130" rx="8"/>
+<path class="hdr hdr-gone" d="M46,616 V596 Q46,588 54,588 H386 Q394,588 394,596 V616 Z"/>
+<line class="sep-gone" x1="46" y1="616" x2="394" y2="616"/>
+<rect class="card-border border-gone" x="46" y="588" width="348" height="130" rx="8"/>
+<text class="card-name" x="58" y="607">owner 值</text>
+<rect class="pill border-gone" x="337" y="593" width="47" height="18" rx="9"/>
+<text class="pill-text pt-gone" x="360.5" y="606" text-anchor="middle">已去掉</text>
+<text class="body gone-body" x="58" y="635"><tspan class="code">NodeOwner</tspan> · <tspan class="code">SegmentOwner</tspan>（int）</text>
+<text class="body gone-body" x="58" y="653">改成 <tspan class="code">bNodeOwned</tspan> · <tspan class="code">bSegmentOwned</tspan>：只记有没有</text>
+<text class="body gone-body" x="58" y="671">有 owner 的边不压平，去掉会差 0.47 m</text>
+<text class="body gone-body" x="58" y="689">有 owner 的都用同一个值 1</text>
+<text class="body gone-body" x="58" y="707">旧关卡的 int 值经属性重定向读成 bool</text>
+</g>
+<g class="card" data-card="C">
+<rect class="card-bg" x="46" y="730" width="348" height="112" rx="8"/>
+<path class="hdr hdr-seed" d="M46,758 V738 Q46,730 54,730 H386 Q394,730 394,738 V758 Z"/>
+<line class="sep-seed" x1="46" y1="758" x2="394" y2="758"/>
+<rect class="card-border border-seed" x="46" y="730" width="348" height="112" rx="8"/>
+<text class="card-name" x="58" y="749">样条身份</text>
+<rect class="pill border-seed" x="326" y="735" width="58" height="18" rx="9"/>
+<text class="pill-text pt-seed" x="355.0" y="748" text-anchor="middle">随机种子</text>
+<text class="body" x="58" y="777"><tspan class="code">FSplineRoad::Id</tspan></text>
+<text class="body" x="58" y="795"><tspan class="code">XxHash64("Actor 名.组件名")</tspan></text>
+<text class="body" x="58" y="813">只给批量房子用：锚线 id 从它派生</text>
+<text class="body" x="58" y="831">actor 名字变了（如重新生成小路）就变</text>
+</g>
+<rect class="panel" x="30" y="886" width="380" height="396" rx="12"/>
+<text class="panel-title" x="46" y="911">批量房子（<tspan class="code">CSCity</tspan>）</text>
+<g class="card" data-card="M">
+<rect class="card-bg" x="46" y="926" width="348" height="112" rx="8"/>
+<path class="hdr hdr-seed" d="M46,954 V934 Q46,926 54,926 H386 Q394,926 394,934 V954 Z"/>
+<line class="sep-seed" x1="46" y1="954" x2="394" y2="954"/>
+<rect class="card-border border-seed" x="46" y="926" width="348" height="112" rx="8"/>
+<text class="card-name" x="58" y="945">锚线 id</text>
+<rect class="pill border-seed" x="326" y="931" width="58" height="18" rx="9"/>
+<text class="pill-text pt-seed" x="355.0" y="944" text-anchor="middle">随机种子</text>
+<text class="body" x="58" y="973"><tspan class="code">CSCity::FRoadLine::Id</tspan></text>
+<text class="body" x="58" y="991">样条：<tspan class="code">Combine(Spline.Id, 段号)</tspan></text>
+<text class="body" x="58" y="1009">快照：<tspan class="code">Combine(prefab 与曲线的哈希, 重复序号)</tspan></text>
+<text class="body" x="58" y="1027">样条中间插一个点，后面各段的段号顺延</text>
+</g>
+<g class="card" data-card="N">
+<rect class="card-bg" x="46" y="1050" width="348" height="112" rx="8"/>
+<path class="hdr hdr-seed" d="M46,1078 V1058 Q46,1050 54,1050 H386 Q394,1050 394,1058 V1078 Z"/>
+<line class="sep-seed" x1="46" y1="1078" x2="394" y2="1078"/>
+<rect class="card-border border-seed" x="46" y="1050" width="348" height="112" rx="8"/>
+<text class="card-name" x="58" y="1069">地块 id</text>
+<rect class="pill border-seed" x="326" y="1055" width="58" height="18" rx="9"/>
+<text class="pill-text pt-seed" x="355.0" y="1068" text-anchor="middle">随机种子</text>
+<text class="body" x="58" y="1097"><tspan class="code">CSCity::FLot::Id</tspan></text>
+<text class="body" x="58" y="1115"><tspan class="code">Mix(锚线 id ^ Mix(槽位 × 2 + 左右))</tspan></text>
+<text class="body" x="58" y="1133">抽进深、高度、颜色和重叠时的优先级</text>
+<text class="body" x="58" y="1151">拖路时不变；锚线 id 一变，沿线房子重抽</text>
+</g>
+<g class="card" data-card="O">
+<rect class="card-bg" x="46" y="1174" width="348" height="94" rx="8"/>
+<path class="hdr hdr-key" d="M46,1202 V1182 Q46,1174 54,1174 H386 Q394,1174 394,1182 V1202 Z"/>
+<line class="sep-key" x1="46" y1="1202" x2="394" y2="1202"/>
+<rect class="card-border border-key" x="46" y="1174" width="348" height="94" rx="8"/>
+<text class="card-name" x="58" y="1193">房子的输入指纹</text>
+<rect class="pill border-key" x="337" y="1179" width="47" height="18" rx="9"/>
+<text class="pill-text pt-key" x="360.5" y="1192" text-anchor="middle">内容键</text>
+<text class="body" x="58" y="1221"><tspan class="code">CSCity</tspan> 布局输入的 <tspan class="code">FInput::Key</tspan></text>
+<text class="body" x="58" y="1239">种类、锚线 id、半宽、曲线；预留位用多边形</text>
+<text class="body" x="58" y="1257">新增或消失的输入所及的 tile 重排</text>
+</g>
+<rect class="panel" x="460" y="96" width="380" height="556" rx="12"/>
+<text class="panel-title" x="476" y="121">快照形式（<tspan class="code">FGraph::Build</tspan> 的输入）</text>
+<g class="card" data-card="F">
+<rect class="card-bg" x="476" y="136" width="348" height="112" rx="8"/>
+<path class="hdr hdr-gone" d="M476,164 V144 Q476,136 484,136 H816 Q824,136 824,144 V164 Z"/>
+<line class="sep-gone" x1="476" y1="164" x2="824" y2="164"/>
+<rect class="card-border border-gone" x="476" y="136" width="348" height="112" rx="8"/>
+<text class="card-name" x="488" y="155">节点 id、边 id</text>
+<rect class="pill border-gone" x="767" y="141" width="47" height="18" rx="9"/>
+<text class="pill-text pt-gone" x="790.5" y="154" text-anchor="middle">已去掉</text>
+<text class="body gone-body" x="488" y="183"><tspan class="code">FSavedNode::Id</tspan> · <tspan class="code">FRoadSpec::SourceId</tspan></text>
+<text class="body gone-body" x="488" y="201">原来：快照原样带过来；样条路网现编</text>
+<text class="body gone-body" x="488" y="219">（节点 = 下标 + 1，边 = 节点数 + 边下标 + 1）</text>
+<text class="body gone-body" x="488" y="237">现在节点只靠下标，边的实体建图时直接分配</text>
+</g>
+<g class="card" data-card="G">
+<rect class="card-bg" x="476" y="260" width="348" height="94" rx="8"/>
+<path class="hdr hdr-eq" d="M476,288 V268 Q476,260 484,260 H816 Q824,260 824,268 V288 Z"/>
+<line class="sep-eq" x1="476" y1="288" x2="824" y2="288"/>
+<rect class="card-border border-eq" x="476" y="260" width="348" height="94" rx="8"/>
+<text class="card-name" x="488" y="279">两端节点</text>
+<rect class="pill border-eq" x="756" y="265" width="58" height="18" rx="9"/>
+<text class="pill-text pt-eq" x="785.0" y="278" text-anchor="middle">只比相等</text>
+<text class="body" x="488" y="307"><tspan class="code">FRoadSpec::SourceStart</tspan> / <tspan class="code">SourceEnd</tspan></text>
+<text class="body" x="488" y="325">节点数组的下标，拓扑只靠它</text>
+<text class="body" x="488" y="343">快照读档时由 <tspan class="code">start</tspan> / <tspan class="code">end</tspan> 的 id 换算</text>
+</g>
+<g class="card" data-card="H">
+<rect class="card-bg" x="476" y="366" width="348" height="130" rx="8"/>
+<path class="hdr hdr-eq" d="M476,394 V374 Q476,366 484,366 H816 Q824,366 824,374 V394 Z"/>
+<line class="sep-eq" x1="476" y1="394" x2="824" y2="394"/>
+<rect class="card-border border-eq" x="476" y="366" width="348" height="130" rx="8"/>
+<text class="card-name" x="488" y="385">owner</text>
+<rect class="pill border-eq" x="756" y="371" width="58" height="18" rx="9"/>
+<text class="pill-text pt-eq" x="785.0" y="384" text-anchor="middle">只比相等</text>
+<text class="body" x="488" y="413"><tspan class="code">FSavedNode::Owner</tspan> · <tspan class="code">FRoadSpec::Owner</tspan></text>
+<text class="body" x="488" y="431">快照：原值；样条路网：有 owner 的都是 1</text>
+<text class="body" x="488" y="449">同值的共用一个 owner 实体</text>
+<text class="body" x="488" y="467">旧算法从「节点数 + 边数 + 1」起编、增删节点</text>
+<text class="body" x="488" y="485">全网换号的问题随之消失</text>
+</g>
+<g class="card" data-card="I">
+<rect class="card-bg" x="476" y="508" width="348" height="130" rx="8"/>
+<path class="hdr hdr-ord" d="M476,536 V516 Q476,508 484,508 H816 Q824,508 824,516 V536 Z"/>
+<line class="sep-ord" x1="476" y1="536" x2="824" y2="536"/>
+<rect class="card-border border-ord" x="476" y="508" width="348" height="130" rx="8"/>
+<text class="card-name" x="488" y="527">规格顺序</text>
+<rect class="pill border-ord" x="767" y="513" width="47" height="18" rx="9"/>
+<text class="pill-text pt-ord" x="790.5" y="526" text-anchor="middle">看先后</text>
+<text class="body" x="488" y="555"><tspan class="code">FRoadSpec[]</tspan> 的数组次序</text>
+<text class="body" x="488" y="573">快照：文件里的顺序</text>
+<text class="body" x="488" y="591">样条路网：按内容排（曲线两端、控制点、</text>
+<text class="body" x="488" y="609">prefab、升级、高程、有没有 owner）</text>
+<text class="body" x="488" y="627">决定下一步节点上各条边的先后</text>
+</g>
+<rect class="panel" x="890" y="96" width="380" height="522" rx="12"/>
+<text class="panel-title" x="906" y="121"><tspan class="code">FGraph</tspan>（每次建图重新分配，不落盘）</text>
+<g class="card" data-card="J">
+<rect class="card-bg" x="906" y="136" width="348" height="184" rx="8"/>
+<path class="hdr hdr-eq" d="M906,164 V144 Q906,136 914,136 H1246 Q1254,136 1254,144 V164 Z"/>
+<line class="sep-eq" x1="906" y1="164" x2="1254" y2="164"/>
+<rect class="card-border border-eq" x="906" y="136" width="348" height="184" rx="8"/>
+<text class="card-name" x="918" y="155">实体号</text>
+<rect class="pill border-eq" x="1186" y="141" width="58" height="18" rx="9"/>
+<text class="pill-text pt-eq" x="1215.0" y="154" text-anchor="middle">只比相等</text>
+<text class="body" x="918" y="183"><tspan class="code">Entity</tspan>（int）· <tspan class="code">0 = Entity.Null</tspan></text>
+<text class="body" x="918" y="201">从 1 编起；节点、边、owner 共用一个空间</text>
+<text class="body" x="918" y="219">按第一次出现分配：边按规格顺序，节点在</text>
+<text class="body" x="918" y="237">第一次被边用到时，owner 在第一次被引用时</text>
+<text class="body" x="918" y="255">节点按下标、owner 按值各查一张表</text>
+<text class="body" x="918" y="273">GPU 缓冲全按它寻址</text>
+<text class="body" x="918" y="291">值不进结果：每个 tile 的子图都重新编号，</text>
+<text class="body" x="918" y="309">Palmsland 5,667 条路的输出仍逐位一致</text>
+</g>
+<g class="card" data-card="K">
+<rect class="card-bg" x="906" y="332" width="348" height="94" rx="8"/>
+<path class="hdr hdr-eq" d="M906,360 V340 Q906,332 914,332 H1246 Q1254,332 1254,340 V360 Z"/>
+<line class="sep-eq" x1="906" y1="360" x2="1254" y2="360"/>
+<rect class="card-border border-eq" x="906" y="332" width="348" height="94" rx="8"/>
+<text class="card-name" x="918" y="351">表下标</text>
+<rect class="pill border-eq" x="1186" y="337" width="58" height="18" rx="9"/>
+<text class="pill-text pt-eq" x="1215.0" y="350" text-anchor="middle">只比相等</text>
+<text class="body" x="918" y="379"><tspan class="code">PrefabRef</tspan> · <tspan class="code">CompositionData</tspan></text>
+<text class="body" x="918" y="397">prefab 表和组合表的下标，每次建图从 1 编起</text>
+<text class="body" x="918" y="415">0 = 空，只在本次建图内有效</text>
+</g>
+<g class="card" data-card="L">
+<rect class="card-bg" x="906" y="438" width="348" height="166" rx="8"/>
+<path class="hdr hdr-ord" d="M906,466 V446 Q906,438 914,438 H1246 Q1254,438 1254,446 V466 Z"/>
+<line class="sep-ord" x1="906" y1="466" x2="1254" y2="466"/>
+<rect class="card-border border-ord" x="906" y="438" width="348" height="166" rx="8"/>
+<text class="card-name" x="918" y="457">节点上的边次序</text>
+<rect class="pill border-ord" x="1197" y="443" width="47" height="18" rx="9"/>
+<text class="pill-text pt-ord" x="1220.5" y="456" text-anchor="middle">看先后</text>
+<text class="body" x="918" y="485"><tspan class="code">ConnectedEdges[节点]</tspan></text>
+<text class="body" x="918" y="503">规格顺序里先出现的边排在前面</text>
+<text class="body" x="918" y="521">组合选择和 GPU 几何 job 都按它遍历：</text>
+<text class="body" x="918" y="539">严格比较时先到先得，浮点也按这个顺序累加</text>
+<text class="body" x="918" y="557">只换边序时，Palmsland 最大差 2.7 cm，</text>
+<text class="body" x="918" y="575">没有超过 0.1 m 的；旧记的 12.6 m 是连出城</text>
+<text class="body" x="918" y="593">连接和 owner 一起丢掉时测的</text>
+</g>
+<rect class="panel" x="890" y="648" width="380" height="414" rx="12"/>
+<text class="panel-title" x="906" y="673">局部更新（<tspan class="code">CSRoadTiles</tspan>）：只认内容</text>
+<g class="card" data-card="P">
+<rect class="card-bg" x="906" y="688" width="348" height="130" rx="8"/>
+<path class="hdr hdr-key" d="M906,716 V696 Q906,688 914,688 H1246 Q1254,688 1254,696 V716 Z"/>
+<line class="sep-key" x1="906" y1="716" x2="1254" y2="716"/>
+<rect class="card-border border-key" x="906" y="688" width="348" height="130" rx="8"/>
+<text class="card-name" x="918" y="707">路的输入指纹</text>
+<rect class="pill border-key" x="1197" y="693" width="47" height="18" rx="9"/>
+<text class="pill-text pt-key" x="1220.5" y="706" text-anchor="middle">内容键</text>
+<text class="body" x="918" y="735"><tspan class="code">FTileRoad::Key</tspan>（uint64 哈希）</text>
+<text class="body" x="918" y="753">prefab、曲线、升级、高程、owner，以及两端</text>
+<text class="body" x="918" y="771">节点的数据；路和节点都没有编号可混进来</text>
+<text class="body" x="918" y="789">和上次比，新增或消失的就是改动的路</text>
+<text class="body" x="918" y="807">同一条路画了两遍时，再混入出现次数</text>
+</g>
+<g class="card" data-card="Q">
+<rect class="card-bg" x="906" y="830" width="348" height="112" rx="8"/>
+<path class="hdr hdr-key" d="M906,858 V838 Q906,830 914,830 H1246 Q1254,830 1254,838 V858 Z"/>
+<line class="sep-key" x1="906" y1="858" x2="1254" y2="858"/>
+<rect class="card-border border-key" x="906" y="830" width="348" height="112" rx="8"/>
+<text class="card-name" x="918" y="849">节点键</text>
+<rect class="pill border-key" x="1197" y="835" width="47" height="18" rx="9"/>
+<text class="pill-text pt-key" x="1220.5" y="848" text-anchor="middle">内容键</text>
+<text class="body" x="918" y="877"><tspan class="code">FTileRoad::StartNode</tspan> / <tspan class="code">EndNode</tspan></text>
+<text class="body" x="918" y="895">存档节点：按位置哈希</text>
+<text class="body" x="918" y="913">没有存档的端点：按 1 cm 取整，同 <tspan class="code">PositionNode</tspan></text>
+<text class="body" x="918" y="931">共用节点键或 owner 相同 = 相隔一圈</text>
+</g>
+<g class="card" data-card="R">
+<rect class="card-bg" x="906" y="954" width="348" height="94" rx="8"/>
+<path class="hdr hdr-key" d="M906,982 V962 Q906,954 914,954 H1246 Q1254,954 1254,962 V982 Z"/>
+<line class="sep-key" x1="906" y1="982" x2="1254" y2="982"/>
+<rect class="card-border border-key" x="906" y="954" width="348" height="94" rx="8"/>
+<text class="card-name" x="918" y="973">tile 坐标</text>
+<rect class="pill border-key" x="1197" y="959" width="47" height="18" rx="9"/>
+<text class="pill-text pt-key" x="1220.5" y="972" text-anchor="middle">内容键</text>
+<text class="body" x="918" y="1001"><tspan class="code">FIntPoint</tspan> → 组件名 <tspan class="code">RoadTile_X_Y</tspan></text>
+<text class="body" x="918" y="1019">路：<tspan class="code">floor(中点 / TileSize)</tspan>；房子：地块中心</text>
+<text class="body" x="918" y="1037">路面和标线的网格组件按它命名</text>
+</g>
+<rect class="panel" x="1310" y="96" width="290" height="226" rx="12"/>
+<text class="panel-title" x="1326" y="121">表头底色 = 编号起什么作用</text>
+<rect class="swatch hdr-eq border-eq" x="1326" y="138" width="40" height="22" rx="4"/>
+<text class="legend" x="1376" y="154"><tspan class="legend-key pt-eq">只比相等</tspan>：值换了，结果不变</text>
+<rect class="swatch hdr-ord border-ord" x="1326" y="168" width="40" height="22" rx="4"/>
+<text class="legend" x="1376" y="184"><tspan class="legend-key pt-ord">看先后</tspan>：顺序变了，结果会变</text>
+<rect class="swatch hdr-seed border-seed" x="1326" y="198" width="40" height="22" rx="4"/>
+<text class="legend" x="1376" y="214"><tspan class="legend-key pt-seed">随机种子</tspan>：值变了，房子重新抽签</text>
+<rect class="swatch hdr-key border-key" x="1326" y="228" width="40" height="22" rx="4"/>
+<text class="legend" x="1376" y="244"><tspan class="legend-key pt-key">内容键</tspan>：由内容算出，跟着内容走</text>
+<rect class="swatch hdr-cnt border-cnt" x="1326" y="258" width="40" height="22" rx="4"/>
+<text class="legend" x="1376" y="274"><tspan class="legend-key pt-cnt">运行期计数</tspan>：只管缓存和统计</text>
+<rect class="swatch hdr-gone border-gone" x="1326" y="288" width="40" height="22" rx="4"/>
+<text class="legend" x="1376" y="304"><tspan class="legend-key pt-gone">已去掉</tspan>：10-28 删掉的编号</text>
+<rect class="panel" x="1310" y="342" width="290" height="194" rx="12"/>
+<text class="panel-title" x="1326" y="367">owner 在几何里管三件事</text>
+<text class="note" x="1326" y="394">① 有没有 owner：有 owner 的边不参与</text>
+<text class="note" x="1340" y="412">节点压平，自己也不压平</text>
+<text class="note" x="1340" y="430">去掉它 Palmsland 差 0.47 m，所以留着</text>
+<text class="note" x="1326" y="448">② owner 本身是一条边（CS2 子路网）：</text>
+<text class="note" x="1340" y="466">读档时不再支持，只剩分组</text>
+<text class="note" x="1326" y="484">③ 只有轨道车道、不在路口的两条边比较</text>
+<text class="note" x="1340" y="502">顶层 owner（<tspan class="code">dontCrossTracks</tspan>）</text>
+<text class="note" x="1340" y="520">纯道路不起作用；Palmsland 没有轨道</text>
+<rect class="panel" x="1310" y="556" width="290" height="238" rx="12"/>
+<text class="panel-title" x="1326" y="581">其他编号</text>
+<g class="card" data-card="S">
+<rect class="card-bg" x="1326" y="596" width="258" height="184" rx="8"/>
+<path class="hdr hdr-cnt" d="M1326,624 V604 Q1326,596 1334,596 H1576 Q1584,596 1584,604 V624 Z"/>
+<line class="sep-cnt" x1="1326" y1="624" x2="1584" y2="624"/>
+<rect class="card-border border-cnt" x="1326" y="596" width="258" height="184" rx="8"/>
+<text class="card-name" x="1338" y="615">缓存、统计和模拟用的号</text>
+<rect class="pill border-cnt" x="1505" y="601" width="69" height="18" rx="9"/>
+<text class="pill-text pt-cnt" x="1539.5" y="614" text-anchor="middle">运行期计数</text>
+<text class="body" x="1338" y="643"><tspan class="code">FSavedTerrain::Serial</tspan></text>
+<text class="body" x="1338" y="661">每次加载一个新号，GPU 按它缓存地形</text>
+<text class="body" x="1338" y="679"><tspan class="code">UCSMesh::GetGeneration()</tspan></text>
+<text class="body" x="1338" y="697">网格改写后变，测试据此找重写的 tile</text>
+<text class="body" x="1338" y="715"><tspan class="code">GCSMeshBlockingFlushCount</tspan></text>
+<text class="body" x="1338" y="733">阻塞 flush 的次数</text>
+<text class="body" x="1338" y="751">车流模拟 <tspan class="code">Car.Id = NextId++</tspan></text>
+<text class="body" x="1338" y="769">每辆车一个，只在模拟里用</text>
+</g>
+<rect class="panel" x="1310" y="814" width="290" height="176" rx="12"/>
+<text class="panel-title" x="1326" y="839">读图要点</text>
+<text class="note" x="1326" y="866">• 拓扑只靠「谁和谁相同」，编号的值</text>
+<text class="note" x="1340" y="884">本身不进几何输出</text>
+<text class="note" x="1326" y="902">• 会进输出的：边的先后（现在按内容排）、</text>
+<text class="note" x="1340" y="920">有没有 owner、房子的随机种子</text>
+<text class="note" x="1326" y="938">• 局部更新只认内容：路和节点都没有编号，</text>
+<text class="note" x="1340" y="956">节点按位置认，tile 按坐标认</text>
+<text class="note" x="1326" y="974">• 灰底斜纹卡片是 10-28 去掉的编号</text>
+<path class="arrow" d="M394,176 L440,176 L440,300 L474,300"/>
+<path class="arrow" d="M394,300 L425,300 L425,406 L474,406"/>
+<path class="arrow" d="M394,628 L452,628 L452,428 L474,428"/>
+<path class="arrow" d="M824,300 L865,300 L865,176 L904,176"/>
+<path class="arrow" d="M824,548 L875,548 L875,478 L904,478"/>
+<path class="arrow" d="M840,630 L882,630 L882,728 L904,728"/>
+<path class="arrow" d="M220.0,842 L220.0,924"/>
+<path class="arrow" d="M220.0,1038 L220.0,1048"/>
+<path class="arrow" d="M220.0,1162 L220.0,1172"/>
+</svg>

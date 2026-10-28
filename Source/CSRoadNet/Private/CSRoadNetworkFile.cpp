@@ -2,6 +2,7 @@
 
 #include <atomic>
 
+#include "CSRoadNet.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
@@ -103,12 +104,14 @@ bool FSavedNetwork::Load(const FString& Path, const FAssets* Assets, bool bLoadT
 		const TSharedPtr<FJsonObject>* Options = nullptr;
 		if ((*Metadata)->TryGetObjectField(TEXT("options"), Options)) (*Options)->TryGetBoolField(TEXT("leftHandTraffic"), bLeftHandTraffic);
 	}
+	// The file's ids name nodes, edges and owners in one space; the network keeps node indices and owner
+	// values only.
 	TMap<int32, int32> NodeIndices;
 	for (const TSharedPtr<FJsonValue>& Value : Root->GetArrayField(TEXT("nodes")))
 	{
 		const TSharedPtr<FJsonObject> N = Value->AsObject();
 		FSavedNode Node;
-		Node.Id = static_cast<int32>(N->GetNumberField(TEXT("id")));
+		const int32 Id = static_cast<int32>(N->GetNumberField(TEXT("id")));
 		Node.Prefab = N->GetStringField(TEXT("prefab"));
 		Node.Position = CSRoadNetworkFile_Vector(N->GetArrayField(TEXT("position")));
 		const TArray<TSharedPtr<FJsonValue>>& R = N->GetArrayField(TEXT("rotation"));
@@ -117,7 +120,7 @@ bool FSavedNetwork::Load(const FString& Path, const FAssets* Assets, bool bLoadT
 		Node.Upgrade = CSRoadNetworkFile_Upgrade(N);
 		Node.bOutside = N->GetBoolField(TEXT("outside"));
 		Node.Owner = CSRoadNetworkFile_Owner(N);
-		NodeIndices.Add(Node.Id, Nodes.Add(Node));
+		NodeIndices.Add(Id, Nodes.Add(Node));
 	}
 	TSet<int32> EdgeIds;
 	for (const TSharedPtr<FJsonValue>& Value : Root->GetArrayField(TEXT("roads")))
@@ -129,34 +132,40 @@ bool FSavedNetwork::Load(const FString& Path, const FAssets* Assets, bool bLoadT
 		Spec.Curve = Bezier4x3(CSRoadNetworkFile_Vector(C, 0), CSRoadNetworkFile_Vector(C, 3), CSRoadNetworkFile_Vector(C, 6), CSRoadNetworkFile_Vector(C, 9));
 		Spec.Upgrade = CSRoadNetworkFile_Upgrade(E);
 		Spec.bHasSource = true;
-		Spec.SourceId = static_cast<int32>(E->GetNumberField(TEXT("id")));
+		const int32 Id = static_cast<int32>(E->GetNumberField(TEXT("id")));
 		const int32* Start = NodeIndices.Find(static_cast<int32>(E->GetNumberField(TEXT("start"))));
 		const int32* End = NodeIndices.Find(static_cast<int32>(E->GetNumberField(TEXT("end"))));
 		if (!Start || !End)
 		{
-			OutError = FString::Printf(TEXT("Edge %d references a missing node"), Spec.SourceId);
+			OutError = FString::Printf(TEXT("Edge %d references a missing node"), Id);
 			return false;
 		}
 		Spec.SourceStart = *Start;
 		Spec.SourceEnd = *End;
 		Spec.bHasElevation = CSRoadNetworkFile_Elevation(E, Spec.Elevation);
 		Spec.Owner = CSRoadNetworkFile_Owner(E);
-		if (EdgeIds.Contains(Spec.SourceId))
+		if (EdgeIds.Contains(Id))
 		{
 			OutError = TEXT("Duplicate source edge");
 			return false;
 		}
-		EdgeIds.Add(Spec.SourceId);
+		EdgeIds.Add(Id);
 		for (const float3& P : { Spec.Curve.a, Spec.Curve.b, Spec.Curve.c, Spec.Curve.d })
 		{
 			if (!math::all(math::isfinite(P)))
 			{
-				OutError = FString::Printf(TEXT("Nonfinite source curve %d"), Spec.SourceId);
+				OutError = FString::Printf(TEXT("Nonfinite source curve %d"), Id);
 				return false;
 			}
 		}
 		Roads.Add(Spec);
 	}
+	// In CS2 an owner may be another node or edge (a net owned by an edge); here owners only group what
+	// they own, so such an owner loses that link.
+	int32 NetOwners = 0;
+	for (const FSavedNode& Node : Nodes) NetOwners += Node.Owner != 0 && (NodeIndices.Contains(Node.Owner) || EdgeIds.Contains(Node.Owner)) ? 1 : 0;
+	for (const FRoadSpec& Road : Roads) NetOwners += Road.Owner != 0 && (NodeIndices.Contains(Road.Owner) || EdgeIds.Contains(Road.Owner)) ? 1 : 0;
+	if (NetOwners > 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %d nodes and edges are owned by another node or edge; that link is not kept, the owner only groups them"), *Path, NetOwners);
 	if (Assets)
 	{
 		for (const FRoadSpec& Road : Roads)

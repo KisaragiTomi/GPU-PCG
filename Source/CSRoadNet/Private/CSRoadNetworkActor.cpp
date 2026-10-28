@@ -315,10 +315,9 @@ TArray<CSRoad::FSplineRoad> ACSRoadNetworkActor::GatherSplines() const
 			Data.NodeUpgrade = CSRoadNetworkActor_Flags(Point.NodeUpgrade);
 			Data.bSegmentElevation = Point.bSegmentElevation;
 			Data.SegmentElevation = CSRoad::float2(static_cast<float>(Point.SegmentElevation.X), static_cast<float>(Point.SegmentElevation.Y));
-			Data.SegmentOrder = Point.SegmentOrder;
 			Data.bOutside = Point.bOutsideConnection;
-			Data.NodeOwner = Point.NodeOwner;
-			Data.SegmentOwner = Point.SegmentOwner;
+			Data.bNodeOwned = Point.bNodeOwned;
+			Data.bSegmentOwned = Point.bSegmentOwned;
 		}
 	}
 	return Splines;
@@ -382,10 +381,9 @@ void ACSRoadNetworkActor::ConvertToSplines()
 			Points[I].NodeUpgrade = CSRoadNetworkActor_Flags(Data.NodeUpgrade);
 			Points[I].bSegmentElevation = Data.bSegmentElevation;
 			Points[I].SegmentElevation = FVector2D(Data.SegmentElevation.x, Data.SegmentElevation.y);
-			Points[I].SegmentOrder = Data.SegmentOrder;
 			Points[I].bOutsideConnection = Data.bOutside;
-			Points[I].NodeOwner = Data.NodeOwner;
-			Points[I].SegmentOwner = Data.SegmentOwner;
+			Points[I].bNodeOwned = Data.bNodeOwned;
+			Points[I].bSegmentOwned = Data.bSegmentOwned;
 		}
 	}
 	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d edges of %s converted to %d spline roads"), *GetName(), Network->Roads.Num(), *NetworkFile.FilePath, Splines.Num());
@@ -1164,9 +1162,10 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		Input.Tiles = TilesOf(Box, Kind == EInput::Anchor ? CSCity::AnchorReach(Settings, Half) : CSCity::RoadReach(Settings, Half));
 	};
 	// The roads as built, which the plots keep clear of; building from a snapshot the plots face them
-	// too, and its edge ids keep their slots. A road is told apart by its content alone: an edge that
-	// only moved in the list is the same road.
+	// too, their slots named by the road's prefab and curve (and how many such roads came before). A road
+	// is told apart by its content alone: an edge that only moved in the list is the same road.
 	const bool bSplines = Source == ECSRoadNetworkSource::Splines;
+	TMap<uint64, uint64> Repeats;
 	for (int32 I = 0; I < Roads.Num(); I++)
 	{
 		const CSRoad::FRoadSpec& Road = Roads[I];
@@ -1176,7 +1175,12 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		const FVector3d C = Point(Road.Curve.c);
 		const FVector3d D = Point(Road.Curve.d);
 		AddCurve(EInput::Road, 0, Half, A, B, C, D);
-		if (!bSplines) AddCurve(EInput::Anchor, Combine(Road.bHasSource ? uint64(uint32(Road.SourceId)) : uint64(I), Road.bHasSource ? 1 : 0), Half, A, B, C, D);
+		if (bSplines) continue;
+		FXxHash64Builder Content;
+		Content.Update(*Road.Prefab, Road.Prefab.Len() * sizeof(TCHAR));
+		Content.Update(&Road.Curve, sizeof(Road.Curve));
+		const uint64 RoadId = Content.Finalize().Hash;
+		AddCurve(EInput::Anchor, Combine(RoadId, Repeats.FindOrAdd(RoadId)++), Half, A, B, C, D);
 	}
 	// Building from splines the plots face their segments as drawn, not the edges cut from them: a road
 	// joining the spline, or an edit of another segment, leaves the slots where they were.

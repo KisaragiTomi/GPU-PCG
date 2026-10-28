@@ -20,7 +20,7 @@ struct FCSRoadTiles_Hash
 	uint64 Get() const { return Builder.Finalize().Hash; }
 };
 
-// What a saved node asks for (its id aside, which a rebuild from splines hands out afresh).
+// What a saved node asks for.
 void CSRoadTiles_AddNode(FCSRoadTiles_Hash& Hash, const FSavedNode& Node)
 {
 	Hash.Add(Node.Prefab);

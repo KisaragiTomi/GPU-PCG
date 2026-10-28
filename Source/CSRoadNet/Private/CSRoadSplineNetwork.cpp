@@ -1,6 +1,5 @@
 #include "CSRoadSplineNetwork.h"
 
-#include "Algo/BinarySearch.h"
 #include "CSRoadCurves.h"
 
 namespace CSRoad
@@ -252,7 +251,7 @@ struct FCSRoadSplineNetwork_Node
 	float2 Elevation;
 	CompositionFlags Upgrade{};
 	bool bOutside = false;
-	int32 Owner = 0;
+	bool bOwned = false;
 	// Never merged away: it carries data, joins splines or belongs to a fixed one.
 	bool bPinned = false;
 	// Joins the road it lies on whatever its degree (FSplinePointData::bJoin).
@@ -269,10 +268,59 @@ struct FCSRoadSplineNetwork_Piece
 	bool bEndFree = false;
 	bool bElevation = false;
 	float2 Elevation;
-	int32 Order = INDEX_NONE;
-	int32 Owner = 0;
+	bool bOwned = false;
 	bool bAlive = true;
 };
+
+// Everything owned in a spline network has this one owner: only whether a node or an edge has one counts.
+constexpr int32 CSRoadSplineNetwork_Owner = 1;
+
+// -1, 0 or 1 as L comes before, with or after R: by x, then y, then z.
+int32 CSRoadSplineNetwork_Compare(const FVector3d& L, const FVector3d& R)
+{
+	for (int32 I = 0; I < 3; I++) if (L[I] != R[I]) return L[I] < R[I] ? -1 : 1;
+	return 0;
+}
+
+int32 CSRoadSplineNetwork_Compare(const CompositionFlags& L, const CompositionFlags& R)
+{
+	if (L.m_General != R.m_General) return L.m_General < R.m_General ? -1 : 1;
+	if (L.m_Left != R.m_Left) return L.m_Left < R.m_Left ? -1 : 1;
+	if (L.m_Right != R.m_Right) return L.m_Right < R.m_Right ? -1 : 1;
+	return 0;
+}
+
+// Splines in an order of their own content: points, tangents, prefab, upgrades and kind. Only copies tie.
+bool CSRoadSplineNetwork_SplineBefore(const FSplineRoad& L, const FSplineRoad& R)
+{
+	for (TArray<FVector3d> FSplineRoad::* Member : { &FSplineRoad::Points, &FSplineRoad::Arrive, &FSplineRoad::Leave })
+	{
+		const TArray<FVector3d>& A = L.*Member;
+		const TArray<FVector3d>& B = R.*Member;
+		for (int32 I = 0; I < FMath::Min(A.Num(), B.Num()); I++) if (const int32 Order = CSRoadSplineNetwork_Compare(A[I], B[I])) return Order < 0;
+		if (A.Num() != B.Num()) return A.Num() < B.Num();
+	}
+	if (const int32 Order = L.Prefab.Compare(R.Prefab, ESearchCase::CaseSensitive)) return Order < 0;
+	if (const int32 Order = CSRoadSplineNetwork_Compare(L.Upgrade, R.Upgrade)) return Order < 0;
+	if (L.bAdjust != R.bAdjust) return R.bAdjust;
+	if (L.bAlley != R.bAlley) return R.bAlley;
+	return !L.bClosed && R.bClosed;
+}
+
+// Edges in an order of their own content: curve (ends first), prefab, upgrades, elevation and owner.
+// Only copies tie.
+bool CSRoadSplineNetwork_Before(const FCSRoadSplineNetwork_Piece& L, const FCSRoadSplineNetwork_Piece& R, const TArray<FSplineRoad>& Splines)
+{
+	for (FVector3d FCSRoadSplineNetwork_Curve::* Point : { &FCSRoadSplineNetwork_Curve::A, &FCSRoadSplineNetwork_Curve::D, &FCSRoadSplineNetwork_Curve::B, &FCSRoadSplineNetwork_Curve::C }) if (const int32 Order = CSRoadSplineNetwork_Compare(L.Curve.*Point, R.Curve.*Point)) return Order < 0;
+	const FSplineRoad& A = Splines[L.Spline];
+	const FSplineRoad& B = Splines[R.Spline];
+	if (const int32 Order = A.Prefab.Compare(B.Prefab, ESearchCase::CaseSensitive)) return Order < 0;
+	if (const int32 Order = CSRoadSplineNetwork_Compare(A.Upgrade, B.Upgrade)) return Order < 0;
+	if (L.bElevation != R.bElevation) return R.bElevation;
+	if (L.Elevation.x != R.Elevation.x) return L.Elevation.x < R.Elevation.x;
+	if (L.Elevation.y != R.Elevation.y) return L.Elevation.y < R.Elevation.y;
+	return !L.bOwned && R.bOwned;
+}
 
 // A piece is split at T, where node Node goes.
 struct FCSRoadSplineNetwork_Cut
@@ -572,9 +620,12 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Drawn, const
 	OutNodes.Reset();
 	OutRoads.Reset();
 	OutStats = FSplineNetworkStats();
-	// Alleys give way to the main roads over them; the splines drawn stay as they are.
-	TArray<FSplineRoad> Clipped;
-	const TArray<FSplineRoad>& Splines = CSRoadSplineNetwork_ClipAlleys(Assets, Drawn, Settings, Clipped, OutStats) ? Clipped : Drawn;
+	// Alleys give way to the main roads over them; the splines drawn stay as they are. What follows keeps
+	// the first of equal candidates in places, so the splines go through it in an order of their own
+	// content, not the one they came in.
+	TArray<FSplineRoad> Splines;
+	if (!CSRoadSplineNetwork_ClipAlleys(Assets, Drawn, Settings, Splines, OutStats)) Splines = Drawn;
+	Splines.StableSort(CSRoadSplineNetwork_SplineBefore);
 	const double Snap = FMath::Max(Settings.SnapDistance, 0.01);
 	static const FSplinePointData NoData;
 	auto DataAt = [&Splines](int32 Spline, int32 Index) -> const FSplinePointData& { return Splines[Spline].Data.IsValidIndex(Index) ? Splines[Spline].Data[Index] : NoData; };
@@ -688,7 +739,7 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Drawn, const
 			}
 			Node.Upgrade = Node.Upgrade | Data.NodeUpgrade;
 			Node.bOutside |= Data.bOutside;
-			if (Node.Owner == 0) Node.Owner = Data.NodeOwner;
+			Node.bOwned |= Data.bNodeOwned;
 			Node.bJoin |= Data.bJoin;
 			Node.bPinned |= Points[I].bFixed || Data.HasNodeOverrides() || Data.bJoin || Points[I].Spline != FirstSpline[NodeIndex];
 		}
@@ -738,8 +789,7 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Drawn, const
 			const FSplinePointData& Data = DataAt(S, I);
 			Piece.bElevation = Data.bSegmentElevation;
 			Piece.Elevation = Data.SegmentElevation;
-			Piece.Order = Data.SegmentOrder;
-			Piece.Owner = Data.SegmentOwner;
+			Piece.bOwned = Data.bSegmentOwned;
 			Pieces.Add(Piece);
 		}
 	}
@@ -926,6 +976,7 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Drawn, const
 						Head.bElevation = true;
 						Head.Elevation = Tail.Elevation;
 					}
+					Head.bOwned |= Tail.bOwned;
 					Tail.bAlive = false;
 					OutStats.Merges++;
 					bMerged = true;
@@ -969,8 +1020,15 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Drawn, const
 		OutStats.Dropped++;
 	}
 
-	// Node prefabs left open take the highest node priority of the roads there, the first on a tie,
-	// as RoadWorld's position nodes do.
+	// Snapshot form: the edges in an order of their own content, so the same roads give the same network
+	// whatever order the splines come in (the geometry jobs break ties and sum in edge order); the nodes in
+	// the order the edges reach them. Graph.Build numbers entities in that order.
+	TArray<int32> Order;
+	for (int32 P = 0; P < Pieces.Num(); P++) if (Pieces[P].bAlive) Order.Add(P);
+	Order.StableSort([&Pieces, &Splines](int32 L, int32 R) { return CSRoadSplineNetwork_Before(Pieces[L], Pieces[R], Splines); });
+
+	// Node prefabs left open take the highest node priority of the roads there, the first in edge order
+	// on a tie, as RoadWorld's position nodes do.
 	TMap<FString, float> Priorities;
 	auto Priority = [&Assets, &Priorities](const FString& Prefab)
 	{
@@ -979,9 +1037,9 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Drawn, const
 	};
 	TArray<FString> NodePrefabs;
 	NodePrefabs.SetNum(Nodes.Num());
-	for (const FCSRoadSplineNetwork_Piece& Piece : Pieces)
+	for (const int32 P : Order)
 	{
-		if (!Piece.bAlive) continue;
+		const FCSRoadSplineNetwork_Piece& Piece = Pieces[P];
 		const FString& Prefab = Splines[Piece.Spline].Prefab;
 		for (const int32 Node : { Piece.Start, Piece.End })
 		{
@@ -990,23 +1048,7 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Drawn, const
 		}
 	}
 
-	// Snapshot form: the edges in their order (unordered ones after, as they come), the nodes in the
-	// order the edges reach them, ids that never collide. Graph.Build numbers entities in that order.
-	TArray<int32> Order;
-	for (int32 P = 0; P < Pieces.Num(); P++) if (Pieces[P].bAlive) Order.Add(P);
-	Order.StableSort([&Pieces](int32 L, int32 R) { return static_cast<uint32>(Pieces[L].Order) < static_cast<uint32>(Pieces[R].Order); });
 	auto Ground = [Terrain](const FVector3d& Point) { return Terrain ? static_cast<double>(Terrain->Sample(CSRoadSplineNetwork_Float(Point))) : 0.0; };
-	// Owners get ids past any node's or edge's, in the order of their own: only which ids are equal
-	// matters, and an edit that adds a node or an edge leaves every owner its id (tiles key roads by it).
-	TSet<int32> OwnerSet;
-	for (const int32 P : Order)
-	{
-		const FCSRoadSplineNetwork_Piece& Piece = Pieces[P];
-		for (const int32 Owner : { Piece.Owner, Nodes[Piece.Start].Owner, Nodes[Piece.End].Owner }) if (Owner != 0) OwnerSet.Add(Owner);
-	}
-	TArray<int32> Owners = OwnerSet.Array();
-	Owners.Sort();
-	auto OwnerId = [&Owners](int32 Owner) { return Owner == 0 ? 0 : (1 << 30) + int32(Algo::BinarySearch(Owners, Owner)); };
 	TArray<int32> NodeIndex;
 	NodeIndex.Init(INDEX_NONE, Nodes.Num());
 	for (const int32 P : Order)
@@ -1018,14 +1060,13 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Drawn, const
 			NodeIndex[Node] = OutNodes.Num();
 			const FCSRoadSplineNetwork_Node& Source = Nodes[Node];
 			FSavedNode& Out = OutNodes.AddDefaulted_GetRef();
-			Out.Id = OutNodes.Num();
 			Out.Prefab = NodePrefabs[Node];
 			Out.Position = CSRoadSplineNetwork_Float(Source.Position);
 			Out.bHasElevation = true;
 			Out.Elevation = Source.bElevation ? Source.Elevation : float2(static_cast<float>(Source.Position.Y - Ground(Source.Position)));
 			Out.Upgrade = Source.Upgrade;
 			Out.bOutside = Source.bOutside;
-			Out.Owner = OwnerId(Source.Owner);
+			Out.Owner = Source.bOwned ? CSRoadSplineNetwork_Owner : 0;
 		}
 	}
 	for (const int32 P : Order)
@@ -1037,10 +1078,9 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Drawn, const
 		Road.Curve = Bezier4x3(CSRoadSplineNetwork_Float(Piece.Curve.A), CSRoadSplineNetwork_Float(Piece.Curve.B), CSRoadSplineNetwork_Float(Piece.Curve.C), CSRoadSplineNetwork_Float(Piece.Curve.D));
 		Road.Upgrade = Spline.Upgrade;
 		Road.bHasSource = true;
-		Road.SourceId = OutNodes.Num() + OutRoads.Num();
 		Road.SourceStart = NodeIndex[Piece.Start];
 		Road.SourceEnd = NodeIndex[Piece.End];
-		Road.Owner = OwnerId(Piece.Owner);
+		Road.Owner = Piece.bOwned ? CSRoadSplineNetwork_Owner : 0;
 		Road.bHasElevation = true;
 		if (Piece.bElevation) Road.Elevation = Piece.Elevation;
 		else
@@ -1162,14 +1202,13 @@ void ChainNetwork(const TArray<FSavedNode>& Nodes, const TArray<FRoadSpec>& Road
 				Data.NodeElevation = Node.bHasElevation ? Node.Elevation : float2(0.0f);
 				Data.NodeUpgrade = Node.Upgrade;
 				Data.bOutside = Node.bOutside;
-				Data.NodeOwner = Node.Owner;
+				Data.bNodeOwned = Node.Owner != 0;
 			}
 			if (!bEnd)
 			{
 				Data.bSegmentElevation = true;
 				Data.SegmentElevation = Road.bHasElevation ? Road.Elevation : float2(0.0f);
-				Data.SegmentOrder = Chain[I];
-				Data.SegmentOwner = Road.Owner;
+				Data.bSegmentOwned = Road.Owner != 0;
 			}
 		}
 	};

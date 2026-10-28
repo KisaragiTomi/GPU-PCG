@@ -545,11 +545,11 @@ int32 FGraph::NewEntity()
 	return Id;
 }
 
-int32 FGraph::SourceEntity(int32 Id)
+int32 FGraph::OwnerEntity(int32 Owner)
 {
-	if (const int32* Existing = SourceEntities.Find(Id)) return *Existing;
+	if (const int32* Existing = OwnerEntities.Find(Owner)) return *Existing;
 	const int32 Entity = NewEntity();
-	SourceEntities.Add(Id, Entity);
+	OwnerEntities.Add(Owner, Entity);
 	return Entity;
 }
 
@@ -587,12 +587,13 @@ int32 FGraph::PositionNode(float3 Position, int32 PrefabIndex)
 	return Id;
 }
 
-int32 FGraph::SourceNode(FAssets& Assets, const FSavedNode& Source)
+int32 FGraph::SavedNode(FAssets& Assets, const TArray<FSavedNode>& SavedNodes, int32 Index)
 {
-	if (const int32* Existing = SourceNodeEntities.Find(Source.Id)) return *Existing;
+	if (SavedNodeEntities[Index] != 0) return SavedNodeEntities[Index];
+	const FSavedNode& Source = SavedNodes[Index];
 	const int32 PrefabIndex = Prefab(Assets, Source.Prefab);
-	const int32 Id = SourceEntity(Source.Id);
-	SourceNodeEntities.Add(Source.Id, Id);
+	const int32 Id = NewEntity();
+	SavedNodeEntities[Index] = Id;
 	Nodes.Add(Id);
 	Mask[Id] |= Component_Node;
 	NodeData[Id].m_Position = Source.Position;
@@ -611,9 +612,9 @@ int32 FGraph::SourceNode(FAssets& Assets, const FSavedNode& Source)
 	if (Source.bOutside) Mask[Id] |= Component_OutsideConnection;
 	if (Source.Owner != 0)
 	{
-		const int32 OwnerEntity = SourceEntity(Source.Owner);
+		const int32 Owner = OwnerEntity(Source.Owner);
 		Mask[Id] |= Component_Owner;
-		OwnerData[Id].m_Owner = OwnerEntity;
+		OwnerData[Id].m_Owner = Owner;
 	}
 	PrefabRef[Id] = PrefabIndex;
 	return Id;
@@ -643,6 +644,7 @@ bool FGraph::Build(FAssets& Assets, const TArray<FRoadSpec>& Specs, const TArray
 	PrefabRoad.AddDefaulted();
 	PrefabPlaceable.AddDefaulted();
 	Compositions.Add(nullptr);
+	SavedNodeEntities.Init(0, SavedNodes.Num());
 
 	struct FPending
 	{
@@ -665,22 +667,15 @@ bool FGraph::Build(FAssets& Assets, const TArray<FRoadSpec>& Specs, const TArray
 			OutError = TEXT("Road endpoints must differ.");
 			return false;
 		}
+		if (Spec.bHasSource && (!SavedNodes.IsValidIndex(Spec.SourceStart) || !SavedNodes.IsValidIndex(Spec.SourceEnd)))
+		{
+			OutError = FString::Printf(TEXT("Road %d ends on a node that is not saved."), SpecIndex);
+			return false;
+		}
 		const int32 PrefabIndex = Prefab(Assets, Spec.Prefab);
-		int32 Start;
-		int32 End;
-		int32 Id;
-		if (!Spec.bHasSource)
-		{
-			Start = PositionNode(Spec.Curve.a, PrefabIndex);
-			End = PositionNode(Spec.Curve.d, PrefabIndex);
-			Id = NewEntity();
-		}
-		else
-		{
-			Start = SourceNode(Assets, SavedNodes[Spec.SourceStart]);
-			End = SourceNode(Assets, SavedNodes[Spec.SourceEnd]);
-			Id = SourceEntity(Spec.SourceId);
-		}
+		const int32 Start = Spec.bHasSource ? SavedNode(Assets, SavedNodes, Spec.SourceStart) : PositionNode(Spec.Curve.a, PrefabIndex);
+		const int32 End = Spec.bHasSource ? SavedNode(Assets, SavedNodes, Spec.SourceEnd) : PositionNode(Spec.Curve.d, PrefabIndex);
+		const int32 Id = NewEntity();
 		Mask[Id] |= Component_Edge | Component_Curve;
 		EdgeData[Id].m_Start = Start;
 		EdgeData[Id].m_End = End;
@@ -704,8 +699,9 @@ bool FGraph::Build(FAssets& Assets, const TArray<FRoadSpec>& Specs, const TArray
 		}
 		if (Spec.bHasSource && Spec.Owner != 0)
 		{
+			const int32 Owner = OwnerEntity(Spec.Owner);
 			Mask[Id] |= Component_Owner;
-			OwnerData[Id].m_Owner = SourceEntity(Spec.Owner);
+			OwnerData[Id].m_Owner = Owner;
 		}
 		ConnectedEdges[Start].Add(Id);
 		ConnectedEdges[End].Add(Id);

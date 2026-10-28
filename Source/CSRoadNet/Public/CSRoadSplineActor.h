@@ -50,9 +50,9 @@ struct CSROADNET_API FCSRoadSplinePoint
 	UPROPERTY(EditAnywhere, Category = "Node")
 	bool bOutsideConnection = false;
 
-	/** What owns the node (a snapshot's building id); the geometry treats the roads of one owner together. 0: nothing. */
+	/** Something owns the node (a converted snapshot's building): the geometry does not flatten it. */
 	UPROPERTY(EditAnywhere, Category = "Node", AdvancedDisplay)
-	int32 NodeOwner = 0;
+	bool bNodeOwned = false;
 
 	UPROPERTY(EditAnywhere, Category = "Segment", meta = (InlineEditConditionToggle))
 	bool bSegmentElevation = false;
@@ -61,14 +61,9 @@ struct CSROADNET_API FCSRoadSplinePoint
 	UPROPERTY(EditAnywhere, Category = "Segment", meta = (EditCondition = "bSegmentElevation"))
 	FVector2D SegmentElevation = FVector2D::ZeroVector;
 
-	/** Where the segment's edge goes among the network's edges: a converted snapshot keeps its edge order, which the
-	 *  geometry jobs follow where they break ties. -1: after those, in spline order. */
+	/** Something owns the segment's edge (a converted snapshot's building): the geometry does not flatten its ends. */
 	UPROPERTY(EditAnywhere, Category = "Segment", AdvancedDisplay)
-	int32 SegmentOrder = -1;
-
-	/** What owns the segment's edge (a snapshot's building id). 0: nothing. */
-	UPROPERTY(EditAnywhere, Category = "Segment", AdvancedDisplay)
-	int32 SegmentOwner = 0;
+	bool bSegmentOwned = false;
 };
 
 UCLASS()

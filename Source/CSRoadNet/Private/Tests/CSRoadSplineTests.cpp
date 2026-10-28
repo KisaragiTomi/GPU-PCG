@@ -92,6 +92,85 @@ FString CSRoadSplineTests_Key(const Bezier4x3& Curve) { return FString::FromBlob
 
 bool CSRoadSplineTests_Same(const float2& A, const float2& B) { return A.x == B.x && A.y == B.y; }
 bool CSRoadSplineTests_Same(const CompositionFlags& A, const CompositionFlags& B) { return A.m_General == B.m_General && A.m_Left == B.m_Left && A.m_Right == B.m_Right; }
+
+template<typename T>
+TArray<double> CSRoadSplineTests_Flatten(const T& Value)
+{
+	TArray<double> Out;
+	CSRoadFlatten(Value, Out);
+	return Out;
+}
+
+// A graph and its GPU geometry, with each spec's edge entity.
+struct FCSRoadSplineTests_Geometry
+{
+	FGraph Graph;
+	FGpuGeometryInput Input;
+	FGpuGeometryResult Result;
+	TArray<int32> EntityOfSpec;
+
+	bool Build(FAssets& Assets, const TArray<FRoadSpec>& Specs, const TArray<FSavedNode>& Nodes, bool bLeftHand, FString& Error)
+	{
+		Graph.bLeftHandTraffic = bLeftHand;
+		if (!Graph.Build(Assets, Specs, Nodes, Error) || !Input.Build(Graph, Assets, nullptr, Error) || !RunGeometryBlocking(Input, Result, Error)) return false;
+		EntityOfSpec.Init(0, Specs.Num());
+		for (const FRoadInstance& Road : Graph.Roads) EntityOfSpec[Road.SpecIndex] = Road.Entity;
+		return true;
+	}
+};
+
+// How far one build's GPU geometry lies from another's: per road its edge, both ends and both nodes, as
+// the golden tests count values.
+struct FCSRoadSplineTests_Spread
+{
+	CSRoadTest::FBudgetCompare Stats;
+	int32 Compositions = 0;
+	// Per road (the other build's spec) its largest difference.
+	TArray<TPair<double, int32>> Roads;
+};
+
+// Mine's spec S is Theirs' spec Match[S] (INDEX_NONE: none).
+void CSRoadSplineTests_Compare(FAutomationTestBase& Test, const FCSRoadSplineTests_Geometry& Mine, const FCSRoadSplineTests_Geometry& Theirs, const TArray<int32>& Match, FCSRoadSplineTests_Spread& Out)
+{
+	for (int32 S = 0; S < Match.Num(); S++)
+	{
+		const int32 T = Match[S];
+		if (T == INDEX_NONE) continue;
+		const FRoadInstance& RoadA = Mine.Graph.Roads[S];
+		const FRoadInstance& RoadB = Theirs.Graph.Roads[T];
+		if (RoadA.EdgeComposition != RoadB.EdgeComposition || RoadA.StartComposition != RoadB.StartComposition || RoadA.EndComposition != RoadB.EndComposition) Out.Compositions++;
+		const int32 A = Mine.EntityOfSpec[S];
+		const int32 B = Theirs.EntityOfSpec[T];
+		double Worst = 0.0;
+		auto Add = [&](const TCHAR* Part, const TArray<double>& X, const TArray<double>& Y)
+		{
+			Out.Stats.Add(Test, FString::Printf(TEXT("road%d.%s"), T, Part), X, Y);
+			for (int32 I = 0; I < FMath::Min(X.Num(), Y.Num()); I++) Worst = FMath::Max(Worst, FMath::Abs(X[I] - Y[I]));
+		};
+		Add(TEXT("edge"), CSRoadSplineTests_Flatten(Mine.Result.Edges[A]), CSRoadSplineTests_Flatten(Theirs.Result.Edges[B]));
+		Add(TEXT("start"), CSRoadSplineTests_Flatten(Mine.Result.StartNodes[A]), CSRoadSplineTests_Flatten(Theirs.Result.StartNodes[B]));
+		Add(TEXT("end"), CSRoadSplineTests_Flatten(Mine.Result.EndNodes[A]), CSRoadSplineTests_Flatten(Theirs.Result.EndNodes[B]));
+		Add(TEXT("startNode"), CSRoadSplineTests_Flatten(Mine.Result.Nodes[Mine.Graph.EdgeData[A].m_Start]), CSRoadSplineTests_Flatten(Theirs.Result.Nodes[Theirs.Graph.EdgeData[B].m_Start]));
+		Add(TEXT("endNode"), CSRoadSplineTests_Flatten(Mine.Result.Nodes[Mine.Graph.EdgeData[A].m_End]), CSRoadSplineTests_Flatten(Theirs.Result.Nodes[Theirs.Graph.EdgeData[B].m_End]));
+		Out.Roads.Add({ Worst, T });
+	}
+}
+
+void CSRoadSplineTests_Report(FAutomationTestBase& Test, const FString& Name, FCSRoadSplineTests_Spread& Spread, const TArray<FRoadSpec>& Roads)
+{
+	const CSRoadTest::FBudgetCompare& S = Spread.Stats;
+	Test.AddInfo(FString::Printf(TEXT("%s: %lld values, %lld beyond %g, %lld beyond %g, max %.4g at %s; %d roads with other compositions"), *Name, S.Values, S.Disagreements, S.Agreement,
+		S.Outliers, S.Outlier, S.MaxError, *S.MaxLabel, Spread.Compositions));
+	Spread.Roads.Sort([](const TPair<double, int32>& L, const TPair<double, int32>& R) { return L.Key > R.Key; });
+	for (int32 I = 0; I < FMath::Min(10, Spread.Roads.Num()) && Spread.Roads[I].Key > S.Agreement; I++)
+	{
+		const FRoadSpec& Road = Roads[Spread.Roads[I].Value];
+		auto Degree = [&Roads](int32 Node) { int32 Count = 0; for (const FRoadSpec& Other : Roads) Count += (Other.SourceStart == Node ? 1 : 0) + (Other.SourceEnd == Node ? 1 : 0); return Count; };
+		Test.AddInfo(FString::Printf(TEXT("  road%d %s: %.4g; from (%.2f, %.2f, %.2f) degree %d, to (%.2f, %.2f, %.2f) degree %d"), Spread.Roads[I].Value, *Road.Prefab, Spread.Roads[I].Key,
+			Road.Curve.a.x, Road.Curve.a.y, Road.Curve.a.z, Degree(Road.SourceStart), Road.Curve.d.x, Road.Curve.d.y, Road.Curve.d.z, Degree(Road.SourceEnd)));
+	}
+	for (const FString& Label : S.OutlierLabels) Test.AddInfo(TEXT("  outlier ") + Label);
+}
 }
 
 // BuildSplineNetwork on small drawn networks: shared points, crossings and roads ending on roads
@@ -224,8 +303,9 @@ bool FCSRoadSplinesBasicsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Palmsland as splines (ChainNetwork) and back (BuildSplineNetwork): the same edges in the same
-// order, the same nodes and compositions, and so the same GPU geometry, bit for bit.
+// Palmsland as splines (ChainNetwork) and back (BuildSplineNetwork): the same edges and nodes with
+// their data (owners aside), the edges in their content order rather than the file's; the GPU geometry
+// then differs only where the geometry jobs break ties or sum in edge order.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadSplinesPalmslandTest, "PCGPlugins.CSRoadNet.Splines.Palmsland",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -291,43 +371,51 @@ bool FCSRoadSplinesPalmslandTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("edges without an original"), Missing, 0);
 	TestEqual(TEXT("edges with other data"), EdgeMismatches, 0);
 	TestEqual(TEXT("edge ends on another node"), NodeMismatches, 0);
+	AddInfo(FString::Printf(TEXT("palmsland: %d edges as %d splines (%d points), back into %d edges and %d nodes"), Network.Roads.Num(), Splines.Num(), Points, Back.Roads.Num(), Back.Nodes.Num()));
 
-	// The same compositions; the GPU geometry within the budget.
-	FGraph Graph;
-	FGraph BackGraph;
-	Graph.bLeftHandTraffic = BackGraph.bLeftHandTraffic = Network.bLeftHandTraffic;
-	FGpuGeometryInput Input;
-	FGpuGeometryInput BackInput;
-	FGpuGeometryResult Result;
-	FGpuGeometryResult BackResult;
-	if (!Graph.Build(Lib.Assets, Network.Roads, Network.Nodes, Error) || !BackGraph.Build(Lib.Assets, Back.Roads, Back.Nodes, Error) || !Input.Build(Graph, Lib.Assets, nullptr, Error)
-		|| !BackInput.Build(BackGraph, Lib.Assets, nullptr, Error) || !RunGeometryBlocking(Input, Result, Error) || !RunGeometryBlocking(BackInput, BackResult, Error))
+	// The splines in any other order give the same network, edge for edge and node for node.
+	{
+		TArray<FSplineRoad> Shuffled = Splines;
+		FRandomStream Random(7);
+		for (int32 I = Shuffled.Num() - 1; I > 0; I--) Shuffled.Swap(I, Random.RandRange(0, I));
+		FCSRoadSplineTests_Network Again;
+		if (!BuildSplineNetwork(Lib.Assets, Shuffled, FSplineNetworkSettings(), nullptr, Again.Nodes, Again.Roads, Again.Stats, Error))
+		{
+			AddError(Error);
+			return false;
+		}
+		int32 Differ = FMath::Abs(Again.Roads.Num() - Back.Roads.Num()) + FMath::Abs(Again.Nodes.Num() - Back.Nodes.Num());
+		for (int32 R = 0; R < FMath::Min(Again.Roads.Num(), Back.Roads.Num()); R++)
+		{
+			const FRoadSpec& A = Again.Roads[R];
+			const FRoadSpec& B = Back.Roads[R];
+			if (A.Prefab != B.Prefab || CSRoadSplineTests_Key(A.Curve) != CSRoadSplineTests_Key(B.Curve) || A.SourceStart != B.SourceStart || A.SourceEnd != B.SourceEnd || A.Owner != B.Owner
+				|| !CSRoadSplineTests_Same(A.Elevation, B.Elevation) || !CSRoadSplineTests_Same(A.Upgrade, B.Upgrade)) Differ++;
+		}
+		for (int32 N = 0; N < FMath::Min(Again.Nodes.Num(), Back.Nodes.Num()); N++)
+		{
+			const FSavedNode& A = Again.Nodes[N];
+			const FSavedNode& B = Back.Nodes[N];
+			if (!math::all(A.Position == B.Position) || A.Prefab != B.Prefab || !CSRoadSplineTests_Same(A.Elevation, B.Elevation) || !CSRoadSplineTests_Same(A.Upgrade, B.Upgrade) || A.bOutside != B.bOutside
+				|| A.Owner != B.Owner) Differ++;
+		}
+		TestEqual(TEXT("splines shuffled: edges and nodes that differ"), Differ, 0);
+	}
+
+	// The GPU geometry against the file's: the same compositions, and values apart only by what the edge order
+	// moves (on Palmsland under 3 cm, as much as any other order of the file's own edges moves them).
+	FCSRoadSplineTests_Geometry File;
+	FCSRoadSplineTests_Geometry FromSplines;
+	if (!File.Build(Lib.Assets, Network.Roads, Network.Nodes, Network.bLeftHandTraffic, Error) || !FromSplines.Build(Lib.Assets, Back.Roads, Back.Nodes, Network.bLeftHandTraffic, Error))
 	{
 		AddError(Error);
 		return false;
 	}
-	TMap<int32, const FRoadInstance*> InstanceOfSpec;
-	for (const FRoadInstance& Road : Graph.Roads) InstanceOfSpec.Add(Road.SpecIndex, &Road);
-	int32 OutOfOrder = 0;
-	int32 CompositionMismatches = 0;
-	int32 GeometryMismatches = 0;
-	for (const FRoadInstance& Road : BackGraph.Roads)
-	{
-		const int32 Spec = Match[Road.SpecIndex];
-		const FRoadInstance* const* Theirs = Spec == INDEX_NONE ? nullptr : InstanceOfSpec.Find(Spec);
-		if (!Theirs) continue;
-		OutOfOrder += Road.Entity != (*Theirs)->Entity ? 1 : 0;
-		if (Road.EdgeComposition != (*Theirs)->EdgeComposition || Road.StartComposition != (*Theirs)->StartComposition || Road.EndComposition != (*Theirs)->EndComposition) CompositionMismatches++;
-		const bool bSame = FMemory::Memcmp(&BackResult.Edges[Road.Entity], &Result.Edges[(*Theirs)->Entity], sizeof(EdgeGeometry)) == 0
-			&& FMemory::Memcmp(&BackResult.StartNodes[Road.Entity], &Result.StartNodes[(*Theirs)->Entity], sizeof(EdgeNodeGeometry)) == 0
-			&& FMemory::Memcmp(&BackResult.EndNodes[Road.Entity], &Result.EndNodes[(*Theirs)->Entity], sizeof(EdgeNodeGeometry)) == 0;
-		if (!bSame && GeometryMismatches++ < 5) AddInfo(FString::Printf(TEXT("palmsland.road%d: other GPU geometry"), Spec));
-	}
-	TestEqual(TEXT("edges at another entity"), OutOfOrder, 0);
-	TestEqual(TEXT("edges with other compositions"), CompositionMismatches, 0);
-	TestEqual(TEXT("edges with other GPU geometry"), GeometryMismatches, 0);
-	AddInfo(FString::Printf(TEXT("palmsland: %d edges as %d splines (%d points), back into %d edges and %d nodes; %d edges, %d edge ends, %d entities, %d compositions and %d GPU geometries differ"),
-		Network.Roads.Num(), Splines.Num(), Points, Back.Roads.Num(), Back.Nodes.Num(), Missing + EdgeMismatches, NodeMismatches, OutOfOrder, CompositionMismatches, GeometryMismatches));
+	FCSRoadSplineTests_Spread Spread;
+	CSRoadSplineTests_Compare(*this, FromSplines, File, Match, Spread);
+	CSRoadSplineTests_Report(*this, TEXT("palmsland from splines against the file"), Spread, Network.Roads);
+	TestEqual(TEXT("edges with other compositions"), Spread.Compositions, 0);
+	TestEqual(TEXT("GPU geometry values more than 0.1 m off"), Spread.Stats.Outliers, int64(0));
 	return true;
 }
 

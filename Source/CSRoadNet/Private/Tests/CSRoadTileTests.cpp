@@ -200,11 +200,11 @@ bool FCSRoadTilesActorTest::RunTest(const FString& Parameters)
 }
 
 // A network far wider than a sub-graph's reach: ten streets east to west crossed by ten north to
-// south, one a medium road, the easternmost owned by something. Edits drawn in tiles from sub-graphs
-// come out as a whole build draws them: a short spur added at the north-west corner (sub-graphs well
-// short of the network, and the new node leaves the owned street's tiles alone), the westernmost
-// street's north end moved (the whole street tilts), a street removed, a diagonal road added. Once
-// edits settle, the traffic preview is made again for the whole network.
+// south, one a medium road, the easternmost owned. Edits drawn in tiles from sub-graphs come out as a
+// whole build draws them: a short spur added at the north-west corner (sub-graphs well short of the
+// network, and the owned street's tiles keep their meshes), the westernmost street's north end moved
+// (the whole street tilts), a street removed, a diagonal road added. Once edits settle, the traffic
+// preview is made again for the whole network.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadTilesSubgraphTest, "PCGPlugins.CSRoadNet.Tiles.Subgraph",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
 
@@ -235,8 +235,8 @@ bool FCSRoadTilesSubgraphTest::RunTest(const FString& Parameters)
 		const double X = -27000.0 + I * 6000.0;
 		NorthSouth.Add(CSRoadTileTests_Road(World, Network, { FVector(X, -30000.0, 0.0), FVector(X, 30000.0, 0.0) }, TEXT("Small Road")));
 	}
-	// At x = 270 m, the column of tiles x = 2.
-	NorthSouth[9]->Spline->RoadMetadata->Points[0].SegmentOwner = 77;
+	// At x = 270 m, the column of tiles x = 2: an edit elsewhere must leave an owned road's key alone.
+	NorthSouth[9]->Spline->RoadMetadata->Points[0].bSegmentOwned = true;
 
 	auto Build = [&](bool bTiles)
 	{

@@ -3,7 +3,8 @@
 // exactly one cubic Bezier. Points that meet share a node, roads crossing at about the same height
 // or ending on another one form junctions there, and the segments of adjustable splines are split
 // where too long or turning too much and merged where too short. The result is the snapshot form
-// (nodes with ids, edges referencing them) that FGraph::Build takes.
+// (nodes, and edges naming them by index) that FGraph::Build takes, the edges in an order of their
+// own content: the same roads give the same network whatever order the splines come in.
 //
 // ChainNetwork goes the other way: a snapshot as splines that build back into the same edges.
 #pragma once
@@ -24,20 +25,17 @@ struct FSplinePointData
 	CompositionFlags NodeUpgrade{};
 	// The node is an outside connection: its road runs off the map, with no end there.
 	bool bOutside = false;
-	// What owns the node, and the segment's edge (a snapshot's building id): the geometry jobs treat
-	// the roads of one owner together. 0: nothing.
-	int32 NodeOwner = 0;
-	int32 SegmentOwner = 0;
+	// Something owns the node, and the segment's edge (a converted snapshot's building): the geometry jobs
+	// do not flatten what is owned. Which owner does not count.
+	bool bNodeOwned = false;
+	bool bSegmentOwned = false;
 	bool bSegmentElevation = false;
 	float2 SegmentElevation;
-	// Where the segment's edge goes among the network's edges: a converted snapshot keeps its edge
-	// order, which the geometry jobs follow where they break ties. Unset: after those, in spline order.
-	int32 SegmentOrder = INDEX_NONE;
 	// An alley end cut under a main road: its node joins the road it lies on, however many roads end
 	// there (two, where an alley crossing straight over meets it).
 	bool bJoin = false;
 
-	bool HasNodeOverrides() const { return !NodeOffset.IsZero() || !NodePrefab.IsEmpty() || bNodeElevation || !IsDefault(NodeUpgrade) || bOutside || NodeOwner != 0; }
+	bool HasNodeOverrides() const { return !NodeOffset.IsZero() || !NodePrefab.IsEmpty() || bNodeElevation || !IsDefault(NodeUpgrade) || bOutside || bNodeOwned; }
 };
 
 // One spline in the network's space (Unity metres, y up). Point i's segment runs to point i + 1;
@@ -108,7 +106,8 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Splines, con
 
 // A snapshot (nodes and the source edges referencing them) as fixed splines. Edges are chained
 // where the road goes on: same prefab and upgrades, the next edge starting where the last one
-// ended, and at a junction only straight on. Every node's and edge's data is kept, so the splines
-// build back into the same edges.
+// ended, and at a junction only straight on. Every node's and edge's data is kept (of the owners only
+// whether there is one), so the splines build back into the same edges, in their content order rather
+// than the snapshot's.
 void ChainNetwork(const TArray<FSavedNode>& Nodes, const TArray<FRoadSpec>& Roads, TArray<FSplineRoad>& OutSplines);
 }
