@@ -11,6 +11,7 @@
 - [GPU 三角形统一设计沿革](GpuTriangleUnified_Plan.md)（已被 CSMesh 对象层取代的方案）
 - [GPU 网格光追与 Lumen surface cache](GpuMeshRayTracing.md)
 - [GPU 布料模拟](GpuClothSim_Plan.md)（XPBD 常驻算子逐帧驱动 `UCSMesh` 形变：P0 / P1 已于 2026-10-26 落地，含设计、实测数据与未做的阶段；pass 流程图 [GpuClothSim_PassFlow.svg](GpuClothSim_PassFlow.svg)）
+  - [AnimationFallSplit 移植：角色碎成布条](HoudiniFallSplit_Port.md)（Houdini 分块与 Vellum 绳的逐节点整理，带状分块 + 锚点 + 旋流场的 UE 实现与差异）
 - [Instance 剔除与实例 ID 稳定性优化方案](../InstanceCullingOptimization.md)（第一至第三阶段已落地、第四阶段做了一项，进度与开关见其 §11）
   - [2026-10-02 性能与正确性基线](InstanceCulling/Baseline_20261002.md)
   - [可见源行号布局：实现、验证与 A/B 结果](InstanceCulling/VisibleSourceIndex_20261002.md)

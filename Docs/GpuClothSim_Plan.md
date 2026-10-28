@@ -166,8 +166,10 @@ CPU 半程在 [`CSClothSim.cpp`](../Source/ComputeShaderGenerator/Private/CSClot
 | [`Private/CSClothSimRender.h`](../Source/ComputeShaderGenerator/Private/CSClothSimRender.h) / [`.cpp`](../Source/ComputeShaderGenerator/Private/CSClothSimRender.cpp) | `FCSClothGpuState`、setup / 每帧 / 重置的 RDG pass、诊断用的粒子回读 |
 | [`Public/CSClothSimComponent.h`](../Source/ComputeShaderGenerator/Public/CSClothSimComponent.h) / [`Private/CSClothSimComponent.cpp`](../Source/ComputeShaderGenerator/Private/CSClothSimComponent.cpp) | `UCSClothSimComponent`：参数面板、BP API、钉组、失配停摆、包围盒发布 |
 | [`Public/CSClothActor.h`](../Source/ComputeShaderGenerator/Public/CSClothActor.h) / [`Private/CSClothActor.cpp`](../Source/ComputeShaderGenerator/Private/CSClothActor.cpp) | `ACSClothActor`：源网格或程序化网格布 + 渲染组件 + 布料组件；网格布预设钉边；当前姿态存成 StaticMesh |
-| [`Shaders/Private/CSClothSim.usf`](../Shaders/Private/CSClothSim.usf)、`CSClothLayout.ush` | 6 个 kernel；C++ / HLSL 共用常量 |
-| [`Private/Tests/CSClothSimTests.cpp`](../Source/ComputeShaderGenerator/Private/Tests/CSClothSimTests.cpp) | `PCGPlugins.ComputeShaderGenerator.ClothSim.*` 11 条 |
+| [`Public/CSClothBandSplit.h`](../Source/ComputeShaderGenerator/Public/CSClothBandSplit.h) / [`Private/CSClothBandSplit.cpp`](../Source/ComputeShaderGenerator/Private/CSClothBandSplit.cpp) | 带状分块：按测地距离把网格切成条带，产出焊接键、锚点、旋流方向的逐顶点绑定（[`HoudiniFallSplit_Port.md`](HoudiniFallSplit_Port.md)） |
+| [`Public/CSClothSplitActor.h`](../Source/ComputeShaderGenerator/Public/CSClothSplitActor.h) / [`Private/CSClothSplitActor.cpp`](../Source/ComputeShaderGenerator/Private/CSClothSplitActor.cpp) | `ACSClothSplitActor`：骨骼网格角色播动画、切成条带、锚点每帧跟 CPU 蒙皮位置走 |
+| [`Shaders/Private/CSClothSim.usf`](../Shaders/Private/CSClothSim.usf)、`CSClothLayout.ush` | 7 个 kernel（含锚点绳 `SolveAnchorsCS`）；C++ / HLSL 共用常量 |
+| [`Private/Tests/CSClothSimTests.cpp`](../Source/ComputeShaderGenerator/Private/Tests/CSClothSimTests.cpp) | `PCGPlugins.ComputeShaderGenerator.ClothSim.*` 11 条、`ClothSplit.*` 4 条 |
 | [`Scripts/RunClothEditorModeCheck.ps1`](../Scripts/RunClothEditorModeCheck.ps1) + [`ClothEditorModeCheck.py`](../Scripts/ClothEditorModeCheck.py) | 真编辑器里（不进 PIE）验 `ACSClothActor` 放下即有布、只靠编辑器 tick 模拟；跑之前备份、跑完恢复编辑器偏好 |
 
 最小用法：关卡里放一个 `ACSClothActor`（默认 2 m × 2 m、64² 格、−X 边钉住，编辑器视口里就开始摆）；或者在自己的 actor 上给已有的 `UCSMesh` 加一个 `UCSClothSimComponent`，`SetTargetMesh` 后 `SetupFromMeshSync`。
