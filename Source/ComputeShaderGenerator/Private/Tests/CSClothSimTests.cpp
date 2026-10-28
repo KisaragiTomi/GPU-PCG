@@ -3,8 +3,10 @@
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 
 #include "CSClothActor.h"
+#include "CSClothBandSplit.h"
 #include "CSClothSim.h"
 #include "CSClothSimComponent.h"
+#include "CSClothSplitActor.h"
 #include "CSGpuMeshTypes.h"
 #include "CSClothLayout.ush"   // CS_CLOTH_*
 #include "CSMesh.h"
@@ -14,9 +16,11 @@
 #include "Components/DirectionalLightComponent.h"
 #include "Components/SceneCaptureComponent2D.h"
 #include "Components/SceneComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/SceneCapture2D.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/TextureRenderTarget2D.h"
@@ -25,6 +29,8 @@
 #include "ImageCore.h"
 #include "ImageUtils.h"
 #include "Misc/Paths.h"
+#include "Rendering/SkeletalMeshLODRenderData.h"
+#include "Rendering/SkeletalMeshRenderData.h"
 #include "RenderingThread.h"
 #include "TextureResource.h"
 #include "Tests/AutomationEditorCommon.h"
@@ -905,6 +911,332 @@ bool FCSClothVisualCaptureTest::RunTest(const FString& Parameters)
 	const double Coverage = double(Changed) / double(CSClothTest::ShotWidth * CSClothTest::ShotHeight);
 	AddInfo(FString::Printf(TEXT("Cloth covers %.1f%% of the shot; images in %s"), Coverage * 100.0, *(FPaths::ProjectSavedDir() / TEXT("ClothSimShots"))));
 	TestTrue(FString::Printf(TEXT("The cloth is drawn (%.1f%% of the pixels change without it)"), Coverage * 100.0), Coverage > 0.05);
+	return true;
+}
+
+// -----------------------------------------------------------------------------
+// 带状分块 + 锚点：Houdini AnimationFallSplit 的移植（Docs/HoudiniFallSplit_Port.md）
+// -----------------------------------------------------------------------------
+
+namespace CSClothTest
+{
+/** 竖着的一张网格：XZ 平面、Z 从 0 到 Size、法线 +Y（滚转 90°：局部 Y → 世界 −Z，局部 +Z → 世界 +Y）。 */
+FCSGpuMeshCPUData VerticalGrid(int32 Quads, double Size)
+{
+	FCSGpuMeshCPUData Grid;
+	CSClothSetup::BuildGridSnapshot(FVector2D(Size, Size), FIntPoint(Quads, Quads),
+		FTransform(FRotator(0.0, 0.0, 90.0), FVector(0.0, 0.0, Size * 0.5)), false, Grid);
+	return Grid;
+}
+
+/** 平滑过的点的锚点落在原网格的三角内：按绑定把原网格的位置插回来。 */
+FVector3f AnchorOf(const FCSClothVertexBinding& Binding, int32 Vertex, const TArray<FVector3f>& SourcePositions)
+{
+	FVector3f Sum = FVector3f::ZeroVector;
+	float WeightSum = 0.0f;
+	for (int32 K = 0; K < 3; ++K)
+	{
+		const int32 Source = Binding.AnchorSources[Vertex][K];
+		if (!SourcePositions.IsValidIndex(Source)) continue;
+		Sum += SourcePositions[Source] * Binding.AnchorWeights[Vertex][K];
+		WeightSum += Binding.AnchorWeights[Vertex][K];
+	}
+	return WeightSum > 0.0f ? Sum / WeightSum : FVector3f(TNumericLimits<float>::Max());
+}
+
+/** 锚点曲线换成常数（测试要的是绳本身，不是 Houdini 的默认时间线）。 */
+void SetConstantCurve(FRuntimeFloatCurve& Curve, float Value)
+{
+	Curve.GetRichCurve()->Reset();
+	Curve.GetRichCurve()->AddKey(0.0f, Value);
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCSClothBandSplitTest,
+	"PCGPlugins.ComputeShaderGenerator.ClothSplit.BandSplit",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSClothBandSplitTest::RunTest(const FString& Parameters)
+{
+	// 100 cm 见方、2 cm 一格的竖网格，从顶边中点切起：到底角的测地距离 ≈ √(50² + 100²) ≈ 112 cm，4.5 cm 一条 ⇒ 约 25 条。
+	const double Size = 100.0;
+	const FCSGpuMeshCPUData Grid = CSClothTest::VerticalGrid(50, Size);
+	const FVector Seed(0.0, 0.0, Size);
+	FCSClothBandSplitSettings Settings;
+	FCSClothBandSplitResult Result;
+	if (!TestTrue(TEXT("Split"), CSClothBandSplit::Split(Grid, Settings, { Seed }, Result))) return false;
+	const FCSGpuMeshCPUData& Mesh = Result.Mesh;
+	const FCSClothVertexBinding& Binding = Result.Binding;
+	const int32 NumOut = Mesh.Positions.Num();
+
+	TestTrue(FString::Printf(TEXT("About 25 bands (%d)"), Result.NumBands), Result.NumBands >= 22 && Result.NumBands <= 30);
+	TestTrue(FString::Printf(TEXT("At least one piece per band (%d pieces)"), Result.NumPieces), Result.NumPieces >= Result.NumBands);
+	TestEqual(TEXT("Double-sided: twice the triangles"), Mesh.Indices.Num(), Grid.Indices.Num() * 2);
+	TestTrue(TEXT("Binding arrays are per output vertex"), Binding.WeldKeys.Num() == NumOut && Binding.AnchorSources.Num() == NumOut
+		&& Binding.AnchorWeights.Num() == NumOut && Binding.AnchorParams.Num() == NumOut && Binding.SwirlDirs.Num() == NumOut);
+	if (Binding.WeldKeys.Num() != NumOut || Binding.AnchorParams.Num() != NumOut) return false;
+
+	int32 MixedTriangles = 0;
+	for (int32 I = 0; I + 2 < Mesh.Indices.Num(); I += 3)
+	{
+		const uint32 Key = Binding.WeldKeys[Mesh.Indices[I]];
+		if (Binding.WeldKeys[Mesh.Indices[I + 1]] != Key || Binding.WeldKeys[Mesh.Indices[I + 2]] != Key) ++MixedTriangles;
+	}
+	TestEqual(TEXT("Every triangle lies in a single band"), MixedTriangles, 0);
+
+	// 切口两侧位置相同：不看键焊回原网格的格点数；看键时两侧分开。
+	TArray<uint32> Map;
+	TArray<int32> Sources;
+	CSClothSetup::WeldPositions(Mesh.Positions, 0.01f, nullptr, Map, Sources);
+	const int32 Unkeyed = Sources.Num();
+	CSClothSetup::WeldPositions(Mesh.Positions, 0.01f, &Binding.WeldKeys, Map, Sources);
+	const int32 Keyed = Sources.Num();
+	TestEqual(TEXT("Without keys the cut seams weld back into the source grid"), Unkeyed, 51 * 51);
+	TestTrue(FString::Printf(TEXT("With keys the seams stay open (%d > %d)"), Keyed, Unkeyed), Keyed > Unkeyed);
+
+	// 带号跟着测地距离走（带号的零点可能差一条：起点的噪声能把它推到 −1）。
+	double WorstBand = 0.0;
+	for (int32 V = 0; V < NumOut; ++V)
+	{
+		WorstBand = FMath::Max(WorstBand, FMath::Abs(double(Binding.WeldKeys[V]) * Settings.BandWidth - double(Result.Distance[V])));
+	}
+	TestTrue(FString::Printf(TEXT("Band index follows the geodesic distance (worst %.2f cm)"), WorstBand),
+		WorstBand < 2.0 * Settings.BandWidth + Settings.BoundaryNoise);
+
+	// 旋流：单位向量、在面内（法线 ±Y），并且沿着以起点为圆心的等距线（与半径方向垂直）。
+	int32 BadSwirl = 0;
+	double Radial = 0.0;
+	int32 RadialCount = 0;
+	float MinHigh = 1.0f;
+	float MaxHigh = 0.0f;
+	for (int32 V = 0; V < NumOut / 2; ++V)
+	{
+		MinHigh = FMath::Min(MinHigh, Binding.AnchorParams[V].X);
+		MaxHigh = FMath::Max(MaxHigh, Binding.AnchorParams[V].X);
+		const FVector3f Swirl = Binding.SwirlDirs[V];
+		if (Swirl.IsNearlyZero()) continue;
+		if (FMath::Abs(Swirl.Size() - 1.0f) > 1e-3f || FMath::Abs(Swirl.Y) > 0.05f) ++BadSwirl;
+		const FVector3f Offset = Mesh.Positions[V] - FVector3f(Seed);
+		if (Offset.Size() < 20.0f) continue;
+		Radial += FMath::Abs(Swirl | Offset.GetSafeNormal());
+		++RadialCount;
+	}
+	TestEqual(TEXT("Swirl directions are unit and tangent to the sheet"), BadSwirl, 0);
+	TestTrue(FString::Printf(TEXT("Swirl runs along the bands (mean |swirl . radial| = %.3f)"), RadialCount ? Radial / RadialCount : 1.0),
+		RadialCount > 0 && Radial / RadialCount < 0.2);
+	TestTrue(FString::Printf(TEXT("High spans the sheet (%.3f .. %.3f)"), MinHigh, MaxHigh), MinHigh < 0.02f && MaxHigh > 0.98f);
+
+	// 锚点：在平面上，平滑挪过的点也落在原平面里 —— 按绑定插回来的锚点与输出位置重合。
+	double WorstAnchor = 0.0;
+	for (int32 V = 0; V < NumOut; ++V)
+	{
+		WorstAnchor = FMath::Max(WorstAnchor, double(FVector3f::Dist(CSClothTest::AnchorOf(Binding, V, Grid.Positions), Mesh.Positions[V])));
+	}
+	TestTrue(FString::Printf(TEXT("Some cut vertices were smoothed (%d)"), Result.NumSmoothedVertices), Result.NumSmoothedVertices > 0);
+	TestTrue(FString::Printf(TEXT("Anchors reproduce every output position on a plane (worst %.5f cm)"), WorstAnchor), WorstAnchor < 1e-3);
+
+	// 不平滑：一个点都不挪。
+	Settings.BoundarySmoothIterations = 0;
+	FCSClothBandSplitResult Raw;
+	if (!TestTrue(TEXT("Split without smoothing"), CSClothBandSplit::Split(Grid, Settings, { Seed }, Raw))) return false;
+	TestEqual(TEXT("Without smoothing no vertex moves"), Raw.NumSmoothedVertices, 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCSClothSplitSetupTest,
+	"PCGPlugins.ComputeShaderGenerator.ClothSplit.SetupKeepsCuts",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSClothSplitSetupTest::RunTest(const FString& Parameters)
+{
+	const FCSGpuMeshCPUData Grid = CSClothTest::VerticalGrid(30, 60.0);
+	FCSClothBandSplitResult Result;
+	if (!TestTrue(TEXT("Split"), CSClothBandSplit::Split(Grid, FCSClothBandSplitSettings(), { FVector(0.0, 0.0, 60.0) }, Result))) return false;
+
+	FCSClothSetupOptions Options;
+	Options.bBuildTethers = false;
+	Options.Binding = &Result.Binding;
+	FCSClothSetupData Data;
+	if (!TestTrue(TEXT("Setup with the split binding"), CSClothSetup::BuildFromSnapshot(Result.Mesh, Options, Data))) return false;
+
+	TArray<uint32> Map;
+	TArray<int32> Sources;
+	CSClothSetup::WeldPositions(Result.Mesh.Positions, Options.WeldTolerance, &Result.Binding.WeldKeys, Map, Sources);
+	TestEqual(TEXT("One particle per (position, band); the back faces weld onto the front"), Data.NumParticles, Sources.Num());
+	TestTrue(TEXT("Every particle is anchored"), Data.HasAnchors() && Data.NumAnchored == Data.NumParticles);
+
+	TArray<uint32> ParticleKey;
+	ParticleKey.Init(MAX_uint32, Data.NumParticles);
+	int32 Inconsistent = 0;
+	for (int32 V = 0; V < Data.CornerToParticle.Num(); ++V)
+	{
+		uint32& Key = ParticleKey[Data.CornerToParticle[V]];
+		if (Key == MAX_uint32) Key = Result.Binding.WeldKeys[V];
+		else if (Key != Result.Binding.WeldKeys[V]) ++Inconsistent;
+	}
+	TestEqual(TEXT("A particle never spans two bands"), Inconsistent, 0);
+
+	int32 Crossing = 0;
+	for (const FUintVector4& Constraint : Data.Constraints)
+	{
+		if (ParticleKey[Constraint.X] != ParticleKey[Constraint.Y]) ++Crossing;
+	}
+	TestEqual(TEXT("No stretch or bend constraint crosses a cut"), Crossing, 0);
+
+	int32 BadParams = 0;
+	for (int32 P = 0; P < Data.NumParticles; ++P)
+	{
+		const FVector4f& Params = Data.AnchorParams[P];
+		const FVector3f Dir(Data.FieldDirs[P]);
+		if (Params.W != 1.0f || Params.X < 0.0f || Params.X > 1.0f || FMath::Abs(Params.Z) != 1.0f) ++BadParams;
+		if (!Dir.IsNearlyZero() && FMath::Abs(Dir.Size() - 1.0f) > 1e-3f) ++BadParams;
+		if (!Data.AnchorSources.IsValidIndex(P) || Data.AnchorSources[P].X == INDEX_NONE) ++BadParams;
+	}
+	TestEqual(TEXT("Per-particle anchor data is well formed"), BadParams, 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCSClothAnchorReleaseTest,
+	"PCGPlugins.ComputeShaderGenerator.ClothSplit.AnchorsFollowAndRelease",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSClothAnchorReleaseTest::RunTest(const FString& Parameters)
+{
+	// 水平的一块布（法线 +Z），每个顶点一个锚点、不给源位置 —— 锚点跟宿主 actor 刚体走。High = 1 ⇒ 绳长 = 全长。
+	FCSGpuMeshCPUData Grid;
+	CSClothSetup::BuildGridSnapshot(FVector2D(100.0, 100.0), FIntPoint(20, 20), FTransform(FVector(0.0, 0.0, 200.0)), false, Grid);
+	FCSClothVertexBinding Binding;
+	Binding.AnchorParams.Init(FVector4f(1.0f, 0.5f, 1.0f, 0.0f), Grid.Positions.Num());
+
+	CSClothTest::FRig Rig;
+	if (!CSClothTest::MakeRig(*this, Grid, [&Binding](UCSClothSimComponent& Cloth)
+	{
+		Cloth.SetVertexBinding(Binding);
+		Cloth.Gravity = FVector::ZeroVector;
+		Cloth.FieldDrag = 0.0f;
+		Cloth.ReleaseDelay = 0.25f;
+		Cloth.ReleaseVelocityScale = 0.0f;
+		Cloth.AnchorRestLengthRange = FVector2D(20.0, 20.0);
+		CSClothTest::SetConstantCurve(Cloth.AnchorStiffnessFade, 0.0f);   // 放开后立刻满刚度
+		CSClothTest::SetConstantCurve(Cloth.AnchorReelIn, 1.0f);          // clamp(High + 1 − 1) = High = 1 ⇒ 20 cm
+	}, Rig)) return false;
+	TestTrue(TEXT("The cloth has anchors"), Rig.Cloth->HasAnchors());
+
+	FCSClothSetupData Reference;
+	FCSClothSetupOptions Options = CSClothTest::HostAtOriginOptions({}, false);
+	Options.Binding = &Binding;
+	if (!TestTrue(TEXT("CPU reference setup"), CSClothSetup::BuildFromSnapshot(Grid, Options, Reference))) return false;
+
+	// 放开前：宿主 10 帧挪 +30 cm X，粒子严格跟着锚点（rest + 30）。
+	for (int32 Frame = 1; Frame <= 10; ++Frame)
+	{
+		Rig.Host->SetActorLocation(FVector(3.0 * Frame, 0.0, 0.0));
+		Rig.Cloth->StepSimulation(CSClothTest::FrameDt);
+	}
+	TestFalse(TEXT("Not released before ReleaseDelay"), Rig.Cloth->IsReleased());
+	TArray<FVector4f> Particles;
+	if (!TestTrue(TEXT("Particle readback"), Rig.Cloth->ReadbackParticlesSync(Particles))) return false;
+	auto MeanDistanceToAnchors = [&Reference, &Particles]()
+	{
+		double Sum = 0.0;
+		for (int32 P = 0; P < Particles.Num(); ++P)
+		{
+			Sum += FVector3f::Dist(FVector3f(Particles[P]), FVector3f(Reference.RestPositions[P]) + FVector3f(30.0f, 0.0f, 0.0f));
+		}
+		return Particles.Num() ? Sum / Particles.Num() : 1e9;
+	};
+	const double Following = MeanDistanceToAnchors();
+	TestTrue(FString::Printf(TEXT("Before release the particles ride on their anchors (mean %.4f cm)"), Following), Following < 0.01);
+
+	// 放开后：满刚度、绳长 20 cm ⇒ 整块布沿法线被推开 20 cm。
+	CSClothTest::Step(Rig, 120);
+	TestTrue(TEXT("Released after ReleaseDelay"), Rig.Cloth->IsReleased());
+	if (!TestTrue(TEXT("Particle readback after release"), Rig.Cloth->ReadbackParticlesSync(Particles))) return false;
+	TestTrue(TEXT("No NaN / Inf"), CSClothTest::AllFinite(Particles));
+	const double Pushed = MeanDistanceToAnchors();
+	TestTrue(FString::Printf(TEXT("The stitch holds the cloth at its rest length (mean %.2f cm, want 20)"), Pushed), FMath::Abs(Pushed - 20.0) < 2.0);
+
+	// 收绳：restlengthchange = 2 ⇒ clamp(High + 1 − 2) = 0 ⇒ 绳长 0，布被拉回锚点。
+	CSClothTest::SetConstantCurve(Rig.Cloth->AnchorReelIn, 2.0f);
+	CSClothTest::Step(Rig, 120);
+	if (!TestTrue(TEXT("Particle readback after reeling in"), Rig.Cloth->ReadbackParticlesSync(Particles))) return false;
+	const double Reeled = MeanDistanceToAnchors();
+	TestTrue(FString::Printf(TEXT("Reeling in pulls the cloth back onto its anchors (mean %.3f cm)"), Reeled), Reeled < 1.0);
+	TestFalse(TEXT("Not halted"), Rig.Cloth->IsHalted());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCSClothSplitActorTest,
+	"PCGPlugins.ComputeShaderGenerator.ClothSplit.SplitActor",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSClothSplitActorTest::RunTest(const FString& Parameters)
+{
+	// 引擎自带的 UE4 小白人（教程资产）：骨骼网格 → CPU 蒙皮快照 → 切分 → setup → 跟随 → 放开，整条链。
+	USkeletalMesh* Mannequin = LoadObject<USkeletalMesh>(nullptr, TEXT("/Engine/Tutorial/SubEditors/TutorialAssets/Character/TutorialTPP.TutorialTPP"));
+	if (!Mannequin)
+	{
+		AddWarning(TEXT("The engine tutorial mannequin is missing; skipped."));
+		return true;
+	}
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("Editor test world"), World)) return false;
+	ACSClothSplitActor* Actor = World->SpawnActor<ACSClothSplitActor>();
+	if (!TestNotNull(TEXT("Split actor"), Actor)) return false;
+	Actor->LoopPeriod = 0.0f;
+	Actor->ClothComponent->bSimulate = false;
+	Actor->ClothComponent->ReleaseDelay = 0.2f;
+	Actor->Body->SetSkeletalMeshAsset(Mannequin);
+	Actor->Restart();
+
+	UCSClothSimComponent* Cloth = Actor->ClothComponent;
+	if (!TestTrue(TEXT("The split cloth is simulating"), Cloth->IsSimulationReady())) return false;
+	const UCSClothSimComponent::FSetupStats& Stats = Cloth->GetSetupStats();
+	AddInfo(FString::Printf(TEXT("%d bands, %d pieces, %d particles, %d anchored"), Actor->GetNumBands(), Actor->GetNumPieces(),
+		Stats.NumParticles, Stats.NumAnchored));
+	TestTrue(TEXT("The body is cut into many pieces"), Actor->GetNumPieces() > 20);
+	// 不属于任何三角的顶点（小白人有十来个）没有质量，setup 把它们钉在宿主上；其余全挂锚点。
+	TestEqual(TEXT("Every cloth particle is anchored to the body"), Stats.NumAnchored + Stats.NumPinned, Stats.NumParticles);
+	TestTrue(TEXT("Only a handful of stray vertices are pinned"), Stats.NumPinned < Stats.NumParticles / 100);
+	TestFalse(TEXT("The skeletal body is hidden; the cloth draws the character"), Actor->Body->IsVisible());
+
+	// 放开前：不放动画就是参考姿态，蒙皮位置 = LOD 0 的原始顶点 —— 粒子的包围盒应与它们的包围盒重合
+	// （组件的 Bounds 不行：那是物理资产给的，T 姿态的指尖在它外面）。容差 1.5 cm：切口穿过指尖这种尖处时，
+	// 切口平滑把尖上的点往里收（Houdini 的 attribblur 同样如此），实测最多约 1.2 cm。
+	for (int32 Frame = 0; Frame < 6; ++Frame)
+	{
+		Actor->Tick(CSClothTest::FrameDt);
+		Cloth->StepSimulation(CSClothTest::FrameDt);
+	}
+	TArray<FVector4f> Particles;
+	if (!TestTrue(TEXT("Particle readback"), Cloth->ReadbackParticlesSync(Particles))) return false;
+	FBox Following(ForceInit);
+	for (const FVector4f& P : Particles) Following += FVector(P.X, P.Y, P.Z);
+	const FPositionVertexBuffer& RefPositions = Mannequin->GetResourceForRendering()->LODRenderData[0].StaticVertexBuffers.PositionVertexBuffer;
+	FBox RefPose(ForceInit);
+	for (uint32 Vertex = 0; Vertex < RefPositions.GetNumVertices(); ++Vertex) RefPose += FVector(RefPositions.VertexPosition(Vertex));
+	RefPose = RefPose.TransformBy(Actor->Body->GetComponentTransform());
+	TestTrue(FString::Printf(TEXT("Before release the cloth is the body (cloth %s, reference pose %s)"), *Following.ToString(), *RefPose.ToString()),
+		Following.Min.Equals(RefPose.Min, 1.5) && Following.Max.Equals(RefPose.Max, 1.5));
+
+	// 放开后：条带离开身体（默认曲线：前 0.24 s 绳不起作用，旋流把它们带走），全程有限、不停摆。
+	for (int32 Frame = 0; Frame < 60; ++Frame)
+	{
+		Actor->Tick(CSClothTest::FrameDt);
+		Cloth->StepSimulation(CSClothTest::FrameDt);
+	}
+	TestTrue(TEXT("Released"), Cloth->IsReleased());
+	if (!TestTrue(TEXT("Particle readback after release"), Cloth->ReadbackParticlesSync(Particles))) return false;
+	TestTrue(TEXT("No NaN / Inf"), CSClothTest::AllFinite(Particles));
+	TestFalse(TEXT("Not halted"), Cloth->IsHalted());
+	FBox Released(ForceInit);
+	for (const FVector4f& P : Particles) Released += FVector(P.X, P.Y, P.Z);
+	TestTrue(FString::Printf(TEXT("The strips leave the body (extent %.0f -> %.0f cm)"), Following.GetExtent().Size(), Released.GetExtent().Size()),
+		Released.GetExtent().Size() > Following.GetExtent().Size() * 1.1);
 	return true;
 }
 
