@@ -31,6 +31,7 @@
 #include "Misc/Paths.h"
 #include "Rendering/SkeletalMeshLODRenderData.h"
 #include "Rendering/SkeletalMeshRenderData.h"
+#include "Rendering/SkinWeightVertexBuffer.h"
 #include "RenderingThread.h"
 #include "TextureResource.h"
 #include "Tests/AutomationEditorCommon.h"
@@ -1170,6 +1171,68 @@ bool FCSClothAnchorReleaseTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCSClothParallelSkinningTest,
+	"PCGPlugins.ComputeShaderGenerator.ClothSplit.ParallelSkinning",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSClothParallelSkinningTest::RunTest(const FString& Parameters)
+{
+	// 并行蒙皮与引擎的 ComputeSkinnedPositions 逐顶点一致。参考姿态下每根骨的 RefToLocal 都 ≈ 单位阵，骨骼映射错了
+	// 也看不出来：给每根骨一个各不相同的刚体变换（RefToLocal = 参考姿态的逆 × 这根骨的「当前」变换）再比。
+	USkeletalMesh* Mannequin = LoadObject<USkeletalMesh>(nullptr, TEXT("/Engine/Tutorial/SubEditors/TutorialAssets/Character/TutorialTPP.TutorialTPP"));
+	if (!Mannequin)
+	{
+		AddWarning(TEXT("The engine tutorial mannequin is missing; skipped."));
+		return true;
+	}
+	const FSkeletalMeshLODRenderData& LOD = Mannequin->GetResourceForRendering()->LODRenderData[0];
+	const FSkinWeightVertexBuffer& Weights = *LOD.GetSkinWeightVertexBuffer();
+	const FPositionVertexBuffer& RefPositions = LOD.StaticVertexBuffers.PositionVertexBuffer;
+	if (!RefPositions.GetVertexData() || !Weights.GetNeedsCPUAccess())
+	{
+		AddWarning(TEXT("The mannequin has no CPU copy of its LOD 0 vertices; skipped."));
+		return true;
+	}
+
+	const TArray<FMatrix44f>& RefBasesInv = Mannequin->GetRefBasesInvMatrix();
+	TArray<FMatrix44f> RefToLocals;
+	RefToLocals.SetNumUninitialized(RefBasesInv.Num());
+	for (int32 Bone = 0; Bone < RefBasesInv.Num(); ++Bone)
+	{
+		const FTransform Pose(FRotator(17.0 * Bone, 29.0 * Bone, 11.0 * Bone), FVector(3.0 * Bone, -2.0 * Bone, 1.5 * Bone));
+		RefToLocals[Bone] = RefBasesInv[Bone] * FMatrix44f(Pose.ToMatrixWithScale());
+	}
+
+	// 引擎那份只从组件上取资产（判空、主姿态组件）：一个没注册的组件就够。
+	USkeletalMeshComponent* Body = NewObject<USkeletalMeshComponent>(GetTransientPackage());
+	Body->SetSkeletalMeshAsset(Mannequin);
+	TArray<FVector3f> Engine, Parallel;
+	const double EngineStart = FPlatformTime::Seconds();
+	USkinnedMeshComponent::ComputeSkinnedPositions(Body, Engine, RefToLocals, LOD, Weights);
+	const double ParallelStart = FPlatformTime::Seconds();
+	CSClothSkinning::ComputeSkinnedPositions(LOD, Weights, RefToLocals, Parallel);
+	const double ParallelEnd = FPlatformTime::Seconds();
+	AddInfo(FString::Printf(TEXT("%d vertices: engine %.2f ms, parallel %.2f ms"), Engine.Num(),
+		(ParallelStart - EngineStart) * 1e3, (ParallelEnd - ParallelStart) * 1e3));
+	if (!TestEqual(TEXT("One position per LOD 0 vertex"), Parallel.Num(), Engine.Num())) return false;
+
+	double Worst = 0.0;
+	double Moved = 0.0;
+	int32 Identical = 0;
+	for (int32 Vertex = 0; Vertex < Engine.Num(); ++Vertex)
+	{
+		Worst = FMath::Max(Worst, double(FVector3f::Dist(Parallel[Vertex], Engine[Vertex])));
+		Moved = FMath::Max(Moved, double(FVector3f::Dist(Engine[Vertex], RefPositions.VertexPosition(uint32(Vertex)))));
+		Identical += Parallel[Vertex] == Engine[Vertex] ? 1 : 0;
+	}
+	AddInfo(FString::Printf(TEXT("%d of %d positions bit-identical"), Identical, Engine.Num()));
+	TestTrue(FString::Printf(TEXT("The test pose moves the vertices (up to %.0f cm)"), Moved), Moved > 10.0);
+	// /fp:fast 下两边可能一边并成 FMA 一边没有：差在末位，不要求逐位相同。
+	TestTrue(FString::Printf(TEXT("Parallel skinning matches the engine per vertex (worst %.6f cm)"), Worst), Worst < 1e-3);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCSClothSplitActorTest,
 	"PCGPlugins.ComputeShaderGenerator.ClothSplit.SplitActor",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
@@ -1237,6 +1300,36 @@ bool FCSClothSplitActorTest::RunTest(const FString& Parameters)
 	for (const FVector4f& P : Particles) Released += FVector(P.X, P.Y, P.Z);
 	TestTrue(FString::Printf(TEXT("The strips leave the body (extent %.0f -> %.0f cm)"), Following.GetExtent().Size(), Released.GetExtent().Size()),
 		Released.GetExtent().Size() > Following.GetExtent().Size() * 1.1);
+
+	// 重播（LoopPeriod 到点）：沿用切好的布，不重新切分、不重新 setup —— 同一张网格、同样的块数，模拟帧数接着涨
+	// （重新 setup 会换一份 GPU 状态，从 0 数起）；布回到身体上，过了 ReleaseDelay 再放开一次。
+	UCSMesh* const MeshBefore = Actor->GetClothMesh();
+	const int32 PiecesBefore = Actor->GetNumPieces();
+	const int32 FramesBefore = Cloth->GetSimulatedFrameCount();
+	Actor->LoopPeriod = 1.0f;   // 已经跑了 66 帧 ≈ 1.1 s：下一次 Tick 就到点
+	for (int32 Frame = 0; Frame < 6; ++Frame)
+	{
+		Actor->Tick(CSClothTest::FrameDt);
+		Cloth->StepSimulation(CSClothTest::FrameDt);
+	}
+	TestFalse(TEXT("A replay goes back to the follow phase"), Cloth->IsReleased());
+	TestTrue(TEXT("A replay reuses the split cloth (same mesh, same pieces)"),
+		Actor->GetClothMesh() == MeshBefore && Actor->GetNumPieces() == PiecesBefore);
+	if (!TestTrue(TEXT("Particle readback after the replay"), Cloth->ReadbackParticlesSync(Particles))) return false;
+	const int32 FramesAfter = Cloth->GetSimulatedFrameCount();
+	TestTrue(FString::Printf(TEXT("A replay does not set the cloth up again (simulated frames %d -> %d)"), FramesBefore, FramesAfter),
+		FramesAfter > FramesBefore);
+	FBox Replayed(ForceInit);
+	for (const FVector4f& P : Particles) Replayed += FVector(P.X, P.Y, P.Z);
+	TestTrue(FString::Printf(TEXT("After a replay the cloth is the body again (cloth %s, reference pose %s)"), *Replayed.ToString(), *RefPose.ToString()),
+		Replayed.Min.Equals(RefPose.Min, 1.5) && Replayed.Max.Equals(RefPose.Max, 1.5));
+	for (int32 Frame = 0; Frame < 20; ++Frame)
+	{
+		Actor->Tick(CSClothTest::FrameDt);
+		Cloth->StepSimulation(CSClothTest::FrameDt);
+	}
+	TestTrue(TEXT("The replay releases again after ReleaseDelay"), Cloth->IsReleased());
+	TestFalse(TEXT("Not halted after the replay"), Cloth->IsHalted());
 	return true;
 }
 
