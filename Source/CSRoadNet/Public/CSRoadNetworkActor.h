@@ -164,6 +164,10 @@ class CSROADNET_API ACSRoadNetworkActor : public AActor
 public:
 	ACSRoadNetworkActor();
 	virtual ~ACSRoadNetworkActor() override;
+	/** Declared here so UHT does not define it in the .gen.cpp: that constructor destroys the TUniquePtr members on
+	 *  unwind, and FTileState / FCSRoadNetworkPreview are incomplete there unless the unity blob happens to define them
+	 *  first (C4150 once the blob order changes). Defined in the .cpp next to the destructor. */
+	ACSRoadNetworkActor(FVTableHelper& Helper);
 
 	/** Where the roads come from. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road")

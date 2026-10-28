@@ -189,6 +189,11 @@ ACSRoadNetworkActor::ACSRoadNetworkActor()
 
 ACSRoadNetworkActor::~ACSRoadNetworkActor() = default;
 
+ACSRoadNetworkActor::ACSRoadNetworkActor(FVTableHelper& Helper)
+	: Super(Helper)
+{
+}
+
 FString ACSRoadNetworkActor::ResolveAssetDirectory() const
 {
 	if (!AssetDirectory.Path.IsEmpty()) return AssetDirectory.Path;
