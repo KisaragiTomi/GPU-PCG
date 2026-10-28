@@ -41,6 +41,13 @@ struct FCSClothGpuState
 	TRefCountPtr<FRDGPooledBuffer> RestTangents;
 	TRefCountPtr<FRDGPooledBuffer> Status;
 
+	/** 锚点与场（Docs/HoudiniFallSplit_Port.md）：没有锚点时是 1 个元素的占位，shader 靠 bAnchors = 0 不去读。 */
+	TRefCountPtr<FRDGPooledBuffer> AnchorParams;
+	TRefCountPtr<FRDGPooledBuffer> FieldDirs;
+	TRefCountPtr<FRDGPooledBuffer> AnchorTargets;
+	TRefCountPtr<FRDGPooledBuffer> PrevAnchorTargets;
+	bool bHasAnchors = false;
+
 	bool IsInitialized() const { return Positions.IsValid() && Status.IsValid(); }
 
 	// --- 渲染线程独占 ---------------------------------------------------------------
@@ -105,6 +112,26 @@ struct FCSClothFrameParams
 
 	/** sim 空间原点（世界坐标，float）。写回时加回去。 */
 	FVector3f SimOrigin = FVector3f::ZeroVector;
+
+	// --- 锚点、放开与场（只对带锚点的布起作用） ---------------------------------------
+	/** CS_CLOTH_RELEASE_*。KICK 只作用在这一帧的第一个 substep，之后的 substep 按 FREE 走。 */
+	int32 ReleaseState = 2;
+	float ReleaseKick = 1.0f;
+	/** 绳的刚度 > 0 才解锚点约束（Houdini：刚度 0 = 绳完全不起作用）。 */
+	bool bAnchorConstraints = false;
+	float AnchorCompliance = 0.0f;
+	float AnchorLengthMin = 0.0f;
+	float AnchorLengthMax = 0.0f;
+	float AnchorReelIn = 0.0f;
+	float FieldSwirlSpeed = 0.0f;
+	float FieldOutwardSpeed = 0.0f;
+	/** 每 substep 往场速度收敛的比例，0 = 没有场。 */
+	float FieldBlend = 0.0f;
+
+	/** true = 锚点取宿主逐帧交的位置（AnchorTargets 非空时本帧更新；空时锚点停在上一次的位置）；false = rest × 宿主变换。 */
+	bool bExternalAnchors = false;
+	/** 本帧末每粒子的锚点（sim 空间）。长度必须 = 粒子数，否则本帧不更新。 */
+	TArray<FVector4f> AnchorTargets;
 };
 
 namespace CSClothRender

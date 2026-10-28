@@ -44,7 +44,12 @@ class FCSClothPredictCS : public FGlobalShader
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, RestPositions)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, PinGroups)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ParticleNormals)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, RestNormals)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PinTransforms)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, AnchorParams)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, FieldDirs)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, AnchorTargets)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PrevAnchorTargets)
 		SHADER_PARAMETER(uint32, NumParticles)
 		SHADER_PARAMETER(float, SubstepDt)
 		SHADER_PARAMETER(float, InvPrevSubstepDt)
@@ -63,6 +68,37 @@ class FCSClothPredictCS : public FGlobalShader
 		SHADER_PARAMETER(FVector4f, TeleportRow0)
 		SHADER_PARAMETER(FVector4f, TeleportRow1)
 		SHADER_PARAMETER(FVector4f, TeleportRow2)
+		SHADER_PARAMETER(uint32, bAnchors)
+		SHADER_PARAMETER(uint32, bExternalAnchors)
+		SHADER_PARAMETER(uint32, ReleaseState)
+		SHADER_PARAMETER(float, ReleaseKick)
+		SHADER_PARAMETER(float, FieldSwirlSpeed)
+		SHADER_PARAMETER(float, FieldOutwardSpeed)
+		SHADER_PARAMETER(float, FieldBlend)
+	END_SHADER_PARAMETER_STRUCT()
+};
+
+class FCSClothSolveAnchorsCS : public FGlobalShader
+{
+	CSCLOTH_SHADER_BODY(FCSClothSolveAnchorsCS)
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, RW_Positions)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, RestPositions)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ParticleNormals)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PinTransforms)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, AnchorParams)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, AnchorTargets)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, PrevAnchorTargets)
+		SHADER_PARAMETER(uint32, NumParticles)
+		SHADER_PARAMETER(float, SubstepAlpha)
+		SHADER_PARAMETER(float, InvSubstepDtSq)
+		SHADER_PARAMETER(float, MaxCorrection)
+		SHADER_PARAMETER(uint32, bExternalAnchors)
+		SHADER_PARAMETER(float, AnchorCompliance)
+		SHADER_PARAMETER(float, AnchorLengthMin)
+		SHADER_PARAMETER(float, AnchorLengthMax)
+		SHADER_PARAMETER(float, AnchorReelIn)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -147,6 +183,7 @@ class FCSClothSkinBackCS : public FGlobalShader
 
 IMPLEMENT_GLOBAL_SHADER(FCSClothPredictCS, "/Plugin/PCGPlugins/Shaders/Private/CSClothSim.usf", "PredictCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FCSClothSolveColorCS, "/Plugin/PCGPlugins/Shaders/Private/CSClothSim.usf", "SolveColorCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FCSClothSolveAnchorsCS, "/Plugin/PCGPlugins/Shaders/Private/CSClothSim.usf", "SolveAnchorsCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FCSClothCollideCS, "/Plugin/PCGPlugins/Shaders/Private/CSClothSim.usf", "CollideCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FCSClothAccumulateNormalsCS, "/Plugin/PCGPlugins/Shaders/Private/CSClothSim.usf", "AccumulateNormalsCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FCSClothFinalizeNormalsCS, "/Plugin/PCGPlugins/Shaders/Private/CSClothSim.usf", "FinalizeNormalsCS", SF_Compute);
@@ -184,6 +221,10 @@ struct FCSClothGraphBuffers
 	FRDGBufferRef CornerToParticle = nullptr;
 	FRDGBufferRef RestTangents = nullptr;
 	FRDGBufferRef Status = nullptr;
+	FRDGBufferRef AnchorParams = nullptr;
+	FRDGBufferRef FieldDirs = nullptr;
+	FRDGBufferRef AnchorTargets = nullptr;
+	FRDGBufferRef PrevAnchorTargets = nullptr;
 };
 
 FCSClothGraphBuffers CSCloth_Register(FRDGBuilder& GraphBuilder, const FCSClothGpuState& State)
@@ -204,6 +245,10 @@ FCSClothGraphBuffers CSCloth_Register(FRDGBuilder& GraphBuilder, const FCSClothG
 	B.CornerToParticle = GraphBuilder.RegisterExternalBuffer(State.CornerToParticle, TEXT("CSCloth.CornerToParticle"));
 	B.RestTangents = GraphBuilder.RegisterExternalBuffer(State.RestTangents, TEXT("CSCloth.RestTangents"));
 	B.Status = GraphBuilder.RegisterExternalBuffer(State.Status, TEXT("CSCloth.Status"));
+	B.AnchorParams = GraphBuilder.RegisterExternalBuffer(State.AnchorParams, TEXT("CSCloth.AnchorParams"));
+	B.FieldDirs = GraphBuilder.RegisterExternalBuffer(State.FieldDirs, TEXT("CSCloth.FieldDirs"));
+	B.AnchorTargets = GraphBuilder.RegisterExternalBuffer(State.AnchorTargets, TEXT("CSCloth.AnchorTargets"));
+	B.PrevAnchorTargets = GraphBuilder.RegisterExternalBuffer(State.PrevAnchorTargets, TEXT("CSCloth.PrevAnchorTargets"));
 	return B;
 }
 
@@ -350,6 +395,25 @@ void InitState_RenderThread(FRHICommandListImmediate& RHICmdList, FCSClothGpuSta
 	B.RestTangents = GraphBuilder.CreateBuffer(
 		FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(State.NumRenderVertices, 1u) * 2), TEXT("CSCloth.RestTangents"));
 
+	// 锚点与场：没有锚点时建 1 个元素的占位 —— shader 参数必须绑上，bAnchors = 0 时 shader 不去读。
+	State.bHasAnchors = Data.HasAnchors();
+	if (State.bHasAnchors)
+	{
+		B.AnchorParams = CreateStructuredBuffer(GraphBuilder, TEXT("CSCloth.AnchorParams"), Data.AnchorParams);
+		B.FieldDirs = CreateStructuredBuffer(GraphBuilder, TEXT("CSCloth.FieldDirs"), Data.FieldDirs);
+		// 锚点起点 = rest 位置：宿主第一次交位置之前，跟随阶段原地不动。
+		B.AnchorTargets = CreateStructuredBuffer(GraphBuilder, TEXT("CSCloth.AnchorTargets"), Data.RestPositions);
+		B.PrevAnchorTargets = CreateStructuredBuffer(GraphBuilder, TEXT("CSCloth.PrevAnchorTargets"), Data.RestPositions);
+	}
+	else
+	{
+		const TArray<FVector4f> Placeholder = { FVector4f(0.0f, 0.0f, 0.0f, 0.0f) };
+		B.AnchorParams = CreateStructuredBuffer(GraphBuilder, TEXT("CSCloth.AnchorParams"), Placeholder);
+		B.FieldDirs = CreateStructuredBuffer(GraphBuilder, TEXT("CSCloth.FieldDirs"), Placeholder);
+		B.AnchorTargets = CreateStructuredBuffer(GraphBuilder, TEXT("CSCloth.AnchorTargets"), Placeholder);
+		B.PrevAnchorTargets = CreateStructuredBuffer(GraphBuilder, TEXT("CSCloth.PrevAnchorTargets"), Placeholder);
+	}
+
 	// 法线累加器的不变式是「两次使用之间恒为零」：Finalize 读完即清，起点在这里清。
 	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(B.NormalAccum), 0u);
 	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(B.Lambdas), 0u);
@@ -386,6 +450,10 @@ void InitState_RenderThread(FRHICommandListImmediate& RHICmdList, FCSClothGpuSta
 	State.CornerToParticle = GraphBuilder.ConvertToExternalBuffer(B.CornerToParticle);
 	State.RestTangents = GraphBuilder.ConvertToExternalBuffer(B.RestTangents);
 	State.Status = GraphBuilder.ConvertToExternalBuffer(B.Status);
+	State.AnchorParams = GraphBuilder.ConvertToExternalBuffer(B.AnchorParams);
+	State.FieldDirs = GraphBuilder.ConvertToExternalBuffer(B.FieldDirs);
+	State.AnchorTargets = GraphBuilder.ConvertToExternalBuffer(B.AnchorTargets);
+	State.PrevAnchorTargets = GraphBuilder.ConvertToExternalBuffer(B.PrevAnchorTargets);
 
 	GraphBuilder.Execute();
 }
@@ -413,6 +481,21 @@ void SimulateFrame_RenderThread(FRHICommandListImmediate& RHICmdList, FCSClothGp
 	const uint32 NumColliders = uint32(Params.Colliders.Num() / CS_CLOTH_COLLIDER_FLOAT4S);
 	FRDGBufferRef Colliders = CreateStructuredBuffer(GraphBuilder, TEXT("CSCloth.Colliders"), Params.Colliders);
 
+	// 锚点：外部位置每帧先把本帧的推成上一帧的，有新位置再写进来 —— 宿主这一帧没交，锚点就原地不动，
+	// 而不是在两帧前与上一帧的位置之间再插值一遍。
+	const bool bAnchors = State.bHasAnchors;
+	if (bAnchors && Params.bExternalAnchors)
+	{
+		AddCopyBufferPass(GraphBuilder, B.PrevAnchorTargets, B.AnchorTargets);
+		if (Params.AnchorTargets.Num() == int32(State.NumParticles))
+		{
+			FRDGBufferRef Upload = CreateStructuredBuffer(GraphBuilder, TEXT("CSCloth.AnchorUpload"), Params.AnchorTargets);
+			AddCopyBufferPass(GraphBuilder, B.AnchorTargets, Upload);
+		}
+	}
+	// 放开前整块布只是跟着锚点走：约束与碰撞都不解，写回的正好是锚点的形状（动画角色的样子）。
+	const bool bFollow = bAnchors && Params.ReleaseState == CS_CLOTH_RELEASE_FOLLOW;
+
 	for (int32 Substep = 0; Substep < Substeps; ++Substep)
 	{
 		const float Alpha = float(Substep + 1) / float(Substeps);
@@ -423,7 +506,20 @@ void SimulateFrame_RenderThread(FRHICommandListImmediate& RHICmdList, FCSClothGp
 			P->RestPositions = GraphBuilder.CreateSRV(B.RestPositions);
 			P->PinGroups = GraphBuilder.CreateSRV(B.PinGroups);
 			P->ParticleNormals = GraphBuilder.CreateSRV(B.ParticleNormals);
+			P->RestNormals = GraphBuilder.CreateSRV(B.RestNormals);
 			P->PinTransforms = GraphBuilder.CreateSRV(PinTransforms);
+			P->AnchorParams = GraphBuilder.CreateSRV(B.AnchorParams);
+			P->FieldDirs = GraphBuilder.CreateSRV(B.FieldDirs);
+			P->AnchorTargets = GraphBuilder.CreateSRV(B.AnchorTargets);
+			P->PrevAnchorTargets = GraphBuilder.CreateSRV(B.PrevAnchorTargets);
+			P->bAnchors = bAnchors ? 1u : 0u;
+			P->bExternalAnchors = Params.bExternalAnchors ? 1u : 0u;
+			// 放开的那一下只给这一帧的第一个 substep，其余 substep 已经是放开之后了。
+			P->ReleaseState = uint32((Substep > 0 && Params.ReleaseState == CS_CLOTH_RELEASE_KICK) ? CS_CLOTH_RELEASE_FREE : Params.ReleaseState);
+			P->ReleaseKick = Params.ReleaseKick;
+			P->FieldSwirlSpeed = Params.FieldSwirlSpeed;
+			P->FieldOutwardSpeed = Params.FieldOutwardSpeed;
+			P->FieldBlend = Params.FieldBlend;
 			P->NumParticles = State.NumParticles;
 			P->SubstepDt = Dt;
 			P->InvPrevSubstepDt = 1.0f / (Substep == 0 ? PrevDt : Dt);
@@ -447,9 +543,36 @@ void SimulateFrame_RenderThread(FRHICommandListImmediate& RHICmdList, FCSClothGp
 			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("CSCloth.Predict"), Shader, P, CSCloth_Groups(State.NumParticles));
 		}
 
+		// 锚点绳：放开之后、刚度 > 0 时。排在布自己的约束**之前**：这么小的粒子质量下绳与拉伸都近乎硬约束，
+		// 单次迭代的 Gauss-Seidel 谁最后解谁说了算 —— 绳排最后时每个 substep 都把粒子硬拽到绳长的球壳上，
+		// 条带被拉碎成锯齿（2026-10-28 实测）。Vellum 靠 100 次迭代让刚 3000 倍的布赢；这里让布最后解，
+		// 绳就像一股把整条带往外拽的力，条带保持连续。
+		if (bAnchors && !bFollow && Params.bAnchorConstraints)
+		{
+			FCSClothSolveAnchorsCS::FParameters* P = GraphBuilder.AllocParameters<FCSClothSolveAnchorsCS::FParameters>();
+			P->RW_Positions = GraphBuilder.CreateUAV(B.Positions);
+			P->RestPositions = GraphBuilder.CreateSRV(B.RestPositions);
+			P->ParticleNormals = GraphBuilder.CreateSRV(B.ParticleNormals);
+			P->PinTransforms = GraphBuilder.CreateSRV(PinTransforms);
+			P->AnchorParams = GraphBuilder.CreateSRV(B.AnchorParams);
+			P->AnchorTargets = GraphBuilder.CreateSRV(B.AnchorTargets);
+			P->PrevAnchorTargets = GraphBuilder.CreateSRV(B.PrevAnchorTargets);
+			P->NumParticles = State.NumParticles;
+			P->SubstepAlpha = Alpha;
+			P->InvSubstepDtSq = 1.0f / (Dt * Dt);
+			P->MaxCorrection = Params.MaxCorrection;
+			P->bExternalAnchors = Params.bExternalAnchors ? 1u : 0u;
+			P->AnchorCompliance = Params.AnchorCompliance;
+			P->AnchorLengthMin = Params.AnchorLengthMin;
+			P->AnchorLengthMax = Params.AnchorLengthMax;
+			P->AnchorReelIn = Params.AnchorReelIn;
+			TShaderMapRef<FCSClothSolveAnchorsCS> Shader(ShaderMap);
+			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("CSCloth.SolveAnchors"), Shader, P, CSCloth_Groups(State.NumParticles));
+		}
+
 		// 上色的 Gauss-Seidel：颜色之间按顺序依赖（RDG 按同一个 UAV 的写后读排序，并插 UAV 屏障），
 		// 颜色之内无冲突。λ 每个 substep 从第一次迭代起算。
-		for (int32 Iteration = 0; Iteration < Iterations; ++Iteration)
+		for (int32 Iteration = 0; Iteration < (bFollow ? 0 : Iterations); ++Iteration)
 		{
 			for (const FIntPoint& Color : State.ColorRanges)
 			{
@@ -472,7 +595,7 @@ void SimulateFrame_RenderThread(FRHICommandListImmediate& RHICmdList, FCSClothGp
 			}
 		}
 
-		if (NumColliders > 0)
+		if (NumColliders > 0 && !bFollow)
 		{
 			FCSClothCollideCS::FParameters* P = GraphBuilder.AllocParameters<FCSClothCollideCS::FParameters>();
 			P->RW_Positions = GraphBuilder.CreateUAV(B.Positions);

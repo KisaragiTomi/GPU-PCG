@@ -51,6 +51,17 @@ bool CSCloth_IsSetupProperty(FName Name)
 	for (const FName& Candidate : Names) if (Candidate == Name) return true;
 	return false;
 }
+
+/** 三次插值、两侧斜率相同（单位：值 / 秒）的关键帧 —— Houdini 的 bezier() 通道，忽略它的切线权重。 */
+void CSCloth_AddCurveKey(FRichCurve& Curve, float Time, float Value, float Slope)
+{
+	const FKeyHandle Key = Curve.AddKey(Time, Value);
+	Curve.SetKeyInterpMode(Key, RCIM_Cubic);
+	Curve.SetKeyTangentMode(Key, RCTM_User, false);
+	FRichCurveKey& Data = Curve.GetKey(Key);
+	Data.ArriveTangent = Slope;
+	Data.LeaveTangent = Slope;
+}
 }
 
 UCSClothSimComponent::UCSClothSimComponent()
@@ -60,6 +71,40 @@ UCSClothSimComponent::UCSClothSimComponent()
 	// 物理之后：宿主、AttachActor、碰撞体的本帧变换都已经定了。渲染命令仍排在本帧场景渲染之前，当帧生效。
 	PrimaryComponentTick.TickGroup = TG_PostPhysics;
 	bTickInEditor = true;
+
+	// 锚点曲线的默认值 = AnimationFallSplit19.hip 的 sopsolver 通道（25 fps，模拟起点 1004 帧 = 0 秒，斜率 /帧 × 25）。
+	// 之后两版把场景改成 60 fps 时关键帧按秒保留、被挪到了 2401 帧以后，落在镜头范围外 —— 那两版里这套绳实际是失效的。
+	CSCloth_AddCurveKey(*AnchorStiffnessFade.GetRichCurve(), -0.12f, 1.0f, 0.0f);
+	CSCloth_AddCurveKey(*AnchorStiffnessFade.GetRichCurve(), 0.24f, 1.0f, 0.0f);
+	CSCloth_AddCurveKey(*AnchorStiffnessFade.GetRichCurve(), 1.80f, 0.0f, 0.0f);
+	CSCloth_AddCurveKey(*AnchorReelIn.GetRichCurve(), 0.0f, 0.0f, 0.0f);
+	CSCloth_AddCurveKey(*AnchorReelIn.GetRichCurve(), 1.32f, 0.8566f, 0.3968f * 25.0f);
+	CSCloth_AddCurveKey(*AnchorReelIn.GetRichCurve(), 2.04f, 1.0f, 0.0f);
+}
+
+void UCSClothSimComponent::SetVertexBinding(const FCSClothVertexBinding& InBinding)
+{
+	Binding = InBinding;
+	bHasBinding = true;
+}
+
+void UCSClothSimComponent::ClearVertexBinding()
+{
+	Binding = FCSClothVertexBinding();
+	bHasBinding = false;
+}
+
+void UCSClothSimComponent::SetAnchorSourcePositions(TConstArrayView<FVector3f> Positions, const FTransform& ToWorld)
+{
+	PendingAnchorSources.Reset(Positions.Num());
+	PendingAnchorSources.Append(Positions.GetData(), Positions.Num());
+	PendingAnchorToWorld = ToWorld;
+	bPendingAnchors = true;
+}
+
+void UCSClothSimComponent::Release()
+{
+	if (bAnchored && !bReleased) bReleaseRequested = true;
 }
 
 void UCSClothSimComponent::SetTargetMesh(UCSMesh* InMesh)
@@ -141,6 +186,7 @@ bool UCSClothSimComponent::BuildSetupOptions(FCSClothSetupOptions& OutOptions)
 	for (const FCSClothPinBox& Pin : ExtraPinBoxes) AddPinBox(Pin);
 
 	OutOptions.NumPinGroups = PinGroups.Num();
+	OutOptions.Binding = bHasBinding ? &Binding : nullptr;
 	return true;
 }
 
@@ -190,6 +236,7 @@ bool UCSClothSimComponent::SetupFromMeshSync()
 	SetupStats.NumBend = Data.NumBend;
 	SetupStats.NumTether = Data.NumTether;
 	SetupStats.NumPinned = Data.NumPinned;
+	SetupStats.NumAnchored = Data.NumAnchored;
 	SetupStats.TotalMassKg = Data.TotalMassKg;
 	PinGroupRestBounds = Data.PinGroupRestBounds;
 	PinGroupReach = Data.PinGroupReach;
@@ -198,6 +245,14 @@ bool UCSClothSimComponent::SetupFromMeshSync()
 	RestBoundsSim = Data.RestBounds;
 	PrevColliderShapes.Reset();
 	SimulatedTime = 0.0;
+
+	bAnchored = Data.HasAnchors();
+	ParticleAnchorSources = Data.AnchorSources;
+	ParticleAnchorWeights = Data.AnchorWeights;
+	bExternalAnchors = false;
+	bReleased = false;
+	bReleaseRequested = false;
+	ReleaseTime = 0.0;
 
 	FCSClothGpuStateRef NewState = MakeShared<FCSClothGpuState, ESPMode::ThreadSafe>();
 	FCSMeshResidentRef ResidentRef = TargetMesh->GetResident();
@@ -240,9 +295,9 @@ bool UCSClothSimComponent::SetupFromMeshSync()
 		}
 	}
 
-	UE_LOG(LogCSCloth, Log, TEXT("[CSCloth] %s: %d particles (%d pinned), %d stretch / %d bend / %d tether constraints, %.3f kg, %.2f MiB."),
-		*GetPathName(), SetupStats.NumParticles, SetupStats.NumPinned, SetupStats.NumStretch, SetupStats.NumBend, SetupStats.NumTether,
-		SetupStats.TotalMassKg, double(RequiredBytes) / (1024.0 * 1024.0));
+	UE_LOG(LogCSCloth, Log, TEXT("[CSCloth] %s: %d particles (%d pinned, %d anchored), %d stretch / %d bend / %d tether constraints, %.3f kg, %.2f MiB."),
+		*GetPathName(), SetupStats.NumParticles, SetupStats.NumPinned, SetupStats.NumAnchored, SetupStats.NumStretch, SetupStats.NumBend,
+		SetupStats.NumTether, SetupStats.TotalMassKg, double(RequiredBytes) / (1024.0 * 1024.0));
 	return true;
 }
 
@@ -263,6 +318,15 @@ bool UCSClothSimComponent::ResetToRestPose()
 	}
 	for (FPinGroup& Group : PinGroups) Group.PrevTransform = ResolvePinGroupTransform(Group);
 	PrevColliderShapes.Reset();
+
+	// 带锚点的布：重置 = 从头再放一次（回到跟随阶段，放开计时归零）。
+	if (bAnchored)
+	{
+		SimulatedTime = 0.0;
+		bReleased = false;
+		bReleaseRequested = false;
+		ReleaseTime = 0.0;
+	}
 
 	FCSClothGpuStateRef State = GpuState;
 	FCSMeshResidentRef ResidentRef = TargetMesh->GetResident();
@@ -467,6 +531,73 @@ bool UCSClothSimComponent::StepSimulation(float DeltaTime)
 	}
 	PrevColliderShapes = MoveTemp(Shapes);
 
+	// --- 锚点、放开与场（带锚点的布）
+	if (bAnchored)
+	{
+		if (!bReleased && (bReleaseRequested || (ReleaseDelay >= 0.0f && SimulatedTime >= double(ReleaseDelay))))
+		{
+			bReleased = true;
+			bReleaseRequested = false;
+			ReleaseTime = SimulatedTime;
+			Params.ReleaseState = CS_CLOTH_RELEASE_KICK;
+		}
+		else
+		{
+			Params.ReleaseState = bReleased ? CS_CLOTH_RELEASE_FREE : CS_CLOTH_RELEASE_FOLLOW;
+		}
+		Params.ReleaseKick = ReleaseVelocityScale;
+
+		// Houdini sopsolver 的两行：stiffness = lerp(1000, 0, stiffnesschange)，restlength = lerp(0, noise, clamp(high + 1 − restlengthchange))。
+		const float Since = float(SimulatedTime - ReleaseTime);
+		const float Fade = FMath::Clamp(AnchorStiffnessFade.GetRichCurveConst()->Eval(Since, 1.0f), 0.0f, 1.0f);
+		const float Stiffness = FMath::Max(AnchorMaxStiffness, 0.0f) * (1.0f - Fade);
+		Params.bAnchorConstraints = bReleased && Stiffness > UE_KINDA_SMALL_NUMBER;
+		Params.AnchorCompliance = Params.bAnchorConstraints ? 1.0f / Stiffness : 0.0f;
+		Params.AnchorLengthMin = float(FMath::Max(FMath::Min(AnchorRestLengthRange.X, AnchorRestLengthRange.Y), 0.0));
+		Params.AnchorLengthMax = float(FMath::Max(FMath::Max(AnchorRestLengthRange.X, AnchorRestLengthRange.Y), 0.0));
+		Params.AnchorReelIn = AnchorReelIn.GetRichCurveConst()->Eval(Since, 0.0f);
+		Params.FieldSwirlSpeed = SwirlSpeed;
+		Params.FieldOutwardSpeed = OutwardSpeed;
+		Params.FieldBlend = (bReleased && FieldDrag > 0.0f) ? 1.0f - FMath::Exp(-FieldDrag * Params.SubstepDt) : 0.0f;
+
+		// 宿主交了源位置：按每粒子的源与权重收成锚点（double 变换到 sim 空间，大世界坐标下不丢精度）。
+		if (bPendingAnchors && ParticleAnchorSources.Num() == RestPositionsCopy.Num())
+		{
+			bExternalAnchors = true;
+			FBox AnchorBounds(ForceInit);
+			Params.AnchorTargets.SetNumUninitialized(RestPositionsCopy.Num());
+			for (int32 Particle = 0; Particle < RestPositionsCopy.Num(); ++Particle)
+			{
+				const FIntVector Sources = ParticleAnchorSources[Particle];
+				const FVector3f Weights = ParticleAnchorWeights[Particle];
+				FVector3f Local = FVector3f::ZeroVector;
+				float WeightSum = 0.0f;
+				for (int32 K = 0; K < 3; ++K)
+				{
+					if (!PendingAnchorSources.IsValidIndex(Sources[K])) continue;
+					Local += PendingAnchorSources[Sources[K]] * Weights[K];
+					WeightSum += Weights[K];
+				}
+				if (WeightSum > UE_KINDA_SMALL_NUMBER)
+				{
+					const FVector World = PendingAnchorToWorld.TransformPosition(FVector(Local / WeightSum));
+					AnchorBounds += World;
+					const FVector Sim = World - SimOrigin;
+					Params.AnchorTargets[Particle] = FVector4f(float(Sim.X), float(Sim.Y), float(Sim.Z), 0.0f);
+				}
+				else
+				{
+					// 没有源的粒子（钉住的那些）：锚点停在 rest 位置，反正它们不读锚点。
+					const FVector4f& Rest = RestPositionsCopy[Particle];
+					Params.AnchorTargets[Particle] = FVector4f(Rest.X, Rest.Y, Rest.Z, 0.0f);
+				}
+			}
+			if (AnchorBounds.IsValid) LastAnchorWorldBounds = AnchorBounds;
+			bPendingAnchors = false;
+		}
+		Params.bExternalAnchors = bExternalAnchors;
+	}
+
 	FCSClothGpuStateRef State = GpuState;
 	FCSMeshResidentRef ResidentRef = TargetMesh->GetResident();
 	ENQUEUE_RENDER_COMMAND(CSClothSimulate)(
@@ -476,7 +607,16 @@ bool UCSClothSimComponent::StepSimulation(float DeltaTime)
 		});
 
 	for (int32 Group = 0; Group < PinGroups.Num(); ++Group) PinGroups[Group].PrevTransform = Now[Group];
-	MaybePublishBounds(ComputeReachBounds(Now));
+	if (bAnchored && bExternalAnchors && LastAnchorWorldBounds.IsValid)
+	{
+		// 外部锚点（动画角色）：包围盒 = 锚点的包围盒，放开后外扩绳长再加自由阶段能飞出去的余量。
+		const double Reach = bReleased ? FMath::Max(AnchorRestLengthRange.X, AnchorRestLengthRange.Y) + 300.0 : 20.0;
+		MaybePublishBounds(LastAnchorWorldBounds.ExpandBy(Reach));
+	}
+	else
+	{
+		MaybePublishBounds(ComputeReachBounds(Now));
+	}
 	return true;
 }
 
@@ -498,6 +638,13 @@ void UCSClothSimComponent::ReleaseSimulation()
 	PinGroupReach.Reset();
 	RestPositionsCopy.Reset();
 	PrevColliderShapes.Reset();
+	ParticleAnchorSources.Reset();
+	ParticleAnchorWeights.Reset();
+	LastAnchorWorldBounds = FBox(ForceInit);
+	bAnchored = false;
+	bReleased = false;
+	bReleaseRequested = false;
+	bExternalAnchors = false;
 }
 
 bool UCSClothSimComponent::ReadbackParticlesSync(TArray<FVector4f>& OutWorldPositions) const

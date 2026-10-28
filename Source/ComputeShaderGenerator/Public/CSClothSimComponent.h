@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "CSClothSim.h"
 #include "Components/ActorComponent.h"
+#include "Curves/CurveFloat.h"
 #include "CSClothSimComponent.generated.h"
 
 class UCSMesh;
@@ -139,6 +140,51 @@ public:
 	float WindTangentialDrag = 0.1f;
 
 	// -------------------------------------------------------------------------
+	// 锚点与放开（只对带锚点绑定的布起作用，见 SetVertexBinding；Docs/HoudiniFallSplit_Port.md）
+	//
+	// 移植自 AnimationFallSplit 的 vellum stitch：每个布点与一个跟着动画走的锚点之间一条双边距离约束，
+	// 绳长与刚度每帧按两条曲线改写。放开之前粒子硬跟着锚点走（整块布就是动画角色的样子）。
+	// -------------------------------------------------------------------------
+
+	/** setup 之后多少秒放开。< 0 = 不自动放开，等 Release()。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Cloth|Anchors", meta = (Units = "s"))
+	float ReleaseDelay = 0.5f;
+
+	/** 放开那一刻：速度 = 锚点速度 × 它 × 条带半段的正负号（Houdini：trail 算的动画速度 × 5，curvev < 0.5 的那一半取反）。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Cloth|Anchors")
+	float ReleaseVelocityScale = 5.0f;
+
+	/** 绳的最大刚度（N/m）。刚度 = 它 × (1 − AnchorStiffnessFade(t))（Houdini sopsolver：lerp(1000, 0, stiffnesschange)）。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Cloth|Anchors", meta = (ClampMin = "0.0"))
+	float AnchorMaxStiffness = 1000.0f;
+
+	/** Houdini 的 stiffnesschange：放开后的秒数 → [0, 1]，1 = 绳完全松（刚度 0）。默认是 AnimationFallSplit19.hip 的关键帧
+	 *  （25 fps，以模拟起点 1004 帧为 0 秒）：放开后 0.24 s 内绳不起作用，到 1.8 s 绷到最大刚度。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Cloth|Anchors")
+	FRuntimeFloatCurve AnchorStiffnessFade;
+
+	/** Houdini 的 restlengthchange：放开后的秒数 → [0, 1]。绳长 = 随机长度 × clamp(High + 1 − 它, 0, 1)：0 时全长；
+	 *  1 时只有最高处（High = 1）保持全长，越往下越短，脚下收回到 0。默认关键帧同上，0 → 2.04 s。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Cloth|Anchors")
+	FRuntimeFloatCurve AnchorReelIn;
+
+	/** 每个粒子的绳长在这个区间里按它的随机数取（Houdini restlengthnoise：1.9~2 m）。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Cloth|Anchors")
+	FVector2D AnchorRestLengthRange = FVector2D(190.0, 200.0);
+
+	/** 放开后的旋流速度：粒子被拽向「绑定给的场方向 × 它」（Houdini BackVel 的表面项 cross(N, up)，rasterize 前乘了 5 m/s）。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Cloth|Field", meta = (Units = "CentimetersPerSecond"))
+	float SwirlSpeed = 500.0f;
+
+	/** 沿 rest 法线向外的速度（Houdini 里没有对应项，调手感用）。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Cloth|Field", meta = (Units = "CentimetersPerSecond"))
+	float OutwardSpeed = 0.0f;
+
+	/** 速度往场速度收敛的速率（1/s；Houdini popadvectbyvolumes 当风用，airresist = 1）。0 = 关掉场。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Cloth|Field", meta = (ClampMin = "0.0"))
+	float FieldDrag = 1.0f;
+
+	// -------------------------------------------------------------------------
 	// 钉点（钉盒是 P0，顶点色遮罩是 P1；改了都要重新 setup）
 	// -------------------------------------------------------------------------
 
@@ -194,6 +240,30 @@ public:
 	 *  下一次 SetupFromMeshSync 生效。 */
 	void SetExtraPinBoxes(const TArray<FCSClothPinBox>& InPinBoxes);
 
+	/** 每渲染顶点的绑定（焊接键、锚点、场方向；见 FCSClothVertexBinding），必须与目标网格的顶点一一对应。
+	 *  下一次 SetupFromMeshSync 生效。带状分块的宿主（ACSClothSplitActor）走这里。 */
+	void SetVertexBinding(const FCSClothVertexBinding& InBinding);
+	void ClearVertexBinding();
+
+	/**
+	 * 锚点源的位置（下标对应绑定里的 AnchorSources），每帧在本组件 tick 之前交：Positions 在 ToWorld 的空间里
+	 * （骨骼网格交组件空间的蒙皮位置 + 组件变换）。从没交过的布，锚点按宿主 actor 的刚体运动跟着 rest 位置走。
+	 */
+	void SetAnchorSourcePositions(TConstArrayView<FVector3f> Positions, const FTransform& ToWorld);
+
+	/** 立刻放开（不等 ReleaseDelay）。只对带锚点的布有意义。 */
+	UFUNCTION(BlueprintCallable, Category = "CS Cloth")
+	void Release();
+
+	UFUNCTION(BlueprintPure, Category = "CS Cloth")
+	bool HasAnchors() const { return bAnchored; }
+
+	UFUNCTION(BlueprintPure, Category = "CS Cloth")
+	bool IsReleased() const { return bReleased; }
+
+	UFUNCTION(BlueprintPure, Category = "CS Cloth")
+	float GetTimeSinceRelease() const { return bReleased ? float(SimulatedTime - ReleaseTime) : 0.0f; }
+
 	/** 手动推进一帧（bSimulate 关掉时由调用方驱动；测试也走这里）。不阻塞。 */
 	UFUNCTION(BlueprintCallable, Category = "CS Cloth")
 	bool StepSimulation(float DeltaTime);
@@ -228,6 +298,7 @@ public:
 		int32 NumBend = 0;
 		int32 NumTether = 0;
 		int32 NumPinned = 0;
+		int32 NumAnchored = 0;
 		double TotalMassKg = 0.0;
 	};
 	const FSetupStats& GetSetupStats() const { return SetupStats; }
@@ -304,4 +375,26 @@ private:
 	FSetupStats SetupStats;
 	double SimulatedTime = 0.0;
 	bool bHalted = false;
+
+	/** SetVertexBinding 给的绑定（bHasBinding 时有效）。 */
+	FCSClothVertexBinding Binding;
+	bool bHasBinding = false;
+
+	/** setup 产物：每粒子的锚点源与权重（CPU 上把源位置收成每粒子锚点用）。 */
+	TArray<FIntVector> ParticleAnchorSources;
+	TArray<FVector3f> ParticleAnchorWeights;
+
+	/** SetAnchorSourcePositions 交来、还没用掉的一份。 */
+	TArray<FVector3f> PendingAnchorSources;
+	FTransform PendingAnchorToWorld = FTransform::Identity;
+	bool bPendingAnchors = false;
+	/** setup 以来宿主交过源位置：锚点从此按外部位置走（哪一帧没交就停在上一次）。 */
+	bool bExternalAnchors = false;
+	/** 最近一次收成的锚点的世界包围盒（外部锚点时用它发布网格包围盒）。 */
+	FBox LastAnchorWorldBounds = FBox(ForceInit);
+
+	bool bAnchored = false;
+	bool bReleased = false;
+	bool bReleaseRequested = false;
+	double ReleaseTime = 0.0;
 };

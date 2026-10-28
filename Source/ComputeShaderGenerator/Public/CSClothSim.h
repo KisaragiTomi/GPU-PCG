@@ -94,6 +94,35 @@ enum class ECSClothPinColorChannel : uint8
 // setup 的 CPU 半程（D5 第 2~4 步）
 // -----------------------------------------------------------------------------
 
+/**
+ * 每渲染顶点的外部绑定（可选）：宿主在 setup 前交给组件，setup 按焊接结果归到粒子上（每粒子取它焊接簇里第一个顶点的值）。
+ *
+ * 带状分块（CSClothBandSplit.h）的产物走这里：切口两侧的顶点位置相同，不带焊接键就会被焊回一块；锚点与场方向
+ * 是 AnimationFallSplit 的模拟要的逐点数据（Docs/HoudiniFallSplit_Port.md）。非空的数组长度必须等于渲染顶点数，
+ * 否则整份绑定作废（写日志，按没有绑定 setup）。
+ */
+struct COMPUTESHADERGENERATOR_API FCSClothVertexBinding
+{
+	/** 焊接键：只有键相同（且位置在容差内）的渲染顶点才并成一个粒子。空 = 不限制。 */
+	TArray<uint32> WeldKeys;
+
+	/**
+	 * 锚点 = 宿主每帧交来的源位置（UCSClothSimComponent::SetAnchorSourcePositions）里至多 3 个点的加权和：
+	 * 下标（INDEX_NONE = 不用这一项）与权重。宿主不交源位置时，锚点按宿主 actor 的刚体运动跟着 rest 位置走。
+	 * 空 = 整块布没有锚点。
+	 */
+	TArray<FIntVector> AnchorSources;
+	TArray<FVector3f> AnchorWeights;
+
+	/** (High, RandomU, ReleaseSign, 0)：归一化高度 [0, 1]、[0, 1) 的随机数（在绳长区间里挑长度）、放开时速度的正负号。 */
+	TArray<FVector4f> AnchorParams;
+
+	/** 场的方向（单位向量，世界空间、setup 时刻）。带状分块给的是「沿条带」的旋流方向。空 = 没有场。 */
+	TArray<FVector3f> SwirlDirs;
+
+	bool HasAnchors() const { return AnchorParams.Num() > 0; }
+};
+
 struct COMPUTESHADERGENERATOR_API FCSClothSetupOptions
 {
 	/** 焊接容差（cm）：相距在它以内的渲染顶点并成一个粒子。UV 缝 / 硬边两侧的副本逐位相等，
@@ -126,6 +155,9 @@ struct COMPUTESHADERGENERATOR_API FCSClothSetupOptions
 	 *  上限 = 到最近钉点的测地距离 × TetherScale。抗下垂的廉价手段，只在拉长时起作用。 */
 	bool bBuildTethers = true;
 	float TetherScale = 1.02f;
+
+	/** 每渲染顶点的外部绑定，见 FCSClothVertexBinding。nullptr = 没有。 */
+	const FCSClothVertexBinding* Binding = nullptr;
 };
 
 /**
@@ -180,6 +212,19 @@ struct COMPUTESHADERGENERATOR_API FCSClothSetupData
 	double TotalMassKg = 0.0;
 	int32 NumPinned = 0;
 
+	/**
+	 * 锚点与场（只有带锚点的绑定才填，否则全空、GPU 侧只建占位 buffer）。每粒子：
+	 * AnchorParams = (High, RandomU, ReleaseSign, 有锚点 ? 1 : 0)；FieldDirs = (场方向, 0)，sim 空间单位向量（没有场时为零）；
+	 * AnchorSources / AnchorWeights 只在 CPU 上用（组件每帧按它们把源位置收成每粒子的锚点）。
+	 */
+	TArray<FVector4f> AnchorParams;
+	TArray<FVector4f> FieldDirs;
+	TArray<FIntVector> AnchorSources;
+	TArray<FVector3f> AnchorWeights;
+	int32 NumAnchored = 0;
+
+	bool HasAnchors() const { return NumAnchored > 0 && AnchorParams.Num() == NumParticles; }
+
 	bool IsValid() const { return NumParticles > 0 && TriangleParticles.Num() >= 3; }
 
 	/** 上传后常驻的显存（字节），供预算预检。与 CSClothSimRender.cpp 的分配式同步。 */
@@ -194,6 +239,13 @@ namespace CSClothSetup
 	 */
 	COMPUTESHADERGENERATOR_API bool BuildFromSnapshot(
 		const FCSGpuMeshCPUData& Snapshot, const FCSClothSetupOptions& Options, FCSClothSetupData& OutData);
+
+	/**
+	 * 位置焊接（网格哈希，格宽 = 容差，查 27 个邻格）：相距在 Tolerance 以内、且焊接键相同（Keys 为 nullptr 则不看键）
+	 * 的顶点并成一簇。OutCornerToParticle：每顶点 → 簇号；OutParticleSource：每簇取哪个顶点的位置。setup 与带状分块共用。
+	 */
+	COMPUTESHADERGENERATOR_API void WeldPositions(const TArray<FVector3f>& Positions, float Tolerance, const TArray<uint32>* Keys,
+		TArray<uint32>& OutCornerToParticle, TArray<int32>& OutParticleSource);
 
 	/**
 	 * 一块规则网格布（XY 平面、法线 +Z、中心在原点，再整体乘 Transform），写成可以直接

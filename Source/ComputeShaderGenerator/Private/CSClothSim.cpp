@@ -42,51 +42,14 @@ float CSCloth_ColorChannel(const FVector4f& Color, ECSClothPinColorChannel Chann
 	}
 }
 
-/**
- * 位置焊接：网格哈希，格宽 = 容差，查 27 个邻格。UV 缝与硬边两侧的副本逐位相等，所以命中的
- * 几乎都是同一格；查邻格只为容差内但恰好跨格的那一点点浮点噪声。
- */
-void CSCloth_WeldPositions(const TArray<FVector3f>& Positions, float Tolerance,
-	TArray<uint32>& OutCornerToParticle, TArray<int32>& OutParticleSource)
+/** 绑定里的每条非空数组都必须逐渲染顶点；对不上就整份不用（宿主交的绑定与回读的网格不是同一份）。 */
+bool CSCloth_BindingMatches(const FCSClothVertexBinding& Binding, int32 NumVertices)
 {
-	const double Cell = FMath::Max(double(Tolerance), 1e-6);
-	const double ToleranceSq = Cell * Cell;
-
-	TMap<FIntVector, TArray<int32, TInlineAllocator<2>>> Grid;
-	Grid.Reserve(Positions.Num());
-	OutCornerToParticle.SetNumUninitialized(Positions.Num());
-	OutParticleSource.Reset();
-
-	for (int32 Vertex = 0; Vertex < Positions.Num(); ++Vertex)
-	{
-		const FVector P(Positions[Vertex]);
-		const FIntVector Key(
-			FMath::FloorToInt32(P.X / Cell), FMath::FloorToInt32(P.Y / Cell), FMath::FloorToInt32(P.Z / Cell));
-
-		int32 Found = INDEX_NONE;
-		for (int32 DZ = -1; DZ <= 1 && Found == INDEX_NONE; ++DZ)
-		for (int32 DY = -1; DY <= 1 && Found == INDEX_NONE; ++DY)
-		for (int32 DX = -1; DX <= 1 && Found == INDEX_NONE; ++DX)
-		{
-			const TArray<int32, TInlineAllocator<2>>* Bucket = Grid.Find(Key + FIntVector(DX, DY, DZ));
-			if (!Bucket) continue;
-			for (const int32 Particle : *Bucket)
-			{
-				if (FVector::DistSquared(FVector(Positions[OutParticleSource[Particle]]), P) <= ToleranceSq)
-				{
-					Found = Particle;
-					break;
-				}
-			}
-		}
-
-		if (Found == INDEX_NONE)
-		{
-			Found = OutParticleSource.Add(Vertex);
-			Grid.FindOrAdd(Key).Add(Found);
-		}
-		OutCornerToParticle[Vertex] = uint32(Found);
-	}
+	auto Fits = [NumVertices](int32 Count) { return Count == 0 || Count == NumVertices; };
+	const bool bAnchorArrays = Binding.AnchorParams.Num() == 0
+		|| (Binding.AnchorSources.Num() == Binding.AnchorParams.Num() && Binding.AnchorWeights.Num() == Binding.AnchorParams.Num())
+		|| (Binding.AnchorSources.IsEmpty() && Binding.AnchorWeights.IsEmpty());
+	return Fits(Binding.WeldKeys.Num()) && Fits(Binding.AnchorParams.Num()) && Fits(Binding.SwirlDirs.Num()) && bAnchorArrays;
 }
 
 /** 多源 Dijkstra：从全部钉住粒子出发沿拉伸边走，得到每个粒子到最近钉点的测地距离与那个钉点。 */
@@ -190,7 +153,8 @@ int64 FCSClothSetupData::GetGpuBytes() const
 	// 粒子域：Positions / PrevPositions / RestPositions / ParticleNormals / RestNormals 各 float4，
 	// NormalAccum int3，PinGroups uint。约束域：uint4 记录 + float λ。
 	// 映射域：CornerToParticle uint + RestTangents 2 uint。三角：3 uint。见 CSClothSimRender.cpp 的分配。
-	const int64 PerParticle = 5 * 16 + 12 + 4;
+	// 带锚点时另有 AnchorParams / FieldDirs / AnchorTargets / PrevAnchorTargets 各 float4。
+	const int64 PerParticle = 5 * 16 + 12 + 4 + (HasAnchors() ? 4 * 16 : 0);
 	const int64 PerConstraint = 16 + 4;
 	const int64 PerRenderVertex = 4 + 8;
 	return int64(NumParticles) * PerParticle
@@ -202,6 +166,56 @@ int64 FCSClothSetupData::GetGpuBytes() const
 
 namespace CSClothSetup
 {
+/**
+ * UV 缝与硬边两侧的副本逐位相等，所以命中的几乎都是同一格；查邻格只为容差内但恰好跨格的那一点点浮点噪声。
+ * 带焊接键时同一格里键不同的点各成一簇（带状分块的切口两侧就是这样分开的）。
+ */
+void WeldPositions(const TArray<FVector3f>& Positions, float Tolerance, const TArray<uint32>* Keys,
+	TArray<uint32>& OutCornerToParticle, TArray<int32>& OutParticleSource)
+{
+	const double Cell = FMath::Max(double(Tolerance), 1e-6);
+	const double ToleranceSq = Cell * Cell;
+	const bool bKeyed = Keys && Keys->Num() == Positions.Num();
+
+	TMap<FIntVector, TArray<int32, TInlineAllocator<2>>> Grid;
+	Grid.Reserve(Positions.Num());
+	OutCornerToParticle.SetNumUninitialized(Positions.Num());
+	OutParticleSource.Reset();
+
+	for (int32 Vertex = 0; Vertex < Positions.Num(); ++Vertex)
+	{
+		const FVector P(Positions[Vertex]);
+		const FIntVector Key(
+			FMath::FloorToInt32(P.X / Cell), FMath::FloorToInt32(P.Y / Cell), FMath::FloorToInt32(P.Z / Cell));
+
+		int32 Found = INDEX_NONE;
+		for (int32 DZ = -1; DZ <= 1 && Found == INDEX_NONE; ++DZ)
+		for (int32 DY = -1; DY <= 1 && Found == INDEX_NONE; ++DY)
+		for (int32 DX = -1; DX <= 1 && Found == INDEX_NONE; ++DX)
+		{
+			const TArray<int32, TInlineAllocator<2>>* Bucket = Grid.Find(Key + FIntVector(DX, DY, DZ));
+			if (!Bucket) continue;
+			for (const int32 Particle : *Bucket)
+			{
+				const int32 Source = OutParticleSource[Particle];
+				if (bKeyed && (*Keys)[Source] != (*Keys)[Vertex]) continue;
+				if (FVector::DistSquared(FVector(Positions[Source]), P) <= ToleranceSq)
+				{
+					Found = Particle;
+					break;
+				}
+			}
+		}
+
+		if (Found == INDEX_NONE)
+		{
+			Found = OutParticleSource.Add(Vertex);
+			Grid.FindOrAdd(Key).Add(Found);
+		}
+		OutCornerToParticle[Vertex] = uint32(Found);
+	}
+}
+
 bool BuildFromSnapshot(const FCSGpuMeshCPUData& Snapshot, const FCSClothSetupOptions& Options, FCSClothSetupData& OutData)
 {
 	OutData = FCSClothSetupData();
@@ -219,9 +233,17 @@ bool BuildFromSnapshot(const FCSGpuMeshCPUData& Snapshot, const FCSClothSetupOpt
 		return false;
 	}
 
+	const FCSClothVertexBinding* Binding = Options.Binding;
+	if (Binding && !CSCloth_BindingMatches(*Binding, NumVertices))
+	{
+		UE_LOG(LogCSCloth, Warning, TEXT("[CSCloth] Setup ignores the vertex binding: its arrays do not match the %d vertices of the mesh."), NumVertices);
+		Binding = nullptr;
+	}
+
 	// --- 焊接：渲染顶点 → 粒子
 	TArray<int32> ParticleSource;   // 每粒子取哪个渲染顶点的位置
-	CSCloth_WeldPositions(Snapshot.Positions, Options.WeldTolerance, OutData.CornerToParticle, ParticleSource);
+	WeldPositions(Snapshot.Positions, Options.WeldTolerance, Binding && Binding->WeldKeys.Num() > 0 ? &Binding->WeldKeys : nullptr,
+		OutData.CornerToParticle, ParticleSource);
 	const int32 NumParticles = ParticleSource.Num();
 	OutData.NumParticles = NumParticles;
 	OutData.NumRenderVertices = NumVertices;
@@ -439,6 +461,32 @@ bool BuildFromSnapshot(const FCSGpuMeshCPUData& Snapshot, const FCSClothSetupOpt
 		}
 		const uint32 Group = OutData.PinGroups[Anchor[P]];
 		OutData.PinGroupReach[Group] = FMath::Max(OutData.PinGroupReach[Group], Geodesic[P] * ReachScale);
+	}
+
+	// --- 锚点与场：每粒子取它焊接簇里第一个渲染顶点的绑定。钉住的粒子不挂锚点（它们已经是运动学的了）。
+	if (Binding && Binding->HasAnchors())
+	{
+		const bool bSources = Binding->AnchorSources.Num() == NumVertices;
+		const bool bField = Binding->SwirlDirs.Num() == NumVertices;
+		OutData.AnchorParams.SetNumUninitialized(NumParticles);
+		OutData.FieldDirs.SetNumZeroed(NumParticles);
+		OutData.AnchorSources.Init(FIntVector(INDEX_NONE), NumParticles);
+		OutData.AnchorWeights.Init(FVector3f::ZeroVector, NumParticles);
+		for (int32 P = 0; P < NumParticles; ++P)
+		{
+			const int32 Vertex = ParticleSource[P];
+			const FVector4f& Params = Binding->AnchorParams[Vertex];
+			const bool bAnchored = InvMass[P] > 0.0f;
+			OutData.AnchorParams[P] = FVector4f(FMath::Clamp(Params.X, 0.0f, 1.0f), FMath::Clamp(Params.Y, 0.0f, 1.0f),
+				Params.Z < 0.0f ? -1.0f : 1.0f, bAnchored ? 1.0f : 0.0f);
+			if (bAnchored) ++OutData.NumAnchored;
+			if (bField) OutData.FieldDirs[P] = FVector4f(Binding->SwirlDirs[Vertex].GetSafeNormal(), 0.0f);
+			if (bSources)
+			{
+				OutData.AnchorSources[P] = Binding->AnchorSources[Vertex];
+				OutData.AnchorWeights[P] = Binding->AnchorWeights[Vertex];
+			}
+		}
 	}
 
 	return true;

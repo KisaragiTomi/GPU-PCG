@@ -36,3 +36,9 @@
 
 // 状态 buffer 的 uint 数：[0] = 本帧写回时遇到的非有限粒子数（这些角点不写回，保留上一帧的值），其余保留。
 #define CS_CLOTH_STATUS_UINTS 4
+
+// 带锚点的布（AnimationFallSplit 的移植，Docs/HoudiniFallSplit_Port.md）一帧所处的阶段：
+// 放开前粒子硬跟着锚点走；放开那一帧的第一个 substep 给初速度；之后是按曲线变化的软绳 + 场。
+#define CS_CLOTH_RELEASE_FOLLOW 0
+#define CS_CLOTH_RELEASE_KICK   1
+#define CS_CLOTH_RELEASE_FREE   2

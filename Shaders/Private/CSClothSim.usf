@@ -1,7 +1,9 @@
 // GPU 布料：XPBD 常驻算子逐帧驱动 UCSMesh 形变（Docs/GpuClothSim_Plan.md，D3 的 pass 序）。
 //
 //   for s in Substeps:                     small-steps XPBD：substep 数替代迭代数
-//     PredictCS             1 线程/粒子    Verlet 式预测；钉住粒子按钉组变换做运动学跟随
+//     PredictCS             1 线程/粒子    Verlet 式预测；钉住粒子按钉组变换做运动学跟随；带锚点的布放开前跟着锚点走
+//     SolveAnchorsCS        1 线程/粒子    放开后：粒子到自己锚点的双边距离约束（绳长、刚度按曲线变），有锚点时；
+//                                          排在布的约束之前，让刚得多的布最后说话（见 CSClothSimRender.cpp）
 //     for i in Iterations:
 //       for c in Colors:
 //         SolveColorCS      1 线程/约束    一种颜色的 XPBD 距离约束（拉伸 / 弯曲 / tether），直接改写两端位置
@@ -54,6 +56,12 @@ RWStructuredBuffer<uint>   RW_Status;          // CS_CLOTH_STATUS_UINTS
 StructuredBuffer<float4>   PinTransforms;      // CS_CLOTH_PIN_GROUP_FLOAT4S / 钉组
 StructuredBuffer<float4>   Colliders;          // CS_CLOTH_COLLIDER_FLOAT4S / 碰撞体
 
+// --- 锚点与场（带锚点的布才有；否则绑的是 1 个元素的占位 buffer，bAnchors = 0）--------
+StructuredBuffer<float4>   AnchorParams;       // (High, RandomU, ReleaseSign, 有锚点 ? 1 : 0)
+StructuredBuffer<float4>   FieldDirs;          // (场方向, 0)，sim 空间、setup 时刻的单位向量
+StructuredBuffer<float4>   AnchorTargets;      // 本帧末的锚点位置（sim 空间），bExternalAnchors 时用
+StructuredBuffer<float4>   PrevAnchorTargets;  // 上一帧末的锚点位置
+
 uint NumParticles;
 uint NumTriangles;
 uint NumRenderVertices;
@@ -91,6 +99,18 @@ float CollisionThickness;
 float Friction;
 
 float3 SimOrigin;
+
+uint bAnchors;
+uint bExternalAnchors;     // 1 = 锚点读 AnchorTargets；0 = rest 位置随钉组 0（宿主）刚体走
+uint ReleaseState;         // CS_CLOTH_RELEASE_*
+float ReleaseKick;         // 放开那一刻：速度 × 它 × ReleaseSign（Houdini：trail 速度 × 5，条带一半取反）
+float AnchorCompliance;    // 1 / 刚度（s²/kg）
+float AnchorLengthMin;     // cm：每个粒子的绳长在 [Min, Max] 里按 RandomU 取
+float AnchorLengthMax;
+float AnchorReelIn;        // Houdini restlengthchange：绳长 × saturate(High + 1 − 它)
+float FieldSwirlSpeed;     // cm/s
+float FieldOutwardSpeed;   // cm/s：沿 rest 法线向外
+float FieldBlend;          // 本 substep 速度往场速度收敛的比例：1 − exp(−FieldDrag·dt)
 
 // ---------------------------------------------------------------- helpers
 
@@ -211,6 +231,27 @@ void CSCloth_AddNormal(uint Particle, float3 N)
 	InterlockedAdd(RW_NormalAccum[Particle * 3 + 2], CSCloth_Encode(N.z));
 }
 
+// 本 substep 末的锚点位置：宿主交了逐帧位置就在上一帧 / 本帧之间插值，否则是 rest 位置乘钉组 0（宿主）的变换。
+float3 CSCloth_AnchorPosition(uint P)
+{
+	if (bExternalAnchors != 0u) return lerp(PrevAnchorTargets[P].xyz, AnchorTargets[P].xyz, SubstepAlpha);
+	const float3 Rest = RestPositions[P].xyz;
+	const float3 From = CSCloth_TransformPoint(PinTransforms[0], PinTransforms[1], PinTransforms[2], Rest);
+	const float3 To = CSCloth_TransformPoint(PinTransforms[3], PinTransforms[4], PinTransforms[5], Rest);
+	return lerp(From, To, SubstepAlpha);
+}
+
+// 场速度：setup 时刻的场方向与 rest 法线，跟着宿主的转动转（钉组 0 本帧变换的线性部分，去掉缩放）。
+float3 CSCloth_FieldVelocity(uint P)
+{
+	const float3 Swirl = FieldDirs[P].xyz;
+	const float3 Normal = RestNormals[P].xyz;
+	const float3 Local = Swirl * FieldSwirlSpeed + Normal * FieldOutwardSpeed;
+	const float3 Rotated = float3(dot(PinTransforms[3].xyz, Local), dot(PinTransforms[4].xyz, Local), dot(PinTransforms[5].xyz, Local));
+	const float Scale = length(PinTransforms[3].xyz);
+	return Scale > 1e-6f ? Rotated / Scale : Local;
+}
+
 // ---------------------------------------------------------------- kernels
 
 [numthreads(THREADGROUPSIZE_X, 1, 1)]
@@ -236,6 +277,16 @@ void PredictCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		return;
 	}
 
+	const bool bAnchored = bAnchors != 0u && AnchorParams[P].w > 0.5f;
+	if (bAnchored && ReleaseState == CS_CLOTH_RELEASE_FOLLOW)
+	{
+		// 放开前：硬跟着锚点走。仍是自由粒子（InvMass 不动），Prev 记下当前位置 —— 放开那一刻的速度
+		// 就是锚点最后一段的速度，接得上。
+		RW_PrevPositions[P] = float4(X.xyz, 0.0f);
+		RW_Positions[P] = float4(CSCloth_AnchorPosition(P), X.w);
+		return;
+	}
+
 	if (bTeleport != 0u)
 	{
 		// 瞬移：整块布连同速度刚体搬过去（位置与上一步位置同乘一个变换，差值随之旋转）。
@@ -244,6 +295,12 @@ void PredictCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	}
 
 	float3 V = (X.xyz - Prev) * InvPrevSubstepDt * DampingFactor;
+	if (bAnchored)
+	{
+		if (ReleaseState == CS_CLOTH_RELEASE_KICK) V *= ReleaseKick * AnchorParams[P].z;
+		// 场（Houdini 的 popadvectbyvolumes 当风用）：速度按比例往场速度收敛。
+		if (FieldBlend > 0.0f) V = lerp(V, CSCloth_FieldVelocity(P), FieldBlend);
+	}
 	float3 Accel = Gravity;
 	if (bWind != 0u) Accel += CSCloth_WindAcceleration(X.xyz, V, ParticleNormals[P].xyz);
 	V += Accel * SubstepDt;
@@ -303,6 +360,34 @@ void SolveColorCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	const float3 Dir = D / Len;
 	if (XA.w > 0.0f) RW_Positions[Record.x] = float4(XA.xyz + CSCloth_ClampLength(Dir * (XA.w * DeltaLambda), MaxCorrection), XA.w);
 	if (XB.w > 0.0f) RW_Positions[Record.y] = float4(XB.xyz - CSCloth_ClampLength(Dir * (XB.w * DeltaLambda), MaxCorrection), XB.w);
+}
+
+[numthreads(THREADGROUPSIZE_X, 1, 1)]
+void SolveAnchorsCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint P = GetUnWrappedDispatchThreadId(GroupId, GroupIndex, THREADGROUPSIZE_X);
+	if (P >= NumParticles) return;
+
+	// Houdini 的 stitch：每个布点与它的锚点之间一条双边距离约束，绳长与刚度每帧由 sopsolver 改写：
+	//   restlength = lerp(restlengthorig = 0, restlengthnoise, clamp(high + 1 − restlengthchange, 0, 1))
+	//   stiffness  = lerp(1000, 0, stiffnesschange)
+	// 每条约束只碰一个可动粒子（锚点是运动学的），所以不用上色，一次派发解完。
+	const float4 Params = AnchorParams[P];
+	if (Params.w < 0.5f) return;
+	float4 X = RW_Positions[P];
+	if (!(X.w > 0.0f)) return;
+
+	const float3 Anchor = CSCloth_AnchorPosition(P);
+	const float RestLength = lerp(AnchorLengthMin, AnchorLengthMax, Params.y) * saturate(Params.x + 1.0f - AnchorReelIn);
+	const float3 D = X.xyz - Anchor;
+	const float Len = length(D);
+	// 与锚点重合时方向未定义：沿粒子法线推出去（绳长 > 0 时条带从身上鼓起来，而不是随机方向）。
+	const float3 Dir = Len > 1e-4f ? D / Len : CSCloth_SafeNormalize(ParticleNormals[P].xyz, float3(0.0f, 0.0f, 1.0f));
+	const float Violation = Len - RestLength;
+	const float AlphaTilde = AnchorCompliance * InvSubstepDtSq;
+	const float DeltaLambda = -Violation / (X.w + AlphaTilde);
+	X.xyz += CSCloth_ClampLength(Dir * (X.w * DeltaLambda), MaxCorrection);
+	RW_Positions[P] = X;
 }
 
 [numthreads(THREADGROUPSIZE_X, 1, 1)]
