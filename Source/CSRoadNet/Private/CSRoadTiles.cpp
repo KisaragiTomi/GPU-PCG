@@ -243,16 +243,17 @@ void FTileState::Reset()
 	bValid = false;
 }
 
-void TileInstances(const FGraph& Graph, const TArray<int32>& RoadOfEntity, const TArray<int32>& Roads, TArray<FGpuInstanceRef>& OutDrawn, TArray<FGpuInstanceRef>& OutContext)
+void TileInstances(const FGraph& Graph, const TArray<int32>& RoadOfEntity, const TArray<int32>& Roads, TArray<FGpuInstanceRef>& OutDrawn, TArray<FGpuInstanceRef>* OutContext)
 {
 	OutDrawn.Reset(Roads.Num() * 3);
-	OutContext.Reset();
 	TBitArray<> InTile(false, Graph.Roads.Num());
 	for (const int32 Road : Roads)
 	{
 		InTile[Road] = true;
 		for (int32 Kind = 0; Kind < 3; Kind++) OutDrawn.Add({ Road, Kind });
 	}
+	if (!OutContext) return;
+	OutContext->Reset();
 	// RoadRenderer fills a node's projection from every road there: the edge's triangles near the
 	// node and the node instance's.
 	TSet<int32> Slots;
@@ -274,7 +275,7 @@ void TileInstances(const FGraph& Graph, const TArray<int32>& RoadOfEntity, const
 	}
 	TArray<int32> Sorted = Slots.Array();
 	Sorted.Sort();
-	OutContext.Reserve(Sorted.Num());
-	for (const int32 Slot : Sorted) OutContext.Add({ Slot / 3, Slot % 3 });
+	OutContext->Reserve(Sorted.Num());
+	for (const int32 Slot : Sorted) OutContext->Add({ Slot / 3, Slot % 3 });
 }
 }

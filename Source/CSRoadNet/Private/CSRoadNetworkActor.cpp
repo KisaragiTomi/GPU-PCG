@@ -8,8 +8,10 @@
 #include "CSMesh.h"
 #include "CSMeshOps.h"
 #include "CSMeshRenderComponent.h"
+#include "CSRoadDecalInstances.h"
 #include "CSRoadGpuDecals.h"
 #include "CSRoadGpuMesh.h"
+#include "CSRoadNanite.h"
 #include "CSRoadNet.h"
 #include "CSRoadNetworkFile.h"
 #include "CSRoadNetworkPreview.h"
@@ -18,6 +20,7 @@
 #include "CSRoadTiles.h"
 #include "Components/SplineComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
@@ -25,18 +28,35 @@
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformTime.h"
 #include "Hash/xxhash.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "RHIGPUReadback.h"
-#include "RenderGraphUtils.h"
+#include "DynamicRHI.h"
+#include "HAL/IConsoleManager.h"
 #include "RenderingThread.h"
+#include "RenderTimer.h"
+#include "RHICommandList.h"
 #if WITH_EDITOR
 #include "ScopedTransaction.h"
 #endif
 
 namespace
 {
+TAutoConsoleVariable<int32> CVarCSRoadBakeLog(TEXT("CSRoad.BakeLog"), 0,
+	TEXT("1: road networks log the game-thread time their tick spends past 2 ms (rebuilds and Nanite bakes, by step), and once a second the frame's game, render, RHI and GPU times."));
+
+// What a road mesh of that many vertices and indices takes in VRAM as the budget counts it: its eight
+// streams (positions, tangents, one UV set, colours, indices, material ids, draw args, counters) in the
+// pools' 64 KiB granules, and its ray tracing BLAS, about 31 bytes a triangle on Palmsland.
+int64 CSRoadNetworkActor_GpuMeshBytes(uint32 Vertices, uint32 Indices)
+{
+	const int64 Granule = 64 << 10;
+	int64 Bytes = int64(Indices / 3) * 31;
+	for (const int64 Stream : { int64(Vertices) * 12, int64(Vertices) * 8, int64(Vertices) * 8, int64(Vertices) * 4, int64(Indices) * 4, int64(Indices / 3) * 4, int64(1), int64(1) }) Bytes += Align(Stream, Granule);
+	return Bytes;
+}
+
 // The prefab data is large (pieces.bin is ~120 MB) and never changes: loaded once per directory
 // and shared by every network actor. FAssets keeps pointers into the byte arrays.
 struct FCSRoadNetworkActor_Library
@@ -163,12 +183,11 @@ ACSRoadNetworkActor::ACSRoadNetworkActor()
 	SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("Root")));
 	RoadMesh = CreateDefaultSubobject<UCSMeshRenderComponent>(TEXT("RoadMesh"));
 	RoadMesh->SetupAttachment(RootComponent);
-	MarkingMesh = CreateDefaultSubobject<UCSMeshRenderComponent>(TEXT("MarkingMesh"));
-	MarkingMesh->SetupAttachment(RootComponent);
-	MarkingMesh->SetCastShadow(false);
-	MarkingMesh->bVisibleInRayTracing = false;
-	MarkingMesh->bAffectDistanceFieldLighting = false;
+	// The decals are DBuffer mesh decals: they show only on receivers.
+	RoadMesh->bReceivesDecals = true;
 	MaterialFolder.Path = TEXT("/PCGPlugins/CS2Roads/Materials");
+	DecalMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/PCGPlugins/CSRoadNet/M_RoadDecal.M_RoadDecal")));
+	FittedDecalMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/PCGPlugins/CSRoadNet/M_RoadDecalFitted.M_RoadDecalFitted")));
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	TrafficBodies = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("TrafficBodies"));
 	TrafficCabins = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("TrafficCabins"));
@@ -214,19 +233,45 @@ void ACSRoadNetworkActor::PostRegisterAllComponents()
 
 void ACSRoadNetworkActor::RequestRebuild()
 {
-	if (Source == ECSRoadNetworkSource::Splines) bRebuildRequested = true;
+	if (Source != ECSRoadNetworkSource::Splines) return;
+	bRebuildRequested = true;
+	bPendingOnly = false;
 }
 
 void ACSRoadNetworkActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	const double Start = FPlatformTime::Seconds();
+	TickBakes();
+	TickAllDecalFits();
+	const double BakeMs = (FPlatformTime::Seconds() - Start) * 1000.0;
 	if (bRebuildRequested)
 	{
-		bRebuildRequested = false;
-		Rebuild();
+		// Tiles left pending wait until bakes free room in the budget for the next one.
+		const int64 Held = bPendingOnly ? GpuMeshBytes() : 0;
+		if (!bPendingOnly || Held == 0 || Held + NextTileBytes <= GpuMeshBudgetBytes())
+		{
+			bRebuildRequested = false;
+			bReuseNetwork = bPendingOnly;
+			Rebuild();
+			bReuseNetwork = false;
+		}
 	}
-	// Edits have settled: the preview of the whole network as last built.
+	// Edits have settled and no tiles wait: the preview of the whole network as last built.
 	else if (bPreviewStale && FPlatformTime::Seconds() - LastBuildSeconds > 0.3) RefreshPreview();
+	if (CVarCSRoadBakeLog.GetValueOnGameThread() != 0)
+	{
+		const double TickMs = (FPlatformTime::Seconds() - Start) * 1000.0;
+		if (TickMs > 2.0) UE_LOG(LogCSRoadNet, Log, TEXT("%s: tick %.1f ms (bakes %.1f ms)"), *GetName(), TickMs, BakeMs);
+		static double LastFrameLog = 0.0;
+		if (Start - LastFrameLog > 1.0)
+		{
+			LastFrameLog = Start;
+			UE_LOG(LogCSRoadNet, Log, TEXT("%s: frame: game %.1f ms, render %.1f ms, RHI %.1f ms, GPU %.1f ms; %d tiles, %d pending, %d baked, GPU meshes %.1f MiB"), *GetName(),
+				FPlatformTime::ToMilliseconds(GGameThreadTime), FPlatformTime::ToMilliseconds(GRenderThreadTime), FPlatformTime::ToMilliseconds(GRHIThreadTime), FPlatformTime::ToMilliseconds(RHIGetGPUFrameCycles(0)),
+				NumTiles, PendingTiles, NumNaniteTiles, GpuMeshMiB);
+		}
+	}
 	TickPreview(DeltaSeconds);
 }
 
@@ -439,9 +484,11 @@ void ACSRoadNetworkActor::Rebuild()
 		LastError = Error;
 		UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %s"), *GetName(), *Error);
 	}
+	UpdateBakeStats();
 	PendingTiles = (TileState ? TileState->NumPending() : 0) + PendingBuildingTiles;
 	// The tiles past the batch go on the next ticks, until none are left or a build fails.
-	if (PendingTiles > 0 && LastError.IsEmpty()) bRebuildRequested = true;
+	bPendingOnly = PendingTiles > 0 && LastError.IsEmpty();
+	if (bPendingOnly) bRebuildRequested = true;
 	LastBuildSeconds = FPlatformTime::Seconds();
 	BuildMilliseconds = float((LastBuildSeconds - StartTime) * 1000.0);
 }
@@ -508,13 +555,19 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 		return false;
 	}
 	const CSRoad::FSavedTerrain* Terrain = bUseTerrain && Snapshot && Snapshot->Terrain.IsValid() ? &Snapshot->Terrain : nullptr;
-	CSRoad::FSavedNetwork FromSplines;
-	TArray<CSRoad::FSplineRoad> Splines;
-	NumSplines = 0;
-	if (bSplines)
+	// Building from splines: the spline roads and their network. A rebuild that only writes pending tiles
+	// (nothing changed since the last one) takes the last build's as they are.
+	TSharedPtr<const TArray<CSRoad::FSplineRoad>> Splines = MakeShared<TArray<CSRoad::FSplineRoad>>();
+	TSharedPtr<const CSRoad::FSavedNetwork> FromSplines;
+	if (bSplines && bReuseNetwork && LastSplines && PreviewRoads)
 	{
-		Splines = GatherSplines();
-		NumSplines = Splines.Num();
+		Splines = LastSplines;
+		FromSplines = PreviewRoads;
+	}
+	else if (bSplines)
+	{
+		TSharedPtr<TArray<CSRoad::FSplineRoad>> Gathered = MakeShared<TArray<CSRoad::FSplineRoad>>(GatherSplines());
+		TSharedPtr<CSRoad::FSavedNetwork> Built = MakeShared<CSRoad::FSavedNetwork>();
 		CSRoad::FSplineNetworkSettings Settings;
 		Settings.MaxEdgeLength = SplineSettings.MaxSegmentLength;
 		Settings.MaxEdgeTurn = FMath::DegreesToRadians(static_cast<double>(SplineSettings.MaxSegmentTurn));
@@ -523,41 +576,42 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 		Settings.JunctionHeight = SplineSettings.JunctionHeight;
 		Settings.AlleyClearance = SplineSettings.AlleyClearance;
 		CSRoad::FSplineNetworkStats Stats;
-		if (!CSRoad::BuildSplineNetwork(Library->Assets, Splines, Settings, Terrain, FromSplines.Nodes, FromSplines.Roads, Stats, OutError)) return false;
+		if (!CSRoad::BuildSplineNetwork(Library->Assets, *Gathered, Settings, Terrain, Built->Nodes, Built->Roads, Stats, OutError)) return false;
+		Built->bLeftHandTraffic = bLeftHandTraffic;
 		UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d splines make %d nodes and %d edges; %d alley stretches cut under main roads, %d junctions joined, %d segments split, %d merged, %d too short left out"),
-			*GetName(), NumSplines, FromSplines.Nodes.Num(), FromSplines.Roads.Num(), Stats.AlleyCuts, Stats.Junctions, Stats.Splits, Stats.Merges, Stats.Dropped);
+			*GetName(), Gathered->Num(), Built->Nodes.Num(), Built->Roads.Num(), Stats.AlleyCuts, Stats.Junctions, Stats.Splits, Stats.Merges, Stats.Dropped);
+		Splines = Gathered;
+		FromSplines = Built;
 	}
-	const TArray<CSRoad::FSavedNode>& Nodes = bSplines ? FromSplines.Nodes : Snapshot->Nodes;
-	const TArray<CSRoad::FRoadSpec>& Specs = bSplines ? FromSplines.Roads : Snapshot->Roads;
+	NumSplines = Splines->Num();
+	const TArray<CSRoad::FSavedNode>& Nodes = bSplines ? FromSplines->Nodes : Snapshot->Nodes;
+	const TArray<CSRoad::FRoadSpec>& Specs = bSplines ? FromSplines->Roads : Snapshot->Roads;
 	const bool bLeftHand = bSplines ? bLeftHandTraffic : Snapshot->bLeftHandTraffic;
 	const double NetworkMs = Lap();
 	// The buildings need only the roads' curves: they stand even if the road meshes fail below. They
 	// log their own time.
-	if (bBatchBuildings) BuildBatchBuildings(Splines, Specs, Library->Assets);
+	if (bBatchBuildings) BuildBatchBuildings(*Splines, Specs, Library->Assets);
 	else ClearBuildingTiles();
 	(void)Lap();
-	const bool bMarkings = bBuildMarkings && MarkingMesh;
+	const bool bMarkings = bBuildMarkings;
 	// One material slot per atlas (decal surface); MeshTriangleMaterials indexes these.
 	const TMap<FString, UMaterialInterface*> ByBaseColor = CSRoadNetworkActor_Materials(MaterialFolder.Path);
 	MissingAtlases.Reset();
 	MissingMarkingSurfaces.Reset();
-	NumMarkingTriangles = 0;
+	NumMarkingInstances = 0;
 	if (bLocalUpdate)
 	{
 		const bool bBuilt = BuildTiles(Library->Assets, Specs, Nodes, bLeftHand, ByBaseColor, Terrain, bMarkings, OutError);
 		// What RefreshPreview makes the preview from once edits settle.
-		if (bSplines)
-		{
-			FromSplines.bLeftHandTraffic = bLeftHand;
-			PreviewRoads = MakeShared<CSRoad::FSavedNetwork>(MoveTemp(FromSplines));
-		}
-		else PreviewRoads = Snapshot;
+		PreviewRoads = bSplines ? FromSplines : Snapshot;
+		LastSplines = bSplines ? Splines : nullptr;
 		PreviewTerrain = Terrain ? Snapshot : nullptr;
 		UE_LOG(LogCSRoadNet, Log, TEXT("%s: prefab data %.0f ms, snapshot %.0f ms, tiles %.0f ms"), *GetName(), LibraryMs, NetworkMs, Lap());
 		return bBuilt;
 	}
 	ClearTiles();
 	PreviewRoads.Reset();
+	LastSplines.Reset();
 	PreviewTerrain.Reset();
 	bPreviewStale = false;
 	CSRoad::FGraph Graph;
@@ -579,6 +633,7 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	if (MeshInput.NumUnconverged > 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %u node mesh triangles did not converge in 20 refinement passes"), *GetName(), MeshInput.NumUnconverged);
 	const double RefineMs = Lap();
 	CSRoad::FGpuDecalInput Decals;
+	Decals.bFitted = true;
 	if (bMarkings && !Decals.Build(Graph, Library->Assets, GeometryResult, MeshInput, ResolveAssetDirectory(), OutError)) return false;
 	const double DecalSetupMs = Lap();
 	if (MeshInput.NumVertices == 0 || MeshInput.NumIndices == 0)
@@ -590,24 +645,36 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	FMeshTargets Targets;
 	Targets.Road = RoadMesh;
 	Targets.RoadMesh = &Mesh;
-	Targets.Markings = MarkingMesh;
-	Targets.MarkingMesh = &Markings;
-	if (!WriteMeshes(Geometry, SharedGeometry, MeshInput, bMarkings ? &Decals : nullptr, ByBaseColor, Library->Assets, Targets, OutError)) return false;
-	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads, %u vertices, %u triangles, %d compositions, %d decals (%d lanes); prefab data %.0f ms, snapshot %.0f ms, graph and compositions %.0f ms, geometry input %.0f ms, composition meshes %.0f ms, refinement counts %.0f ms, lanes and decal setup %.0f ms, allocation %.0f ms, road GPU build %.0f ms, decals %.0f ms"),
-		*GetName(), Graph.Roads.Num(), MeshInput.NumVertices, MeshInput.NumIndices / 3, Graph.Compositions.Num() - 1, Decals.Items.Num(), Decals.Lanes.Lanes.Num(),
-		LibraryMs, NetworkMs, GraphMs, InputMs, MeshMs, RefineMs, DecalSetupMs, Targets.AllocationMs, Targets.RoadMs, Targets.MarkingMs);
+	if (bMarkings)
+	{
+		ResolveDecalMaterials(Decals, ByBaseColor, Library->Assets);
+		Targets.Decals = &Decals;
+	}
+	if (!WriteMeshes(Geometry, SharedGeometry, MeshInput, ByBaseColor, Library->Assets, Targets, OutError)) return false;
+	(void)Lap();
+	if (bMarkings)
+	{
+		const int32 Drawn = DrawDecals(Decals, Targets.Fit, MarkingFits, MarkingDecals, TEXT("Marking"));
+		if (Drawn >= 0) NumMarkingInstances = Drawn;
+	}
+	else
+	{
+		MarkingFits.Reset();
+		DestroyComponents(MarkingDecals);
+	}
+	const double DecalMs = Lap();
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads, %u vertices, %u triangles, %d compositions, %d decals (%d lanes, %d instances); prefab data %.0f ms, snapshot %.0f ms, graph and compositions %.0f ms, geometry input %.0f ms, composition meshes %.0f ms, refinement counts %.0f ms, lanes and decal setup %.0f ms, allocation %.0f ms, road GPU build %.0f ms, decals %.0f ms"),
+		*GetName(), Graph.Roads.Num(), MeshInput.NumVertices, MeshInput.NumIndices / 3, Graph.Compositions.Num() - 1, Decals.Items.Num(), Decals.Lanes.Lanes.Num(), NumMarkingInstances,
+		LibraryMs, NetworkMs, GraphMs, InputMs, MeshMs, RefineMs, DecalSetupMs, Targets.AllocationMs, Targets.RoadMs, DecalMs);
 
 	NumRoads = Graph.Roads.Num();
 	NumVertices = int32(MeshInput.NumVertices);
 	NumTriangles = int32(MeshInput.NumIndices / 3);
-	NumMarkingTriangles = Targets.MarkingTriangles;
 	CSRoad::FRoadLanes PreviewLanes;
 	if (!bMarkings) PreviewLanes.Build(Graph, Library->Assets, GeometryResult);
 	ClearPreview();
 	BuildPreview(Graph, bMarkings ? Decals.Lanes : PreviewLanes, GeometryResult, Terrain);
-	if (Targets.MarkingError.IsEmpty()) return true;
-	OutError = Targets.MarkingError;
-	return false;
+	return true;
 }
 
 bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoad::FRoadSpec>& Specs, const TArray<CSRoad::FSavedNode>& Nodes, bool bLeftHand,
@@ -627,13 +694,13 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoa
 		TileState->Reset();
 		return false;
 	};
-	// The meshes of a whole build give way to the tiles, their VRAM now rather than at the next GC: a
-	// network the size of Palmsland holds over a gigabyte that the tiles are about to ask for again.
+	// The mesh of a whole build gives way to the tiles, its VRAM now rather than at the next GC: a
+	// network the size of Palmsland holds over half a gigabyte that the tiles are about to ask for again.
 	if (RoadMesh && RoadMesh->GetGpuMesh()) RoadMesh->SetGpuMesh(nullptr);
-	if (MarkingMesh && MarkingMesh->GetGpuMesh()) MarkingMesh->SetGpuMesh(nullptr);
-	for (UCSMesh* Whole : { Mesh.Get(), Markings.Get() }) if (Whole) Whole->ReleaseDeferred();
+	if (Mesh) Mesh->ReleaseDeferred();
 	Mesh = nullptr;
-	Markings = nullptr;
+	MarkingFits.Reset();
+	DestroyComponents(MarkingDecals);
 
 	const uint64 Signature = TileSignature(bLeftHand);
 	const bool bEverything = !TileState->Matches(Signature);
@@ -658,19 +725,44 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoa
 	TArray<FIntPoint> Existing;
 	Tiles.GetKeys(Existing);
 	const TMap<FIntPoint, TArray<int32>> Dirty = TileState->Dirty(Network, Affected, Outputs, bEverything, Existing);
-	// One batch of the tiles to rebuild, the ones this edit dirtied first; the rest stay pending.
+	// One batch of the tiles to rebuild, the ones this edit dirtied first; the rest stay pending. While
+	// tiles bake into Nanite, the batch takes what the GPU mesh budget has room for (a tile drawn now
+	// gives back what its GPU mesh holds), and one tile regardless while no GPU mesh holds any.
 	TArray<FIntPoint> Written;
 	TArray<int32> Batch;
+	const int64 Budget = GpuMeshBudgetBytes();
+	NextTileBytes = 0;
+	int64 Held = Budget < MAX_int64 ? GpuMeshBytes() : 0;
+	double TrianglesPerRoad = 2350.0;
+	if (Budget < MAX_int64)
+	{
+		int64 Triangles = 0;
+		int64 Drawn = 0;
+		for (const TPair<FIntPoint, FCSRoadTile>& Pair : Tiles)
+		{
+			Triangles += Pair.Value.Triangles;
+			Drawn += Pair.Value.Roads;
+		}
+		if (Drawn > 0) TrianglesPerRoad = double(Triangles) / double(Drawn);
+	}
 	for (const TPair<FIntPoint, TArray<int32>>& Pair : Dirty)
 	{
 		if (MaxTilesPerBatch > 0 && Written.Num() >= MaxTilesPerBatch) break;
+		if (Budget < MAX_int64 && Pair.Value.Num() > 0)
+		{
+			const FCSRoadTile* Known = Tiles.Find(Pair.Key);
+			const int64 Change = EstimateTileBytes(Known, Pair.Value.Num(), TrianglesPerRoad) - (Known ? TileGpuBytes(*Known) : 0);
+			NextTileBytes = Change;
+			if (Held > 0 && Held + Change > Budget) break;
+			Held += Change;
+		}
 		Written.Add(Pair.Key);
 		Batch.Append(Pair.Value);
 	}
 	Batch.Sort();
-	// What the batch draws, the roads at its roads' nodes (decal receivers, lanes) and two rings more:
-	// in a sub-graph of those, the batch and its neighbours come out as in the whole network. The
-	// detection's sub-graph serves when it holds them all.
+	// What the batch draws, the roads at its roads' nodes (their lanes meet the batch's connectors) and
+	// two rings more: in a sub-graph of those, the batch and its neighbours come out as in the whole
+	// network. The detection's sub-graph serves when it holds them all.
 	FCSRoadNetworkActor_Subgraph Drawing;
 	FCSRoadNetworkActor_Subgraph* Graphed = &Detected;
 	if (Batch.Num() > 0)
@@ -698,6 +790,7 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoa
 		// The tile's roads in the sub-graph, in its (the specs') order.
 		TArray<int32> Roads;
 		TArray<CSRoad::FGpuInstanceRef> Drawn;
+		// Written, not drawn: the receivers of its connectors and crosswalks from the other roads there.
 		TArray<CSRoad::FGpuInstanceRef> Context;
 	};
 	TArray<FWork> Work;
@@ -709,7 +802,7 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoa
 		Item.Key = Key;
 		for (const int32 Road : Dirty.FindChecked(Key)) Item.Roads.Add(Graphed->RoadOfSpec[Road]);
 		if (Item.Roads.Num() == 0) continue;
-		CSRoad::TileInstances(Graph, RoadOfEntity, Item.Roads, Item.Drawn, Item.Context);
+		CSRoad::TileInstances(Graph, RoadOfEntity, Item.Roads, Item.Drawn, bMarkings ? &Item.Context : nullptr);
 		for (const TArray<CSRoad::FGpuInstanceRef>* List : { &Item.Drawn, &Item.Context })
 		{
 			for (const CSRoad::FGpuInstanceRef& Ref : *List)
@@ -725,8 +818,9 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoa
 	if (Counted.NumUnconverged > 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %u node mesh triangles did not converge in 20 refinement passes"), *GetName(), Counted.NumUnconverged);
 	const double CountMs = Lap();
 
-	// Each tile: the roads in it drawn, the roads around it as decal receivers only.
-	FString MarkingError;
+	// Each tile: the roads in it drawn, and their decals. A tile whose GPU mesh, its size now known, does
+	// not fit the budget while another GPU mesh holds some stops the batch: it and the rest stay pending.
+	int32 Done = 0;
 	for (const FWork& Item : Work)
 	{
 		CSRoad::FGpuRoadMeshInput MeshInput;
@@ -734,7 +828,15 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoa
 		if (MeshInput.NumDrawnIndices == 0)
 		{
 			RemoveTile(Item.Key);
+			Done++;
 			continue;
+		}
+		if (Budget < MAX_int64)
+		{
+			const FCSRoadTile* Known = Tiles.Find(Item.Key);
+			const int64 Others = GpuMeshBytes() - (Known ? TileGpuBytes(*Known) : 0);
+			NextTileBytes = CSRoadNetworkActor_GpuMeshBytes(MeshInput.NumVertices, MeshInput.NumIndices);
+			if (Others > 0 && Others + NextTileBytes > Budget) break;
 		}
 		TBitArray<> Keep(false, Graph.Roads.Num());
 		for (const int32 Road : Item.Roads) Keep[Road] = true;
@@ -742,20 +844,42 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoa
 		Scope.Lanes = &Lanes;
 		Scope.Keep = &Keep;
 		CSRoad::FGpuDecalInput Decals;
+		Decals.bFitted = true;
 		if (bMarkings && !Decals.Build(Graph, Assets, Graphed->Result, MeshInput, ResolveAssetDirectory(), OutError, &Scope)) return Fail();
 		FCSRoadTile& Tile = EnsureTile(Item.Key);
 		FMeshTargets Targets;
 		Targets.Road = Tile.Road;
 		Targets.RoadMesh = &Tile.RoadMesh;
-		Targets.Markings = Tile.Markings;
-		Targets.MarkingMesh = &Tile.MarkingMesh;
-		if (!WriteMeshes(Graphed->Input, Graphed->Shared, MeshInput, bMarkings ? &Decals : nullptr, ByBaseColor, Assets, Targets, OutError)) return Fail();
+		if (bMarkings)
+		{
+			ResolveDecalMaterials(Decals, ByBaseColor, Assets);
+			Targets.Decals = &Decals;
+		}
+		if (!WriteMeshes(Graphed->Input, Graphed->Shared, MeshInput, ByBaseColor, Assets, Targets, OutError)) return Fail();
+		// A new GPU mesh: whatever was baked or baking is of the old one.
+		Tile.WrittenSeconds = FPlatformTime::Seconds();
+		Tile.bBakeFailed = false;
+		Tile.Bake.Reset();
+		Tile.Baking = nullptr;
+		if (Tile.Nanite) Tile.Nanite->SetStaticMesh(nullptr);
 		Tile.Roads = Item.Roads.Num();
 		Tile.Vertices = int32(MeshInput.NumDrawnVertices);
 		Tile.Triangles = int32(MeshInput.NumDrawnIndices / 3);
-		Tile.MarkingTriangles = Targets.MarkingTriangles;
-		if (MarkingError.IsEmpty()) MarkingError = Targets.MarkingError;
+		if (bMarkings)
+		{
+			const int32 Drawn = DrawDecals(Decals, Targets.Fit, Tile.DecalFits, Tile.Decals, FString::Printf(TEXT("MarkingTile_%d_%d"), Item.Key.X, Item.Key.Y));
+			if (Drawn >= 0) Tile.DecalInstances = Drawn;
+		}
+		else
+		{
+			Tile.DecalFits.Reset();
+			DestroyComponents(Tile.Decals);
+			Tile.DecalInstances = 0;
+		}
+		Done++;
 	}
+	Written.SetNum(Done);
+	Work.SetNum(Done);
 	TileState->Commit(Network, Affected, Outputs, Signature, Dirty, Written);
 	const double TileMs = Lap();
 
@@ -766,12 +890,12 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoa
 	RoadsGraphed = Detected.Graph.Roads.Num() + (Graphed == &Drawing ? Drawing.Graph.Roads.Num() : 0);
 	NumVertices = 0;
 	NumTriangles = 0;
-	NumMarkingTriangles = 0;
+	NumMarkingInstances = 0;
 	for (const TPair<FIntPoint, FCSRoadTile>& Pair : Tiles)
 	{
 		NumVertices += Pair.Value.Vertices;
 		NumTriangles += Pair.Value.Triangles;
-		NumMarkingTriangles += Pair.Value.MarkingTriangles;
+		NumMarkingInstances += Pair.Value.DecalInstances;
 	}
 	// The preview needs the whole network: made now when this build had it, else once edits settle.
 	if (bEverything && Batch.Num() > 0)
@@ -783,12 +907,10 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoa
 	else bPreviewStale = true;
 	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads in %d tiles, %d tiles (%d roads) rebuilt, %d pending; %d roads graphed (%d affected); detection %.0f ms, drawing graph %.0f ms, lanes %.0f ms, refinement counts %.0f ms, tile meshes %.0f ms, preview %.0f ms"),
 		*GetName(), NumRoads, NumTiles, TilesRebuilt, RoadsRebuilt, TileState->NumPending(), RoadsGraphed, Affected.Num(), DetectMs, GraphMs, LanesMs, CountMs, TileMs, Lap());
-	if (MarkingError.IsEmpty()) return true;
-	OutError = MarkingError;
-	return false;
+	return true;
 }
 
-bool ACSRoadNetworkActor::WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry, const CSRoad::FPooledGeometry& SharedGeometry, const CSRoad::FGpuRoadMeshInput& MeshInput, CSRoad::FGpuDecalInput* Decals,
+bool ACSRoadNetworkActor::WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry, const CSRoad::FPooledGeometry& SharedGeometry, const CSRoad::FGpuRoadMeshInput& MeshInput,
 	const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FAssets& Assets, FMeshTargets& Targets, FString& OutError)
 {
 	double LapStart = FPlatformTime::Seconds();
@@ -815,7 +937,6 @@ bool ACSRoadNetworkActor::WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry,
 	RoadObject->NotifyMaterialsChanged();
 	RoadComponent->MeshMaterial = Materials.Num() > 0 ? Materials[0].Get() : FallbackMaterial.Get();
 	const int32 NumSlots = FMath::Max(1, Materials.Num());
-	// Instances written only as decal receivers sit past the drawn ones: in the capacity, not the counters.
 	if (!RoadObject->EnsureCapacitySync(int32(MeshInput.NumVertices), int32(MeshInput.NumIndices)))
 	{
 		OutError = FString::Printf(TEXT("Could not allocate %u vertices / %u indices"), MeshInput.NumVertices, MeshInput.NumIndices);
@@ -825,19 +946,15 @@ bool ACSRoadNetworkActor::WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry,
 	RoadComponent->SetGpuMesh(RoadObject);
 	Targets.AllocationMs = Lap();
 
-	// Second graph: the road surface, and the decals' receivers gathered from it. The decals refer to
-	// road triangles by their place in the index stream, so the road's material sort (which reorders
-	// it) waits until they have been drawn.
+	// One graph: the road surface; the heights its connectors and crosswalks lie at, from its triangles
+	// by their place in the index stream; then its material sections, which reorder them.
 	const FTransform ActorToWorld = GetActorTransform();
 	const FMatrix44f LocalToWorld(ActorToWorld.ToMatrixWithScale());
 	const FMatrix44f WorldToLocal(ActorToWorld.ToInverseMatrixWithScale());
 	const FBox WorldBounds = MeshInput.Bounds.TransformBy(ActorToWorld);
-	const bool bDecals = Decals && Decals->Items.Num() > 0;
-	CSRoad::FPooledDecalReceivers PooledReceivers;
-	TUniquePtr<FRHIGPUBufferReadback> ClipReadback;
-	if (bDecals && Decals->ClippedItems.Num() > 0) ClipReadback = MakeUnique<FRHIGPUBufferReadback>(TEXT("CSRoad.ClipCountsReadback"));
-	FRHIGPUBufferReadback* ClipReadbackPtr = ClipReadback.Get();
-	const uint32 ClipBytes = bDecals ? uint32(Decals->ClippedItems.Num() * sizeof(uint32)) : 0u;
+	const CSRoad::FGpuDecalInput* Decals = Targets.Decals && Targets.Decals->NumFitHeights > 0 ? Targets.Decals : nullptr;
+	TSharedPtr<CSRoad::FDecalFitReadback> Fit;
+	if (Decals) Fit = MakeShared<CSRoad::FDecalFitReadback>();
 	bool bSorted = false;
 	bool bRecorded = false;
 	RoadObject->EditMeshSync([&](FCSMeshEditContext& Context)
@@ -858,7 +975,7 @@ bool ACSRoadNetworkActor::WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry,
 		CSRoad::AddRoadMeshPasses(GraphBuilder, GeometryOut, MeshInput, Target);
 		UCSMeshOps::AddSetCountersPass(Context, MeshInput.NumDrawnVertices, MeshInput.NumDrawnIndices);
 		Context.SetWorldBounds(WorldBounds);
-		if (bDecals)
+		if (Decals)
 		{
 			CSRoad::FGpuRoadStreams Road;
 			Road.Positions = Context.Positions();
@@ -866,10 +983,9 @@ bool ACSRoadNetworkActor::WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry,
 			Road.Indices = Context.Indices();
 			Road.WorldToLocal = WorldToLocal;
 			const CSRoad::FGpuDecalReceivers Receivers = CSRoad::AddDecalReceiverPasses(GraphBuilder, MeshInput, *Decals, Road);
-			PooledReceivers.Extract(GraphBuilder, Receivers);
-			if (ClipReadbackPtr) AddEnqueueCopyPass(GraphBuilder, ClipReadbackPtr, Receivers.ClipCounts, ClipBytes);
+			Fit->Enqueue(GraphBuilder, CSRoad::AddDecalFitPasses(GraphBuilder, MeshInput, *Decals, Road, Receivers), Decals->NumFitHeights);
 		}
-		else bSorted = UCSMeshOps::AddMaterialSectionPasses(Context, NumSlots);
+		bSorted = UCSMeshOps::AddMaterialSectionPasses(Context, NumSlots);
 		bRecorded = true;
 	});
 	if (!bRecorded)
@@ -878,161 +994,316 @@ bool ACSRoadNetworkActor::WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry,
 		return false;
 	}
 	if (bSorted) UCSMeshOps::PublishMaterialSections(RoadObject);
+	Targets.Fit = Fit;
 	Targets.RoadMs = Lap();
-
-	// Decals that cannot be built (say, too little VRAM for their mesh) leave the roads standing; the
-	// error is kept in the targets.
-	Targets.MarkingTriangles = 0;
-	Targets.MarkingError.Reset();
-	bool bMarked = false;
-	if (bDecals)
-	{
-		bMarked = BuildMarkingMesh(*Decals, MeshInput, ByBaseColor, Assets, PooledReceivers, ClipReadbackPtr, RoadObject, Targets, LocalToWorld, WorldToLocal, WorldBounds, Targets.MarkingError);
-		// Fourth graph: the road's material sections, now that the decals have read its triangles.
-		RoadObject->EditMeshSync([&](FCSMeshEditContext& Context) { bSorted = UCSMeshOps::AddMaterialSectionPasses(Context, NumSlots); });
-		if (bSorted) UCSMeshOps::PublishMaterialSections(RoadObject);
-		Targets.MarkingMs = Lap();
-	}
-	if (Targets.Markings) Targets.Markings->SetVisibility(bMarked);
 	return true;
 }
 
-bool ACSRoadNetworkActor::BuildMarkingMesh(CSRoad::FGpuDecalInput& Decals, const CSRoad::FGpuRoadMeshInput& MeshInput, const TMap<FString, UMaterialInterface*>& ByBaseColor,
-	const CSRoad::FAssets& Assets, const CSRoad::FPooledDecalReceivers& Receivers, FRHIGPUBufferReadback* ClipReadback, UCSMesh* RoadObject, FMeshTargets& Targets,
-	const FMatrix44f& LocalToWorld, const FMatrix44f& WorldToLocal, const FBox& WorldBounds, FString& OutError)
+int32 ACSRoadNetworkActor::WriteDecals(const CSRoad::FGpuDecalInput& Decals, const TArray<float>* FitHeights, TArray<TObjectPtr<UInstancedStaticMeshComponent>>& Components, const FString& Name)
 {
-	if (!Receivers.IsValid())
+	TArray<CSRoad::FDecalInstances> Batches;
+	CSRoad::BuildDecalInstances(Decals, GetActorTransform(), Batches, FitHeights);
+	if (!DecalStrip) DecalStrip = CSRoad::MakeDecalStripMesh(this);
+	int32 Used = 0;
+	int32 Instances = 0;
+	for (const CSRoad::FDecalInstances& Batch : Batches)
 	{
-		OutError = TEXT("The decal receivers were not gathered");
-		return false;
-	}
-	// The clipped crosswalks' triangle counts, from the road mesh's graph.
-	TArray<uint32> ClipCounts;
-	ClipCounts.SetNumZeroed(Decals.ClippedItems.Num());
-	if (ClipReadback)
-	{
-		bool bRead = false;
-		void* Target = ClipCounts.GetData();
-		const uint32 Bytes = uint32(ClipCounts.Num() * sizeof(uint32));
-		ENQUEUE_RENDER_COMMAND(CSRoadClipCounts)([ClipReadback, Target, Bytes, &bRead](FRHICommandListImmediate& RHICmdList)
+		UMaterialInterface* Material = DecalSurfaceMaterial(Decals.MaterialSlots[Batch.MaterialSlot], Batch.bFitted);
+		UStaticMesh* Unit = DecalStrip.Get();
+		if (Batch.bFitted)
 		{
-			RHICmdList.SubmitAndBlockUntilGPUIdle();
-			const void* Data = ClipReadback->IsReady() ? ClipReadback->Lock(Bytes) : nullptr;
-			if (!Data) return;
-			FMemory::Memcpy(Target, Data, Bytes);
-			ClipReadback->Unlock();
-			bRead = true;
-		});
-		FlushRenderingCommands();
-		if (!bRead)
-		{
-			OutError = TEXT("The crosswalk clip counts were not read back");
-			return false;
+			TObjectPtr<UStaticMesh>& Grid = DecalGrids.FindOrAdd(Batch.Columns);
+			if (!Grid) Grid = CSRoad::MakeDecalGridMesh(this, Batch.Columns);
+			Unit = Grid.Get();
 		}
-	}
-	if (!Decals.ApplyClipCounts(ClipCounts, OutError)) return false;
-	UCSMeshRenderComponent* MarkingComponent = Targets.Markings;
-	if (Decals.NumVertices == 0 || Decals.NumIndices == 0)
-	{
-		// Nothing to draw: no stale decals either.
-		MarkingComponent->SetGpuMesh(nullptr);
-		return true;
-	}
-
-	TArray<TObjectPtr<UMaterialInterface>> Materials;
-	for (const FString& Surface : Decals.MaterialSlots)
-	{
-		UMaterialInterface* const* Found = ByBaseColor.Find(Assets.SurfaceBaseColor(Surface));
-		if (!Found) MissingMarkingSurfaces.AddUnique(Surface);
-		Materials.Add(Found ? *Found : FallbackMaterial.Get());
-	}
-	TObjectPtr<UCSMesh>& MarkingObject = *Targets.MarkingMesh;
-	if (!MarkingObject || MarkingObject->GetOuter() != MarkingComponent) MarkingObject = NewObject<UCSMesh>(MarkingComponent);
-	// UV0 the decal texture, UV1 the distances to both ends, UV2 / UV3 the colour (CSRoadDecal.usf).
-	if (!UCSMeshOps::EnsureTexCoordSets(MarkingObject, 4))
-	{
-		OutError = TEXT("The decal mesh could not take four UV sets");
-		return false;
-	}
-	MarkingObject->Materials = Materials;
-	MarkingObject->NotifyMaterialsChanged();
-	MarkingComponent->MeshMaterial = Materials.Num() > 0 ? Materials[0].Get() : FallbackMaterial.Get();
-	const int32 NumSlots = FMath::Max(1, Materials.Num());
-	if (!MarkingObject->EnsureCapacitySync(int32(Decals.NumVertices), int32(Decals.NumIndices)))
-	{
-		OutError = FString::Printf(TEXT("Could not allocate %u decal vertices / %u indices"), Decals.NumVertices, Decals.NumIndices);
-		return false;
-	}
-	MarkingObject->EnsureIndirectDrawCapacitySync(NumSlots);
-	MarkingComponent->SetGpuMesh(MarkingObject);
-
-	// Third graph: the decals, reading the road mesh's streams.
-	FCSMeshResident* RoadResident = RoadObject ? RoadObject->GetResidentPtr() : nullptr;
-	bool bSorted = false;
-	bool bRecorded = false;
-	MarkingObject->EditMeshSync([&](FCSMeshEditContext& Context)
-	{
-		if (!Context.Positions() || !Context.Tangents() || !Context.TexCoords() || !Context.Colors() || !Context.Indices() || !Context.MaterialIds() || !RoadResident) return;
-		FRDGBuilder& GraphBuilder = Context.GraphBuilder;
+		if (!Material || Batch.Transforms.Num() == 0) continue;
+		if (!Components.IsValidIndex(Used) || !Components[Used])
 		{
-			FCSMeshRenderThreadEdit RoadView(GraphBuilder, *RoadResident);
-			CSRoad::FGpuRoadStreams Road;
-			Road.Positions = RoadView->Positions();
-			Road.Tangents = RoadView->Tangents();
-			Road.Indices = RoadView->Indices();
-			Road.WorldToLocal = WorldToLocal;
-			if (!Road.Positions || !Road.Tangents || !Road.Indices) return;
-			CSRoad::FGpuDecalTarget Target;
-			Target.Positions = Context.Positions();
-			Target.Tangents = Context.Tangents();
-			Target.TexCoords = Context.TexCoords();
-			Target.Colors = Context.Colors();
-			Target.Indices = Context.Indices();
-			Target.MaterialIds = Context.MaterialIds();
-			Target.VertexCapacity = Context.Resident.VertexCapacity;
-			Target.IndexCapacity = Context.Resident.IndexCapacity;
-			Target.LocalToWorld = LocalToWorld;
-			CSRoad::AddDecalMeshPasses(GraphBuilder, MeshInput, Decals, Road, Receivers.Register(GraphBuilder), Target);
+			// Made at build time, never saved or copied, as the road tiles. The instances are in world
+			// space: the component keeps an absolute identity transform.
+			const FName ComponentName = MakeUniqueObjectName(this, UInstancedStaticMeshComponent::StaticClass(), *FString::Printf(TEXT("%s_%d"), *Name, Used));
+			UInstancedStaticMeshComponent* Component = NewObject<UInstancedStaticMeshComponent>(this, ComponentName, RF_Transient | RF_DuplicateTransient);
+			Component->SetupAttachment(RootComponent);
+			Component->SetUsingAbsoluteLocation(true);
+			Component->SetUsingAbsoluteRotation(true);
+			Component->SetUsingAbsoluteScale(true);
+			Component->SetRelativeTransform(FTransform::Identity);
+			Component->SetMobility(EComponentMobility::Movable);
+			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Component->SetCanEverAffectNavigation(false);
+			Component->SetCastShadow(false);
+			Component->SetReceivesDecals(false);
+			Component->bVisibleInRayTracing = false;
+			Component->bAffectDistanceFieldLighting = false;
+			Component->SetStaticMesh(Unit);
+			Component->RegisterComponent();
+			if (Components.IsValidIndex(Used)) Components[Used] = Component;
+			else Components.Add(Component);
 		}
-		UCSMeshOps::AddSetCountersPass(Context, Decals.NumVertices, Decals.NumIndices);
-		Context.SetWorldBounds(WorldBounds);
-		bSorted = UCSMeshOps::AddMaterialSectionPasses(Context, NumSlots);
-		bRecorded = true;
-	});
-	if (!bRecorded)
-	{
-		OutError = TEXT("The decal mesh or the road mesh has no vertex streams");
-		return false;
+		UInstancedStaticMeshComponent* Component = Components[Used++];
+		Component->ClearInstances();
+		if (Component->GetStaticMesh() != Unit) Component->SetStaticMesh(Unit);
+		Component->SetMaterial(0, Material);
+		// RoadDecals' renderer priority: mesh decals sort by it.
+		Component->SetTranslucentSortPriority(Batch.Priority);
+		Component->SetNumCustomDataFloats(Batch.Floats);
+		Component->AddInstances(Batch.Transforms, false, false, false);
+		Component->SetCustomData(0, Batch.Transforms.Num() - 1, Batch.Data, false);
+		Component->MarkRenderStateDirty();
+		Instances += Batch.Transforms.Num();
 	}
-	if (bSorted) UCSMeshOps::PublishMaterialSections(MarkingObject);
-	Targets.MarkingTriangles = int32(Decals.NumIndices / 3);
+	while (Components.Num() > Used)
+	{
+		if (UInstancedStaticMeshComponent* Extra = Components.Pop()) Extra->DestroyComponent();
+	}
+	return Instances;
+}
+
+int32 ACSRoadNetworkActor::DrawDecals(const CSRoad::FGpuDecalInput& Decals, const TSharedPtr<CSRoad::FDecalFitReadback>& Fit, TArray<TSharedPtr<CSRoad::FDecalFitReadback>>& Fits,
+	TArray<TObjectPtr<UInstancedStaticMeshComponent>>& Components, const FString& Name)
+{
+	// The connectors and crosswalks wait for their heights, a frame or two: until then the decals
+	// drawn before stay.
+	if (Fit)
+	{
+		Fit->Items = Decals.Items;
+		Fit->MaterialSlots = Decals.MaterialSlots;
+		Fits.Add(Fit);
+		return INDEX_NONE;
+	}
+	Fits.Reset();
+	return WriteDecals(Decals, nullptr, Components, Name);
+}
+
+bool ACSRoadNetworkActor::TickDecalFits(TArray<TSharedPtr<CSRoad::FDecalFitReadback>>& Fits, TArray<TObjectPtr<UInstancedStaticMeshComponent>>& Components, const FString& Name, int32& OutInstances)
+{
+	int32 Landed = INDEX_NONE;
+	for (int32 I = Fits.Num() - 1; I >= 0 && Landed == INDEX_NONE; I--) if (Fits[I]->Poll()) Landed = I;
+	if (Landed == INDEX_NONE) return false;
+	const TSharedPtr<CSRoad::FDecalFitReadback> Fit = Fits[Landed];
+	Fits.RemoveAt(0, Landed + 1);
+	CSRoad::FGpuDecalInput Decals;
+	Decals.Items = Fit->Items;
+	Decals.MaterialSlots = Fit->MaterialSlots;
+	if (Fit->IsFailed()) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: the heights of %s's connectors and crosswalks did not come back from the GPU; they are left out"), *GetName(), *Name);
+	OutInstances = WriteDecals(Decals, Fit->IsFailed() ? nullptr : &Fit->Heights(), Components, Name);
 	return true;
+}
+
+void ACSRoadNetworkActor::TickAllDecalFits()
+{
+	bool bTiles = false;
+	for (TPair<FIntPoint, FCSRoadTile>& Pair : Tiles)
+	{
+		if (Pair.Value.DecalFits.Num() == 0) continue;
+		int32 Instances = 0;
+		if (!TickDecalFits(Pair.Value.DecalFits, Pair.Value.Decals, FString::Printf(TEXT("MarkingTile_%d_%d"), Pair.Key.X, Pair.Key.Y), Instances)) continue;
+		Pair.Value.DecalInstances = Instances;
+		bTiles = true;
+	}
+	int32 Instances = 0;
+	if (MarkingFits.Num() > 0 && TickDecalFits(MarkingFits, MarkingDecals, TEXT("Marking"), Instances)) NumMarkingInstances = Instances;
+	if (!bTiles) return;
+	NumMarkingInstances = 0;
+	for (const TPair<FIntPoint, FCSRoadTile>& Pair : Tiles) NumMarkingInstances += Pair.Value.DecalInstances;
+}
+
+void ACSRoadNetworkActor::FinishDecalFits()
+{
+	auto Pending = [this]()
+	{
+		if (MarkingFits.Num() > 0) return true;
+		for (const TPair<FIntPoint, FCSRoadTile>& Pair : Tiles) if (Pair.Value.DecalFits.Num() > 0) return true;
+		return false;
+	};
+	// Each round: the GPU done with every copy, a look at each, then what landed drawn.
+	for (int32 Round = 0; Round < 100 && Pending(); Round++)
+	{
+		ENQUEUE_RENDER_COMMAND(CSRoadFinishDecalFits)([](FRHICommandListImmediate& RHICmdList) { RHICmdList.BlockUntilGPUIdle(); });
+		FlushRenderingCommands();
+		TickAllDecalFits();
+		FlushRenderingCommands();
+		TickAllDecalFits();
+	}
+}
+
+void ACSRoadNetworkActor::ResolveDecalMaterials(const CSRoad::FGpuDecalInput& Decals, const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FAssets& Assets)
+{
+	// What each surface draws: strips (1), fitted grids (2).
+	TArray<uint8> Kinds;
+	Kinds.SetNumZeroed(Decals.MaterialSlots.Num());
+	for (const CSRoad::FGpuDecalItem& Item : Decals.Items) if (Kinds.IsValidIndex(int32(Item.MaterialSlot))) Kinds[Item.MaterialSlot] |= Item.Kind == uint32(CSRoad::EDecalKind::Strip) ? 1 : 2;
+	for (int32 Slot = 0; Slot < Decals.MaterialSlots.Num(); Slot++)
+	{
+		const FString& Surface = Decals.MaterialSlots[Slot];
+		for (const bool bFitted : { false, true })
+		{
+			if ((Kinds[Slot] & (bFitted ? 2 : 1)) == 0) continue;
+			const TSoftObjectPtr<UMaterialInterface>& Master = bFitted ? FittedDecalMaterial : DecalMaterial;
+			UMaterialInterface* Parent = Master.LoadSynchronous();
+			const FString Key = bFitted ? Surface + TEXT("|fitted") : Surface;
+			if (const TObjectPtr<UMaterialInstanceDynamic>* Known = DecalSurfaces.Find(Key); Known && *Known && (*Known)->Parent == Parent) continue;
+			DecalSurfaces.Remove(Key);
+			UMaterialInterface* const* Look = ByBaseColor.Find(Assets.SurfaceBaseColor(Surface));
+			if (!Parent) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: no decal material %s (Scripts/CS2Road/MakeRoadDecalMaterial.py makes it)"), *GetName(), *Master.ToString());
+			if (!Look || !Parent)
+			{
+				MissingMarkingSurfaces.AddUnique(Surface);
+				continue;
+			}
+			// The M_CS2 decal material's look (Scripts/ImportCS2Roads.py): its albedo texture and tint.
+			UMaterialInstanceDynamic* Instance = UMaterialInstanceDynamic::Create(Parent, this);
+			UTexture* Albedo = nullptr;
+			if ((*Look)->GetTextureParameterValue(FHashedMaterialParameterInfo(TEXT("albedo")), Albedo) && Albedo) Instance->SetTextureParameterValue(TEXT("albedo"), Albedo);
+			FLinearColor Tint = FLinearColor::White;
+			if ((*Look)->GetVectorParameterValue(FHashedMaterialParameterInfo(TEXT("Tint")), Tint)) Instance->SetVectorParameterValue(TEXT("Tint"), Tint);
+			DecalSurfaces.Add(Key, Instance);
+		}
+	}
+}
+
+UMaterialInterface* ACSRoadNetworkActor::DecalSurfaceMaterial(const FString& Surface, bool bFitted) const
+{
+	const TObjectPtr<UMaterialInstanceDynamic>* Known = DecalSurfaces.Find(bFitted ? Surface + TEXT("|fitted") : Surface);
+	return Known ? Known->Get() : nullptr;
+}
+
+void ACSRoadNetworkActor::DestroyComponents(TArray<TObjectPtr<UInstancedStaticMeshComponent>>& Components)
+{
+	for (UInstancedStaticMeshComponent* Component : Components) if (Component) Component->DestroyComponent();
+	Components.Reset();
+}
+
+void ACSRoadNetworkActor::TickBakes()
+{
+#if WITH_EDITOR
+	if (bLocalUpdate && bBakeNanite)
+	{
+		const double Start = FPlatformTime::Seconds();
+		// Game-thread time a tick for starting bakes, handing them to the compiler and swapping meshes.
+		const double Deadline = Start + 0.002;
+		for (TPair<FIntPoint, FCSRoadTile>& Pair : Tiles)
+		{
+			FCSRoadTile& Tile = Pair.Value;
+			if (!Tile.RoadMesh || !Tile.Road || Tile.bBakeFailed) continue;
+			if (!Tile.Bake)
+			{
+				// Once the mesh has stood a moment: an edit dragged across a tile rewrites it every tick.
+				if (Start - Tile.WrittenSeconds < 0.3 || FPlatformTime::Seconds() > Deadline) continue;
+				TArray<UMaterialInterface*> Materials;
+				for (const TObjectPtr<UMaterialInterface>& Material : Tile.RoadMesh->Materials) Materials.Add(Material.Get());
+				const double StartStart = FPlatformTime::Seconds();
+				Tile.Baking = CSRoad::NewNaniteMesh(this, Materials);
+				Tile.Bake = MakeShared<CSRoad::FRoadBake>();
+				if (!Tile.Bake->Start(*Tile.RoadMesh, uint32(Tile.Vertices), uint32(Tile.Triangles) * 3u, Tile.Baking))
+				{
+					UE_LOG(LogCSRoadNet, Warning, TEXT("%s: tile (%d, %d) has no road mesh streams to bake"), *GetName(), Pair.Key.X, Pair.Key.Y);
+					Tile.Bake.Reset();
+					Tile.Baking = nullptr;
+					Tile.bBakeFailed = true;
+				}
+				if (CVarCSRoadBakeLog.GetValueOnGameThread() != 0 && FPlatformTime::Seconds() - StartStart > 0.002) UE_LOG(LogCSRoadNet, Log, TEXT("%s: tile (%d, %d) bake start took %.1f ms"), *GetName(), Pair.Key.X, Pair.Key.Y, (FPlatformTime::Seconds() - StartStart) * 1000.0);
+				continue;
+			}
+			const double StepStart = FPlatformTime::Seconds();
+			const CSRoad::FRoadBake::EStage Before = Tile.Bake->Stage();
+			const CSRoad::FRoadBake::EStage Stage = Tile.Bake->Tick(StepStart < Deadline);
+			if (CVarCSRoadBakeLog.GetValueOnGameThread() != 0 && FPlatformTime::Seconds() - StepStart > 0.002) UE_LOG(LogCSRoadNet, Log, TEXT("%s: tile (%d, %d) bake step %d -> %d took %.1f ms"), *GetName(), Pair.Key.X, Pair.Key.Y, int32(Before), int32(Stage), (FPlatformTime::Seconds() - StepStart) * 1000.0);
+			if (Stage == CSRoad::FRoadBake::EStage::Failed)
+			{
+				UE_LOG(LogCSRoadNet, Warning, TEXT("%s: tile (%d, %d) could not be baked into a Nanite mesh; it keeps its GPU mesh"), *GetName(), Pair.Key.X, Pair.Key.Y);
+				Tile.Bake.Reset();
+				Tile.Baking = nullptr;
+				Tile.bBakeFailed = true;
+				continue;
+			}
+			if (Stage != CSRoad::FRoadBake::EStage::Done || FPlatformTime::Seconds() > Deadline) continue;
+			// The bake in place of the GPU mesh, whose VRAM goes now rather than at the next GC.
+			const double SwapStart = FPlatformTime::Seconds();
+			if (!Tile.Nanite)
+			{
+				// As the other tile components: made at build time, never saved or copied.
+				const FName Name = MakeUniqueObjectName(this, UStaticMeshComponent::StaticClass(), *FString::Printf(TEXT("NaniteTile_%d_%d"), Pair.Key.X, Pair.Key.Y));
+				Tile.Nanite = NewObject<UStaticMeshComponent>(this, Name, RF_Transient | RF_DuplicateTransient);
+				Tile.Nanite->SetupAttachment(RootComponent);
+				Tile.Nanite->SetUsingAbsoluteLocation(true);
+				Tile.Nanite->SetUsingAbsoluteRotation(true);
+				Tile.Nanite->SetUsingAbsoluteScale(true);
+				Tile.Nanite->SetMobility(EComponentMobility::Movable);
+				Tile.Nanite->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				Tile.Nanite->SetCanEverAffectNavigation(false);
+				Tile.Nanite->RegisterComponent();
+			}
+			CSRoad::RedrawShadowsOnStreaming();
+			Tile.Nanite->SetWorldTransform(FTransform(Tile.Bake->Origin()));
+			Tile.Nanite->SetStaticMesh(Tile.Baking);
+			Tile.Bake.Reset();
+			Tile.Baking = nullptr;
+			// The GPU mesh goes with its component (removing the primitive drops whatever the renderer
+			// cached of it); the tile gets a new one when it is next written.
+			Tile.Road->DestroyComponent();
+			Tile.Road = nullptr;
+			Tile.RoadMesh = nullptr;
+			if (CVarCSRoadBakeLog.GetValueOnGameThread() != 0 && FPlatformTime::Seconds() - SwapStart > 0.002) UE_LOG(LogCSRoadNet, Log, TEXT("%s: tile (%d, %d) swap took %.1f ms"), *GetName(), Pair.Key.X, Pair.Key.Y, (FPlatformTime::Seconds() - SwapStart) * 1000.0);
+		}
+	}
+#endif
+	UpdateBakeStats();
+}
+
+void ACSRoadNetworkActor::UpdateBakeStats()
+{
+	int32 Baked = 0;
+	for (const TPair<FIntPoint, FCSRoadTile>& Pair : Tiles) Baked += !Pair.Value.RoadMesh && Pair.Value.Nanite && Pair.Value.Nanite->GetStaticMesh() ? 1 : 0;
+	NumNaniteTiles = Baked;
+	GpuMeshMiB = float(double(GpuMeshBytes()) / double(1 << 20));
+}
+
+int64 ACSRoadNetworkActor::TileGpuBytes(const FCSRoadTile& Tile)
+{
+	const FCSMeshResident* Resident = Tile.RoadMesh ? Tile.RoadMesh->GetResidentPtr() : nullptr;
+	if (!Resident) return 0;
+	// The streams as the pools hand them out (64 KiB granules, rhi.DumpResourceMemory), and the ray
+	// tracing BLAS of the mesh: about 31 bytes a triangle on Palmsland.
+	int64 Bytes = int64(Tile.Triangles) * 31;
+	for (const FCSMeshResident::FStream& Stream : Resident->Streams) if (Stream.Pooled.IsValid()) Bytes += Align(int64(Stream.Pooled->GetAlignedSize()), int64(64 << 10));
+	return Bytes;
+}
+
+int64 ACSRoadNetworkActor::GpuMeshBytes() const
+{
+	int64 Bytes = 0;
+	for (const TPair<FIntPoint, FCSRoadTile>& Pair : Tiles) Bytes += TileGpuBytes(Pair.Value);
+	return Bytes;
+}
+
+int64 ACSRoadNetworkActor::GpuMeshBudgetBytes() const
+{
+#if WITH_EDITOR
+	if (bLocalUpdate && bBakeNanite && GpuMeshBudget > 0) return int64(GpuMeshBudget) << 20;
+#endif
+	return MAX_int64;
+}
+
+int64 ACSRoadNetworkActor::EstimateTileBytes(const FCSRoadTile* Known, int32 Roads, double TrianglesPerRoad)
+{
+	// As its last build, else the tiles' average per road; road meshes have about 1.1 vertices a triangle.
+	if (Known && Known->Triangles > 0) return CSRoadNetworkActor_GpuMeshBytes(uint32(Known->Vertices), uint32(Known->Triangles) * 3u);
+	const double Triangles = double(Roads) * TrianglesPerRoad;
+	return CSRoadNetworkActor_GpuMeshBytes(uint32(Triangles * 1.1), uint32(Triangles) * 3u);
 }
 
 FCSRoadTile& ACSRoadNetworkActor::EnsureTile(const FIntPoint& Key)
 {
 	FCSRoadTile& Tile = Tiles.FindOrAdd(Key);
 	// Made at build time, never saved or copied: a loaded or duplicated network builds its own.
-	auto Make = [this, &Key](const TCHAR* Kind)
-	{
-		const FName Name = MakeUniqueObjectName(this, UCSMeshRenderComponent::StaticClass(), *FString::Printf(TEXT("%sTile_%d_%d"), Kind, Key.X, Key.Y));
-		UCSMeshRenderComponent* Component = NewObject<UCSMeshRenderComponent>(this, Name, RF_Transient | RF_DuplicateTransient);
-		Component->SetupAttachment(RootComponent);
-		return Component;
-	};
 	if (!Tile.Road)
 	{
-		Tile.Road = Make(TEXT("Road"));
+		const FName Name = MakeUniqueObjectName(this, UCSMeshRenderComponent::StaticClass(), *FString::Printf(TEXT("RoadTile_%d_%d"), Key.X, Key.Y));
+		Tile.Road = NewObject<UCSMeshRenderComponent>(this, Name, RF_Transient | RF_DuplicateTransient);
+		Tile.Road->SetupAttachment(RootComponent);
+		Tile.Road->bReceivesDecals = true;
 		Tile.Road->RegisterComponent();
-	}
-	if (!Tile.Markings)
-	{
-		// As MarkingMesh: the decals float 2 cm over the road.
-		Tile.Markings = Make(TEXT("Marking"));
-		Tile.Markings->SetCastShadow(false);
-		Tile.Markings->bVisibleInRayTracing = false;
-		Tile.Markings->bAffectDistanceFieldLighting = false;
-		Tile.Markings->RegisterComponent();
 	}
 	return Tile;
 }
@@ -1042,7 +1313,9 @@ void ACSRoadNetworkActor::RemoveTile(const FIntPoint& Key)
 	FCSRoadTile Tile;
 	if (!Tiles.RemoveAndCopyValue(Key, Tile)) return;
 	// A component frees the meshes it owns when destroyed.
-	for (UCSMeshRenderComponent* Component : { Tile.Road.Get(), Tile.Markings.Get() }) if (Component) Component->DestroyComponent();
+	if (Tile.Road) Tile.Road->DestroyComponent();
+	if (Tile.Nanite) Tile.Nanite->DestroyComponent();
+	DestroyComponents(Tile.Decals);
 }
 
 void ACSRoadNetworkActor::ClearTiles()
@@ -1063,11 +1336,12 @@ uint64 ACSRoadNetworkActor::TileSignature(bool bLeftHand) const
 	Add(TileSize);
 	Add(bLeftHand);
 	Add(bBuildMarkings);
+	Add(bBakeNanite);
 	const FMatrix Placement = GetActorTransform().ToMatrixWithScale();
 	Add(Placement);
 	const UMaterialInterface* Fallback = FallbackMaterial.Get();
 	Add(Fallback);
-	const FString Folders = MaterialFolder.Path + TEXT("|") + ResolveAssetDirectory();
+	const FString Folders = MaterialFolder.Path + TEXT("|") + ResolveAssetDirectory() + TEXT("|") + DecalMaterial.ToString() + TEXT("|") + FittedDecalMaterial.ToString();
 	Hash.Update(*Folders, Folders.Len() * sizeof(TCHAR));
 	return Hash.Finalize().Hash;
 }

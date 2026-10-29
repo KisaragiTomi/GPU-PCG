@@ -1,6 +1,6 @@
 # CS2 道路逻辑的 GPU 移植（CSRoadNet）
 
-`CSRoadNet` 模块把 Cities: Skylines II 的道路生成逻辑搬进 UE。它从路网快照（节点、边、曲线、prefab）或关卡里画的样条路出发：CPU 选组合、拼组合网格；GPU 跑 `GeometrySystem` 的几何 job、算组合参数、统一路口接缝、细分节点网格，再把组合网格变形到曲线上，结果直接写进 `UCSMesh` 渲染。标线、胎痕和横道（RoadLab 的贴花）由 CPU 遍历车道图生成条目，GPU 把它们投影或裁剪到刚建好的路面上，写进第二个 `UCSMesh`。它与 [Palmsland 道路关卡](CS2Roads.md) 的静态网格导入相互独立。
+`CSRoadNet` 模块把 Cities: Skylines II 的道路生成逻辑搬进 UE。它从路网快照（节点、边、曲线、prefab）或关卡里画的样条路出发：CPU 选组合、拼组合网格；GPU 跑 `GeometrySystem` 的几何 job、算组合参数、统一路口接缝、细分节点网格，再把组合网格变形到曲线上，结果直接写进 `UCSMesh` 渲染。标线、胎痕和横道（RoadLab 的贴花）由 CPU 遍历车道图生成条目，每个条目画成单位网格的实例：材质按实例数据把它沿条目的曲线摆开，作为 DBuffer 网格贴花画到下面的路面上。分 tile 建时，tile 停手后在后台烘成 Nanite 网格，换下 GPU 网格并释放它的显存，见[烘成 Nanite 与显存预算](#烘成-nanite-与显存预算)。它与 [Palmsland 道路关卡](CS2Roads.md) 的静态网格导入相互独立。
 
 原版代码来自 `D:\MyProject\CitiesSkylines-Road2-C#` 的 `Port/Original`（反编译源，逐字节可复现）。C# RoadLab 自己写的部分按 RoadLab 移植，并在下文注明，包括 `RoadWorld.Build` 的流程、`RoadMeshes.Deform`、`RoadJunctionSurface`、`RoadMeshRefinement`、`RoadLanes`、`RoadCrosswalks` 和 `RoadDecals`。
 
@@ -12,7 +12,7 @@
 - 改属性、移动松手、关卡加载或复制 actor 时自动重建，也可以点 `Rebuild`。常驻网格不存盘，加载后重新生成。
 - `AssetDirectory` 留空时读 `<CS2ROADLAB 或 D:/MyProject/CitiesSkylines-Road2-C#>/Assets/CS2` 下的 `prefabs.json`、`raw-prefabs.json`、`pieces.bin`。同一目录每个进程只加载一次。
 - 材质按 atlas 的 BaseColor 贴图名（目录里的 `material_bindings`）在 `MaterialFolder` 找 `M_CS2_<NN>_<BaseColor>`，这些材质由 `Scripts/ImportCS2Roads.py` 生成。找不到的 atlas 列在 `MissingAtlases`，改用 `FallbackMaterial`。
-- `bBuildMarkings`（默认开）在 `MarkingMesh` 组件里生成贴花。贴花材质同样按表面的 BaseColor 找 `M_CS2_*`，找不到的表面列在 `MissingMarkingSurfaces`。`AssetDirectory` 里没有 BaseColor 贴图的表面像 RoadLab 一样跳过。Palmsland 的贴花网格要约 690 MiB 显存，`UCSMesh` 只按空闲显存的 70% 分配；装不下时照样建出路面，`LastError` 写明贴花没建成的原因。
+- `bBuildMarkings`（默认开）把贴花画成实例化的 DBuffer 网格贴花，见[贴花](#贴花)。两张母材质 `M_RoadDecal`、`M_RoadDecalFitted`（`DecalMaterial`、`FittedDecalMaterial`）由 `Scripts/CS2Road/MakeRoadDecalMaterial.py` 生成；actor 为每个贴花表面建一个动态材质实例，贴图和 `Tint` 取自同名的 `M_CS2_*` 贴花材质，找不到的表面列在 `MissingMarkingSurfaces`。`AssetDirectory` 里没有 BaseColor 贴图的表面像 RoadLab 一样跳过。路面组件都接收贴花（`bReceivesDecals`），GPU 网格和 Nanite 网格一样。Palmsland 的 48,577 个贴花条目画成 204,631 个实例（条带 107,194 个，贴合网格 97,437 个）；原先的标线网格要约 690 MiB。
 - 属性含义写在 `Source/CSRoadNet/Public/CSRoadNetworkActor.h` 的声明注释里。
 
 ### 车流预览与桥墩
@@ -69,19 +69,19 @@
 
 边的顺序不保留，样条路网的边按内容排序，与快照文件里的顺序不同。几何 job 遇到平局、按边的顺序累加时，结果因此略有出入。Palmsland 转成 3,894 根样条后重建，与读文件时比：5,667 条边、4,576 个节点的数据和全部组合都相同；GPU 几何 132.6 万个值里 52 个偏差超过 1 cm，最大 2.7 cm，没有超过 0.1 m 的。把文件里的边按内容排序、倒序或打乱再建，偏差完全一样，可见这是边序本身带来的。不保留有没有 owner 时，那组 owner 附近有 61 个值偏差超过 0.1 m，最大 0.47 m。打乱样条的先后再建，得到的边和节点逐个相同。转换后暖重建约 1.0–1.1 s，与读文件相当。
 
-Palmsland 已经转好存成关卡 `/PCGPlugins/CSRoadNet/L_PalmslandSplines`（`Scripts/CS2Road/MakePalmslandSplines.py` 生成，29 MB）。一个路网 actor 下挂 3,894 根样条，路的数据都在样条点上；`NetworkFile` 仍指向快照，但只提供地形：路面顶点贴着它，新画的路按它量高程。路网按 256 m 的 tile 局部更新，打开关卡后每帧写 16 个 tile，约 50 帧写完。整张 Palmsland 一次建完要约 1,500 万个路面顶点和 1,000 万个标线顶点，显存紧张时标线会分配失败（10-28 生成关卡时遇到过），所以关卡默认分 tile。重新加载后，样条与现场转换的结果逐个相同；只建路面时整网 14,755,860 个顶点，比读文件少 24 个，来自边序不同。
+Palmsland 已经转好存成关卡 `/PCGPlugins/CSRoadNet/L_PalmslandSplines`（`Scripts/CS2Road/MakePalmslandSplines.py` 生成，29 MB）。一个路网 actor 下挂 3,894 根样条，路的数据都在样条点上；`NetworkFile` 仍指向快照，但只提供地形：路面顶点贴着它，新画的路按它量高程。路网按 256 m 的 tile 局部更新，tile 停手后烘成 Nanite，等着烘的 GPU 网格最多占 200 MiB：打开关卡后约 94 s，771 个 tile 全部换成 Nanite，见[烘成 Nanite 与显存预算](#烘成-nanite-与显存预算)。整张 Palmsland 的路面全用 GPU 网格要约 1.3 GiB（整网模式还要一次分配下 1,500 万个顶点），所以关卡默认分 tile。重新加载后，样条与现场转换的结果逐个相同；只建路面时整网 14,755,860 个顶点，比读文件少 24 个，来自边序不同。
 
 ## 局部更新
 
-`bLocalUpdate` 打开后，路面和标线按 `TileSize` 的方格分 tile 写，每个 tile 一对渲染组件（`RoadTile_*`、`MarkingTile_*`），组件和网格都不存盘。一条路归它曲线中点所在的 tile。流程在 `ACSRoadNetworkActor::BuildTiles` 和 `CSRoadTiles.cpp`：
+`bLocalUpdate` 打开后，路面和标线按 `TileSize` 的方格分 tile 写。每个 tile 有一个路面组件 `RoadTile_*`、几个标线实例组件 `MarkingTile_*`（每个贴花表面、优先级和画法一个），烘好后再有一个 `NaniteTile_*`；组件和网格都不存盘。一条路归它曲线中点所在的 tile。流程在 `ACSRoadNetworkActor::BuildTiles` 和 `CSRoadTiles.cpp`：
 
 1. 每条路按输入算一个指纹：prefab、曲线、高程、升级、owner，以及两端节点的数据（prefab、位置、旋转、高程、升级、出城连接、owner）。路和节点都没有编号：快照里的 id 读入时就换成了下标，样条路网里有 owner 的都用同一个 owner，所以一处编辑不会让别处的路换指纹。与上次相比，指纹新增或消失的路就是改动的路。离它们两圈以内的路是受影响的路；删掉的路经由它原来的节点和 owner 算进来。两条路共用一个节点，或者 owner 相同（路自己的或两端节点的 owner），就算相隔一圈。
 2. 用受影响的路再加两圈建图（检测子图），跑 GPU 几何并读回。一条路的组合与 GPU 几何只取决于两圈以内的路（`Subgraph.Reach` 抽样确定，`Subgraph.Tiles` 对 Palmsland 全部路逐条核过），所以受影响的路在子图里的结果与整网相同。子图按规格原来的顺序取子集，节点数组整份传入；实体编号只比较是否相等，编号不同不影响结果。
 3. 受影响的路各算一个输出指纹：输入指纹，加上读回的边与两端节点几何，以及三个实例的组合。输出变了、新增或删掉的路，在它们节点上相接的路所在的 tile 都要重写。tile 尺寸、左右舵、标线开关、actor 变换或材质设置变了，全部重写，这时子图就是整网。
-4. 本批 tile 里的路，加上节点上与它们相接的路（贴花接收面、车道图要用），再加两圈，另建一个绘制子图；检测子图已经包含这些路时直接用它。车道图、细分计数和各 tile 的网格都取自这个子图：脏 tile 的实例合在一张图里算细分计数，之后逐 tile 只为本 tile 的路建组合网格、写路面和标线。节点上相邻路的边和节点实例只当贴花接收面，写在绘制计数之后，不画出来。子图的 GPU 几何留在池化缓冲里（`FPooledGeometry`），细分计数和各 tile 的网格图直接注册它，不再重算，也不再上传它的表。整网重建同样只算一遍。
+4. 本批 tile 里的路，加上节点上与它们相接的路（车道图要用：本 tile 的路口连接线接着它们的车道），再加两圈，另建一个绘制子图；检测子图已经包含这些路时直接用它。车道图、细分计数和各 tile 的网格都取自这个子图：脏 tile 的实例合在一张图里算细分计数，之后逐 tile 只为本 tile 的路建组合网格、写路面，再写标线实例。子图的 GPU 几何留在池化缓冲里（`FPooledGeometry`），细分计数和各 tile 的网格图直接注册它，不再重算，也不再上传它的表。整网重建同样只算一遍。
 5. 删掉不再有路的 tile。
 
-各 tile 画出的三角形合起来与整网重建逐个相同（`Tiles.Actor`、`Tiles.Subgraph`）。
+各 tile 画出的路面三角形和标线实例合起来与整网重建逐个相同（`Tiles.Actor`、`Tiles.Subgraph`）。
 
 车流预览和桥墩要用整网的车道图和几何。只有整网建图时（第一次建，或设置变了）才当场重做。之后的编辑只写 tile，预览保持上次的样子，等编辑停下来，即距上次重建超过 0.3 s 且没有待做的重建，再由 `Tick` 整网建图、跑 GPU 几何、建车道图，重做一次（`RefreshPreview`）。所以拖动期间车流和桥墩不跟着变，松手约 0.3 s 后更新。
 
@@ -103,7 +103,39 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 
 改进前后对比：用子图之前，每次编辑都整网建图、跑 GPU 几何、建车道图并重做预览。GPU 空时挪一个点约 240 ms，其中整网几何与读回 42–43 ms、车道图 38–46 ms、预览 24–32 ms、建图 11–14 ms、几何输入 12–13 ms；没有改动也要 0.20 s，从零建 25–28 s。再往前，整网几何共用之前，从零建要 112 s，挪一个点 0.50–0.57 s；批量房子改成局部重排之前，单点编辑里这一块约 200 ms，积压时每帧也要整网布局一遍。
 
-一次重建的所有 tile 在同一帧里写，而 D3D12 的上传堆滞后 20 帧才回收，RDG 池里的缓冲要闲置 30 帧才释放。最初每个 tile 的图都把整网 GPU 几何重算并重新上传一遍：10-27 用 256 m 的 tile 不分批从零建 Palmsland 时，D3D12 报显存不足而崩溃（当时别的进程也占着 GPU）；分批之后不再崩溃，但 53 帧里提交内存仍涨了约 5.3 GB。共用几何后，同样 53 帧只涨约 2.4 GB。剩下的主要是 tile 网格本身：每个 tile 的路面网格还带着相邻路的边和节点实例当贴花接收面，按整卡显存占用估算，256 m 的 tile 写完后比整网模式多占约 3 GB。
+一次重建的所有 tile 在同一帧里写，而 D3D12 的上传堆滞后 20 帧才回收，RDG 池里的缓冲要闲置 30 帧才释放。最初每个 tile 的图都把整网 GPU 几何重算并重新上传一遍：10-27 用 256 m 的 tile 不分批从零建 Palmsland 时，D3D12 报显存不足而崩溃（当时别的进程也占着 GPU）；分批之后不再崩溃，但 53 帧里提交内存仍涨了约 5.3 GB。共用几何后，同样 53 帧只涨约 2.4 GB。那时每个 tile 的路面网格还带着相邻路的边和节点实例当贴花接收面，标线也是 GPU 网格，771 个 tile 写完后路网共占约 2.7 GiB 显存。10-28 起标线改成实例化贴花、tile 烘成 Nanite，见下节。
+
+### 烘成 Nanite 与显存预算
+
+`bBakeNanite`（默认开，只在编辑器里）让每个 tile 的路面在停手后烘成 Nanite 静态网格，换下它的 GPU 网格。GPU 网格只在编辑和加载时临时用来显示，`GpuMeshBudget`（默认 200 MiB）限制它们合计占的显存。流程在 `CSRoadNanite.cpp` 和 `ACSRoadNetworkActor::TickBakes`：
+
+1. tile 写完 0.3 s 内没再改，就开始烘：把 GPU 网格的位置、切线、UV、索引和材质 id 拷回 CPU。拷贝排在渲染线程已有的编辑之后，每帧只查一次到没到，不等 GPU。
+2. 拷回后在工作线程里整理成网格描述（以顶点包围盒中心取整厘米为原点），提交给一个临时 `UStaticMesh`。提交用内容哈希当 GUID，所以同样的 tile 下次直接命中 DDC。
+3. 交给编辑器的静态网格编译器，在它自己的线程上建 Nanite 数据和回退网格（相对误差 1，约为原三角形的 3%；光追和非 Nanite 视图画它）。位置精度固定为 1/16 cm，相邻 tile 共用的点量化到同一处。
+4. 建好后，`NaniteTile_*` 组件换上这个网格，GPU 网格当帧释放；网格描述和源数据也清掉（每个 Palmsland tile 约 9 MB 内存），这个网格以后不会再建。
+
+起烘、交给编译器和换网格这三步每帧合计只给 2 ms。一个 tile 被重写时，它烘到一半的结果或已烘好的网格作废，等新的 GPU 网格停手后再烘。静态网格构建会去掉两个角重合的三角形，所以 Nanite 的输入三角形略少于 GPU 网格（`Tiles.Nanite`）。
+
+预算按池子实际分配的大小算：每个 GPU 网格 8 条流各向上取整到 64 KiB（包括写在绘制计数之后、给贴花当接收面的上下文实例），再加光追 BLAS（Palmsland 实测约 31 字节一个三角形）。一批 tile 先按估算挑出放得下的；写每个 tile 之前，再用它的确切顶点数和索引数核一次，放不下时这一批就停在这里，剩下的留到后面。只要还有别的 GPU 网格占着显存，就不会超出预算；没有时总放行一个，避免单个 tile 比预算还大时卡死。只剩积压的 tile 要写时，等烘焙腾出下一个 tile 的位置才重建，而且直接用上次转好的样条路网，不再重新收集和转换 3,894 根样条。
+
+10-28 在 `L_PalmslandSplines` 上实测（完整编辑器，GPU 上另开着一个编辑器）：
+
+| 项目 | 结果 |
+| --- | --- |
+| 打开关卡到 771 个 tile 全部换成 Nanite | 90–120 s（10-28、10-29 多次运行）；GPU 网格峰值 200.0 MiB；3,735 帧里 41 帧超过 100 ms，最长 663 ms，是第一帧整网检测 |
+| 挪一个样条点 5 m | 重建 65–67 ms（重写 2 个 tile）；1.3–1.5 s 后烘完，期间最长帧 25–27 ms |
+| 全部烘完后的路网显存 | GPU 网格 0；Nanite 根页约 16 MB（流送页面在原有的 512 MB 池里）；回退网格 55.7 万个顶点、39.8 万个三角形，约 17 MB；光追 BLAS 约 12 MB；198,266 个贴花实例在 GPU-Scene 里约 40 MB（10-29 换成贴合网格后 204,631 个，未单独量）；地形高度图 64 MB 不变 |
+| 同一关卡关掉烘焙 | 路面 GPU 网格 1,316 MiB |
+| 编辑器内存 | 烘焙期间比加载完关卡时多约 1.7 GB；清掉网格描述之前多约 7 GB |
+| 改进前（10-28 上午） | 路网约 2.7 GiB：路面网格 1,089 MiB（其中接收面 435 MiB）、标线网格 689 MiB、64 KB 取整 334 MiB、间接参数与计数 193 MiB、BLAS 397 MiB |
+
+加载时间受烘焙吞吐限制：预算一直占满，烘完一个才放进下一个。剩下的长帧都在分 tile 流程本身，即检测和绘制子图的阻塞回读，与烘焙无关。
+
+控制台变量 `CSRoad.BakeLog 1` 打出每帧的游戏线程、渲染线程、RHI 和 GPU 时间，以及烘焙各步超过 2 ms 的耗时。`CSRoad.NaniteFallbackError` 调回退网格的相对误差（默认 1）。调到 0.05 时，回退网格增至原三角形的 22%，顶点和索引缓冲多出约 100 MB。
+
+阴影：虚拟阴影贴图的页按视图缓存，内容是第一次画时显存里已有的 Nanite 簇。tile 刚换上，或某处第一次被拉近看时，显存里只有根页；一个 256 m 的 tile，根簇误差有一两米，路缘被简化成斜坡，高出路面的部分把旁边的路面罩进阴影，表现为顺着人行道向外一两米的大块黑影。细簇流送到位后，这些页也不会重画。引擎的 `r.Nanite.VSMInvalidateOnLODDelta`（实验性，默认关）专门处理这种情况：用比需要更粗的簇画进去的页会被标脏，在流送赶上之前每帧重画。第一个 tile 换成 Nanite 时，`CSRoad::RedrawShadowsOnStreaming` 把它设为 1；ini 或控制台已经设过就不动。
+
+10-29 在同一个路口对照（SceneCapture，FOV 60，烘完后才第一次看那里）：不开时近黑像素 32,669 个；开了只有 5,019 个，与强制整张阴影重画后的画面只差 176 个像素。代价：相机刚到时，前 3 次渲染共多重画约 1,100 个阴影页，之后为 0；稳态下开与不开的阴影页统计相同，GPU 帧时间都在 7.0 ms 左右。同一机位改用 FOV 90 时，视口和 SceneCapture 都没有复现。
 
 ## 大路与小路
 
@@ -143,17 +175,20 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 | 顶点变形、索引、材质 id | GPU，一个线程组一个实例 | RoadLab `RoadMeshes.Deform`（原版在 HDRP 顶点着色器里） | `CSRoadMesh.usf`、`CSRoadGpuMesh.cpp` |
 | 车道图、横道曲线 | CPU，读回 GPU 几何 | RoadLab `RoadLanes`、`RoadCrosswalks` | `CSRoadLanes.cpp`、`CSRoadDecals.cpp` |
 | 贴花条目 | CPU，按 `RoadDecals` 的调用顺序 | RoadLab `RoadDecals.Add`、`AddConnection` | `CSRoadDecals.cpp` |
-| 贴花接收面、条带、投影网格、横道裁剪 | GPU，一个线程组一个段或一个条目 | RoadLab `RoadRenderer.Add`、`RoadSurfaceProjection` | `CSRoadDecal.usf`、`CSRoadGpuDecals.cpp` |
+| 贴花接收面、贴合网格的高度 | GPU，一个线程组一个段或一个条目，与路面同一张图 | RoadLab `RoadRenderer.Add`、`RoadSurfaceProjection.TryProject` | `CSRoadDecal.usf`（`ReceiversCS`、`DecalFitCS`）、`CSRoadGpuDecals.cpp` |
+| 贴花实例 | CPU：条目切成实例，高度读回后挑列数、打包进实例数据；材质沿曲线摆开 | — | `CSRoadDecalInstances.cpp`、`MakeRoadDecalMaterial.py` |
+| 条带、投影网格、横道裁剪（只用于测试） | GPU，一个线程组一个条目 | RoadLab `RoadDecals` | `CSRoadDecal.usf`、`CSRoadGpuDecals.cpp` |
 | 材质分段 | GPU | — | `UCSMeshOps::AddMaterialSectionPasses` |
+| Nanite 烘焙 | 回读、工作线程、编辑器的静态网格编译器 | — | `CSRoadNanite.cpp` |
 
 几何 job 按原版依赖顺序录成一张 RDG：`InitializeNode → CalculateEdge → FlattenNode → FinishEdge → CalculateNode ×2 → CalculateIntersection → CopyNode → UpdateNode`。每条路三个实例（边、起点节点、终点节点），每个实例对应一个组合网格和一组 `CompositionParameters`。
 
-一次重建录四张图，中间有两次 CPU 等待：
+一次重建录两张图，中间有一次 CPU 等待：
 
-1. 几何、组合参数、接缝和细分计数。读回每个实例细分后的顶点数、三角形数，开贴花时连同边与节点几何一起读回，供车道图使用。CPU 据此排布网格并生成贴花条目。
-2. 路面网格（细分写出、变形、索引），各节点的贴花接收面，以及横道裁剪的计数。几何不再重算，用第 1 张图留在池化缓冲里的那份（`FPooledGeometry`）。读回裁剪计数后，CPU 排布贴花网格。
-3. 贴花网格，读第 2 张图写好的路面顶点流。
-4. 路面的材质分段。分段会重排索引缓冲，而贴花按索引位置引用路面三角形，所以排在贴花之后。
+1. 几何、组合参数、接缝和细分计数。读回每个实例细分后的顶点数、三角形数，连同边与节点几何一起读回，供车道图使用。CPU 据此排布网格，生成贴花条目。
+2. 路面网格（细分写出、变形、索引），从中收集贴花接收面、求出路口连接线和横道网格点的高度（`AddDecalFitPasses`），最后是材质分段。几何不再重算，用第 1 张图留在池化缓冲里的那份（`FPooledGeometry`）。高度异步读回，不等 GPU；落地后（通常一两帧）才写贴花组件，在此之前保留上一版贴花。
+
+贴花接收面按索引位置引用路面三角形，而材质分段会重排索引缓冲，所以分段总在贴花之后。测试用的 `RunDecalsBlocking` 另外录 RoadLab 的贴花网格：第 2 张图同时收集各节点的贴花接收面、统计横道裁剪数；读回计数后录贴花网格那张图，读第 2 张图写好的路面顶点流。
 
 ## 路口接缝与细分
 
@@ -162,17 +197,35 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 
 ## 贴花
 
-- 条目：`FRoadLanes::Build` 按 .NET 语义（字典插入顺序、稳定排序、`Array.BinarySearch`）建车道图。`FGpuDecalInput::Build` 按 `RoadDecals` 的调用顺序为每个贴花网格出一个条目，分三类：没有接收面的条带（每 1.5 m 一行，每行 2 个顶点），投影到节点表面的网格（每 0.5 m 一行，每行 7 个顶点，用于路口连接线），以及裁剪到表面的横道。
+RoadLab 的贴花网格（接收面、投影、裁剪）在 `CSRoadDecal.usf` 里完整移植，金标测试比对的就是它。actor 不画这份网格，而是把条目画成实例化网格贴花，见本节最后一条；接收面和投影它也用，给路口连接线和横道的网格点求高度。
+
+- 条目：`FRoadLanes::Build` 按 .NET 语义（字典插入顺序、稳定排序、`Array.BinarySearch`）建车道图。`FGpuDecalInput::Build` 按 `RoadDecals` 的调用顺序为每个贴花网格出一个条目，分三类：没有接收面的条带（每 1.5 m 一行，每行 2 个顶点），投影到节点表面的网格（每 0.5 m 一行，每行 7 个顶点，用于路口连接线），以及裁剪到表面的横道。`bItemsOnly` 只出条目，不收集接收面。`bFitted`（actor 用）收集接收面，但不排贴花网格，而是排贴合网格的高度：投影网格照原样，横道沿脚印每 0.5 m 以内一行、每行 7 个点（`FitLayout`）。路面网格必须写出这些节点上每条路的实例：分 tile 时，tile 把相邻路在这些节点上的实例作为上下文实例写进网格，写在绘制计数之后、不画，烘 Nanite 时也不读（`TileInstances`）。
 - 接收面：一个节点的接收面是 `RoadRenderer.Add` 放进其 `RoadSurfaceProjection` 的路面三角形，即节点实例的全部三角形加上各条边靠近节点的三角形，按段（一个实例）依插入顺序排列。`ReceiversCS` 在 GPU 上从中筛出朝上（法线 y ≥ 0.7）、投影面积不退化的三角形，记成路面索引流里的位置。它同时给每 64 个接收槽记一个包围盒，供后面的收集整块跳过。
 - 投影：`TryProject` 只看点所在 8 m 格子里登记的接收面，高度最近者胜，并列时取先到的。每个条目先把包围盒够得着的接收面按顺序收进 groupshared 候选表（1,536 个，每个记三角形、所在格子和厘米精度的包围盒），顶点只读盒子罩住它的几个候选。表装不下时，投影网格改为每 64 个顶点按自己的包围盒重新收集；横道改为整块（64 个）遍历节点的接收面，按每块扇形三角形中心的包围盒收集候选。必要时分几张表轮流装，结果不变。
 - 横道裁剪：脚印的两个三角形按 8 m 格子 x 优先遍历，每个接收面在它的第一个格子里处理。Sutherland–Hodgman 裁剪后，扇形三角形的中心须投影回该接收面本身才保留。第 2 张图只计数，第 3 张图写出。
-- 输出：`UCSMesh` 带 4 套 UV，布局同静态导入，供 `M_CS2` 贴花材质读取：UV0 为贴花纹理，UV1 为到两端的距离 `(t·len, (1−t)·len)`，UV2、UV3 为颜色的 (r, g) 和 (b, a)。`MarkingMesh` 不投射阴影，不进光追和距离场。
+- 输出（测试）：`UCSMesh` 带 4 套 UV，布局同静态导入：UV0 为贴花纹理，UV1 为到两端的距离 `(t·len, (1−t)·len)`，UV2、UV3 为颜色的 (r, g) 和 (b, a)。
+- actor 的画法（`CSRoadDecalInstances.cpp`）：条目每 8 行切成一个实例（`DecalStripRows`），每个实例带 33 个 float（`DecalData`）：曲线控制点、本段的 t 区间、宽度、抬高、贴图区域、沿线距离的三次式、两端渐隐的权重与距离。实例的变换把单位网格的包围盒对准本段曲线控制点的包围盒（贴合网格再包住它的高度），剔除照常工作。
+  - 条带用单位条带和 `M_RoadDecal`：顶点着色器按 `CSRoadDecal.usf` 同样的标架放顶点，位置与它逐点相同。
+  - 路口连接线和横道是 RoadLab 投影到表面上的，画成贴合路面的单位网格和 `M_RoadDecalFitted`。`DecalFitCS` 用 RoadLab 的 `TryProject` 把网格点投到接收面上（连接线的网格就是 RoadLab 的投影网格，逐点相同），高度读回后，每个实例多带列数和每个点离曲线的高度（毫米，12 位，两个一个 float）。顶点着色器按曲线标架在平面内摆开网格点，高度取实例里的，竖直抬高 `Lift`。每段 8 行对齐 RoadLab 的行，最后一段多出的行收到曲线终点上。
+  - 列数按需取 1、2、3 或 6（`DecalFitColumnChoices`）：取最少的，只要在 RoadLab 每行 7 个点上离路面不超过 0.5 cm（`DecalFitTolerance`）。有点不在路面上时用满 6 列，网格点的"在不在路面上"经插值传到像素，三角形有一角不在就不画，与 RoadLab 丢弃单元格一致。金标场景里 93% 的贴合实例只要 1 列。
+  - 两者的 UV、渐隐与 `M_CS2` 贴花材质相同，在 DBuffer 里写颜色和粗糙度；RoadDecals 的渲染优先级给组件的 `TranslucencySortPriority`。实例组件不投影、不进光追和距离场。
+  - 10-29 前路口连接线和横道用的是投影盒：单位盒沿曲线立起、上下各伸 0.6 m，像素着色器按场景深度反求路面点。换成贴合网格的原因见下面的对比。
+
+10-29 在 `L_PalmslandSplines` 上用 ProfileGPU 量贴花这一遍（`DeferredDecals`），编辑器视口，每项 6 次取中位数。表中是连接线和横道在只画车道条带（路口近景 0.031–0.036 ms、低角度街景 0.11–0.12 ms、城市总览 0.22–0.23 ms）之上多出的时间：
+
+| 画法 | 每实例 | 路口近景 | 低角度街景 | 城市总览 |
+| --- | --- | --- | --- | --- |
+| 投影盒 | 136 顶点、68 三角形，像素着色器 532 条指令（读场景深度、牛顿迭代） | +0.007–0.010 ms | +0.35 ms | +0.48 ms |
+| 贴合网格，固定 6 列 | 63 顶点、96 三角形，397 条 | +0.008 ms | +0.29 ms | +0.54 ms |
+| 贴合网格，按需取列（现行） | 多数 18 顶点、16 三角形 | +0.004–0.009 ms | +0.16 ms | +0.27 ms |
+
+开销基本随三角形数走：总览里多数贴花不到一个像素，固定 6 列时 9.7 万个实例是 940 万个三角形，反比投影盒的 620 万还多。画面上两者几乎一样（路口近景差超过 16 级的像素 0.15%），投影盒在路口与路段交界处的一条细暗线没有了。
 
 ## 约定
 
 - 结构布局由 `Scripts/CS2Road/generate_types.py` 从 `Port/Original` 生成 `Shaders/Private/CSRoad/CSRoadTypes.ush`，C++（`CSRoadCore.h`）和 HLSL 共用。实体、prefab、组合表都从 1 开始编号，0 代表 `Entity.Null`。
 - 计算在 Unity 米坐标（y 向上）下进行，写入 `UCSMesh` 时转换为 UE 坐标：`(x, -z, y) * 100`，再乘 actor 变换。这个转换是正交旋转；但 Unity 正面三角形的 `cross(B-A, C-A)` 与法线同向，UE 的则反向，所以写索引时交换每个三角形的第 2、3 个顶点。UV 保持原值，与静态导入一致。贴花读回路面时做反变换。
-- `RoadMesh` 和 `MarkingMesh` 存世界坐标、以绝对变换渲染，所以挂在单独的 `Root` 下，自身变换始终是单位变换。做 actor 的根时，它会带上 actor 的位置，把这个变换再乘一遍，路面就画到别处去了。actor 的变换只在写顶点时乘进去，所以移动 actor 后要重建。
+- `RoadMesh`、各 tile 的路面组件和标线实例组件存世界坐标、以绝对变换渲染，所以挂在单独的 `Root` 下，自身变换始终是单位变换（`NaniteTile_*` 放在烘焙时的原点上）。做 actor 的根时，它会带上 actor 的位置，把这个变换再乘一遍，路面就画到别处去了。actor 的变换只在写顶点时乘进去，所以移动 actor 后要重建。
 - Unity.Mathematics 语义：`min`/`max`/`clamp` 遇 NaN 的结果和 HLSL 内建函数不同，统一用 `CSRoadMath.ush` 的 `U_` 版本。
 - 每个 kernel 的输出变量都标 `precise`。DXC 默认给浮点运算加 `fast` 标志，会重排 `a + 18b - 18c + 6d` 这类抵消式，误差可达几米。`precise` 会沿数据依赖和控制依赖反向传播到整段计算。
 - 三角函数用 `U_sin`/`U_cos`/`U_tan`/`U_acos`（Cephes 单精度实现，相对误差 1–2 ulp）。GPU 内建版本只保证绝对误差，小角度时有效位基本丢光；Unity.Mathematics 则是把 double 精度的 `System.Math` 结果转成 float。
@@ -202,15 +255,17 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 | `Refine.Palmsland` | 11,334 个节点实例的细分三角形数 | 各实例差的绝对值之和 ≤ 0.25% | 8,259,058 对 8,258,645，差 0.101% |
 | `Lanes.Scenarios` | 车道图（1,335 条车道，含 724 条连接线）和 178 处横道 | 逐位 | 0 误差 |
 | `Decals.Scenarios` | 2,086 个贴花条目：网格三角形逐个比，裁剪三角形按重心配对，再比顶点属性；另外强制所有条目走装不下时的退路再跑一遍 | 网格布局不同 ≤ 1%，三角形 ≤ 0.5%，顶点同几何；退路逐位一致 | 417,916 个网格三角形 0 不同；56,366 个裁剪三角形 23 个未配对；位置 0.013% 超 1 cm；颜色逐位；退路 0 不同 |
+| `Decals.Instances` | 同样的场景，条目画成实例：条带的顶点按 `M_RoadDecal` 的顶点着色器复算；连接线和横道按 `bFitted` 求高度（`RunDecalFitBlocking`），网格点按 `M_RoadDecalFitted` 的顶点着色器复算。连接线对 RoadLab 投影网格的每个点（实例的点，或少列时两点之间插值）；横道的点对 RoadLab 裁剪出的三角形；强制走候选表装不下的分支再求一遍 | 条带位置 0.05 cm 内；UV 与颜色 1e-3 内；连接线平面 0.01 cm、高度 0.06 cm 内，两点之间 0.56 cm 内，画不画逐个三角形与 RoadLab 相同；横道的点在裁剪三角形上（压在裁剪边上 1 cm 内也算），高度 0.06 cm 内；每个点都在其实例的包围盒里；两条分支的高度逐位相同 | 9,566 个实例（贴合网格 1 列 4,012 个、2 列 82、3 列 66、6 列 178）；条带最差 0.0044 cm；连接线 24.3 万个点，平面 0.0029 cm、高度 0.050 cm、两点之间 0.47 cm，34.3 万个三角形全同；横道 9,198 个点，103 个压在裁剪边上（最多出界 0.046 cm，`TryProject` 的重心余量），高度 0.050 cm |
 | `Splines.Basics` | 手画小路网：十字、立交、高差 1.5 m 的交叉、T 形、固定样条交叉、吸附、按长度和转角细分、合并、闭环、未知 prefab | 拓扑和统计逐项 | 全部符合 |
 | `Splines.Palmsland` | Palmsland 经 `ChainNetwork` 转成样条再建回：边和节点的数据、组合、GPU 几何；样条打乱先后再建 | 数据和组合逐个相同，GPU 几何没有超过 0.1 m 的值；打乱后边和节点逐个相同 | 5,667 条边转成 3,894 根样条（9,561 个点）；52 个值超过 1 cm，最大 2.7 cm |
 | `Splines.Actor` | actor 放在离原点几公里处并转 30°，建一次，平移后再建一次：两根样条建成 4 条路；再用代码挪一个样条点，下一次 `Tick` 自己重建 | 两个网格组件保持单位变换；路面包围盒含 4 个路端，中心离路口 < 5 m | 通过 |
 | `Splines.Alleys` | 小路与大路：横穿、斜穿、顺着压、立交 | 裁切段数，十字或 T 形接法，裁后的小路不进大路的覆盖范围 | 通过 |
-| `Tiles.Actor` | 3 条东西向、4 条南北向的路，整网建与分 tile 建；不改动重建；挪一个点；删一条路 | 路面、标线三角形与整网重建逐个相同；不改动时不重写 tile；改动只重写部分 tile，其余网格代数不变 | 通过 |
-| `Tiles.Batches` | 同一路网每批 2 个 tile 逐帧写完；改 tile 尺寸弄脏全部 tile，写了一批后再挪一个点 | 每批不超过 2 个 tile；写完后路面、标线三角形与整网重建逐个相同 | 8 个 tile 分 4 批，通过 |
+| `Tiles.Actor` | 3 条东西向、4 条南北向的路，整网建与分 tile 建；不改动重建；挪一个点；删一条路 | 路面三角形、标线实例（变换、数据、材质、优先级）与整网重建逐个相同；不改动时不重写 tile；改动只重写部分 tile，其余网格代数不变 | 通过 |
+| `Tiles.Batches` | 同一路网每批 2 个 tile 逐帧写完；改 tile 尺寸弄脏全部 tile，写了一批后再挪一个点 | 每批不超过 2 个 tile；写完后路面三角形、标线实例与整网重建逐个相同 | 8 个 tile 分 4 批，通过 |
+| `Tiles.Nanite` | 同一路网分 tile 建，逐帧推进到全部烘成 Nanite；挪一个点；1 MiB 预算下换 tile 尺寸从零建 | 每个 tile 有 Nanite 数据、GPU 网格全部释放；Nanite 的输入三角形在 GPU 三角形减去退化三角形与 GPU 三角形之间；包围盒与 GPU 顶点相差 1 cm 内；标线实例不变；编辑只让重写的 tile 回到 GPU 网格，再烘回去；预算下同时最多 2 个 GPU 网格 | 8 个 tile，68,882 个三角形（GPU 72,552 个，退化 5,688 个）；1 MiB 下同时只有 1 个 |
 | `Subgraph.Reach` | Palmsland（不带地形）整网建一次；取 192 条分散的路，各自只用周围 1–4 圈的路建子图 | 这条路的组合，以及边、两端节点和节点处的 GPU 几何，与整网逐位相同 | 1 圈 64/192，2 圈起 192/192 |
 | `Subgraph.Tiles` | Palmsland（带地形）按 256 m 分 tile，每个 tile 的路加两圈建子图 | tile 里每条路的输出指纹（边、两端节点几何、三个组合）与整网相同 | 771 个 tile，子图最多 92 条路；5,667 条路 0 不同 |
-| `Tiles.Subgraph` | 10 条东西向、10 条南北向的街（其中一条中路，最东一条有 owner），转 7°，96 m 的 tile：在西北角接一段支路；挪最西一条街的北端（整条街都斜了）；删一条街；加一条斜路 | 每次编辑后路面、标线三角形与整网重建逐个相同；只重写部分 tile；接支路时两个子图加起来也比整网少，最东那条有 owner 的街 tile 网格不变；编辑停下后预览按整网重做，车道数与整网相同 | 通过；接支路重写 2 个 tile（共 37 个），子图共 54 条路（整网 221 条） |
+| `Tiles.Subgraph` | 10 条东西向、10 条南北向的街（其中一条中路，最东一条有 owner），转 7°，96 m 的 tile：在西北角接一段支路；挪最西一条街的北端（整条街都斜了）；删一条街；加一条斜路 | 每次编辑后路面三角形、标线实例与整网重建逐个相同；只重写部分 tile；接支路时两个子图加起来也比整网少，最东那条有 owner 的街 tile 网格不变；编辑停下后预览按整网重做，车道数与整网相同 | 通过；接支路重写 2 个 tile（共 37 个），子图共 54 条路（整网 221 条） |
 | `City.Alleys` | 区域里两块预留位，一块横跨中部 | 小路不进预留位外扩 `Clearance` 的范围、不出区域；同输入同结果；去掉预留位后会穿过它们；换种子结果不同 | 通过 |
 | `City.AlleyJunctions` | `L_CityDemo` 区域的小路建成路网 | 没有断头 | 40 个节点、57 条边，0 个断头 |
 | `City.Lots` | 两条相交的街和一块预留位；在 150 m 外加一条街，再去掉 | 地块离路边至少半个退让、不压预留位、互不重叠；加街后 50 m 外的地块身份和形状不变，新地块只出现在新街旁；去掉后复原 | 通过 |
@@ -220,7 +275,9 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 
 `Refine.Palmsland` 有 21.6% 的实例三角形数不同，这在噪声范围内：扰动版 C# 自己就有 27% 的实例不同。`Decals.Scenarios` 里 `elevated-cross` 的裁剪三角形只报告不计入预算（1,504 个里 615 个未配对），原因是它的几何本身处在平局上，见下文。
 
-渲染对照：`RoadNetworkShots.py` 在 `L_Palmsland` 里生成整张 Palmsland（5,667 条路、2,115 个组合、1,476 万顶点、1,330 万三角形、48,577 个贴花条目、1,031 万个标线三角形），与静态导入的 `Roads` 加 `Markings` 层在同机位对比。近景（4 处高架和立交，以及 2 个带横道的城市路口）平均像素差 0.03–0.29 级（满量程 255），差超过 16 级的像素不到 0.04%。全景约 4.6 级，差在高架的投影（GPU 网格的影子更长），只比路面时也是这个数。
+渲染对照：`RoadNetworkShots.py` 在 `L_Palmsland` 里生成整张 Palmsland（5,667 条路、2,115 个组合、1,476 万顶点、1,330 万三角形、48,577 个贴花条目、1,031 万个标线三角形），与静态导入的 `Roads` 加 `Markings` 层在同机位对比。近景（4 处高架和立交，以及 2 个带横道的城市路口）平均像素差 0.03–0.29 级（满量程 255），差超过 16 级的像素不到 0.04%。全景约 4.6 级，差在高架的投影（GPU 网格的影子更长），只比路面时也是这个数。这是 10-28 之前标线还是 GPU 网格时的结果。
+
+改成实例化贴花并烘成 Nanite 后，在 `L_PalmslandSplines` 同机位对比 Nanite 版与 GPU 网格版：路口近景平均像素差 0.82 级，差超过 16 级的像素占 0.29%。路口中间的车辙连接线若直接沿曲线平铺，会有一部分沉到路面下（金标场景最多 27.3 cm）被深度测试挡掉，显出块状明暗；现在网格点都落在路面上。
 
 重建耗时：Palmsland 暖启动整次重建 1.1–1.4 s。其中快照约 140 ms，建图与组合约 25 ms，组合网格约 230 ms，细分计数（含阻塞回读）150–300 ms，车道图与贴花条目约 50 ms；GPU 上路面那张图约 200 ms，贴花约 70 ms。完整编辑器里刚打开 `L_Palmsland` 时，第一次重建要等渲染线程处理完静态导入的几千个 actor，细分计数这一步可达 13 s。`SplineNetworkShots.py` 手画的 5 根样条建成 16 条路，暖重建约 50 ms；第一次还要读 prefab 数据和地形，约 0.5 s。
 
@@ -236,6 +293,7 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 - `Scripts/CS2Road/SplineNetworkShots.py`：在 `L_Palmsland` 离城 900 m 的空地上用样条画一个小路网（十字、T 形、立交、3 m 短段），路网只借 Palmsland 快照的地形，从 5 个机位拍到 `Saved/CS2RoadSplineShots`。运行方式同上。
 - `Scripts/CS2Road/MakeCityDemo.py`：生成示例关卡 `L_CityDemo`，见[城市布局](#城市布局)。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖。
 - `Scripts/CS2Road/MakePalmslandSplines.py`：把 Palmsland 快照转成样条，存成 `L_PalmslandSplines`，见[从快照转换](#从快照转换)。`CS2ROAD_NETWORK` 可换快照。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖。
+- `Scripts/CS2Road/MakeRoadDecalMaterial.py`：生成贴花母材质 `/PCGPlugins/CSRoadNet/M_RoadDecal` 和 `M_RoadDecalFitted`，用无头编辑器的 `-ExecutePythonScript` 运行，已存在时就地重建。材质着色器按下标读的实例数据布局见 `CSRoadDecalInstances.h`，两边要一起改。
 - `Scripts/CS2Road/CityDemoShots.py`：打开 `L_CityDemo`，给整网、分 tile、挪大路、挪特殊建筑计时，再从 4 个机位拍到 `Saved/CS2CityShots`。用完整编辑器运行，不存盘。
 - `Scripts/CS2Road/LocalUpdateTiming.py`：把 Palmsland 转成样条，开批量房子，给整网和分 tile 重建计时；从零建时每帧一批，直到没有积压。最后打开路网自己的 `Tick`、等编辑停下，预览整网重做的耗时记在日志里。结果写到 `Saved/CS2LocalUpdateTiming_<tile>_<batch>.json`。`CS2ROAD_TILE` 设 tile 尺寸（米，默认 256），`CS2ROAD_BATCH` 设每批 tile 数（默认 16）。要让帧在批与批之间过去，所以用完整编辑器的 `-ExecCmds="py <脚本>"` 运行，不存盘；再加上文[样条路网](#样条路网)里那个 `-ini` 参数，编辑器在后台时路网才会 tick，最后一步才测得到。
 

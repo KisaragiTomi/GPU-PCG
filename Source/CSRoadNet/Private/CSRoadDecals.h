@@ -92,6 +92,10 @@ struct FGpuDecalInput
 {
 	// Receiver slots per chunk box (CSRoadDecal.usf ChunkBoxes): the decal passes' group size.
 	static constexpr uint32 ReceiverChunk = 64;
+	// A fitted grid's columns (CSRoadDecal.usf RD_FIT_COLUMNS, a projected grid's), and the most a
+	// crosswalk's rows lie apart along it (metres).
+	static constexpr uint32 FitColumns = 6;
+	static constexpr float FitRowLength = 0.5f;
 
 	// Built here unless a scope shares its lane graph.
 	FRoadLanes Lanes;
@@ -115,6 +119,15 @@ struct FGpuDecalInput
 	// Tests: every grid and crosswalk takes the way of a candidate list that does not fit
 	// (CSRoadDecal.usf), which must give the same decals.
 	bool bForceFallback = false;
+	// The items alone: no receivers, so the mesh input need not write the instances at the decals'
+	// nodes, and the decal mesh is not laid out.
+	bool bItemsOnly = false;
+	// The receivers and, in place of the decal mesh's layout, the heights the network actor fits its
+	// connector and crosswalk instances to (CSRoadDecalInstances.h, CSRoadDecal.usf DecalFitCS): a
+	// projected or clipped item's VertexOffset is its first of NumFitHeights, its grid Rows + 1 rows
+	// of FitColumns + 1 (a crosswalk's Rows made a row per FitRowLength along it or less).
+	bool bFitted = false;
+	uint32 NumFitHeights = 0;
 
 	// Mesh: the road mesh input after ApplyRefinement (receiver segments index its instances).
 	// AssetDirectory: where RoadDecals.Material looks for a surface's base-colour texture; surfaces
@@ -126,5 +139,6 @@ struct FGpuDecalInput
 
 private:
 	bool Layout(FString& OutError);
+	bool FitLayout(FString& OutError);
 };
 }

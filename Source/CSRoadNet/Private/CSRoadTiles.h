@@ -85,8 +85,9 @@ private:
 	bool bValid = false;
 };
 
-// The mesh instances a tile writes: its roads' edge and node instances, drawn; and, as context for
-// the decal receivers, the edge instance and the node instance there of every other road at their
-// nodes. RoadOfEntity: FGraph::Roads index per entity (INDEX_NONE for nodes).
-void TileInstances(const FGraph& Graph, const TArray<int32>& RoadOfEntity, const TArray<int32>& Roads, TArray<FGpuInstanceRef>& OutDrawn, TArray<FGpuInstanceRef>& OutContext);
+// The mesh instances a tile writes: its roads' edge and node instances, drawn; and (OutContext) as the
+// receivers of its fitted decals, the edge instance and the node instance there of every other road at
+// their nodes. Roads: FGraph::Roads indices; RoadOfEntity: FGraph::Roads index per entity (INDEX_NONE
+// for nodes).
+void TileInstances(const FGraph& Graph, const TArray<int32>& RoadOfEntity, const TArray<int32>& Roads, TArray<FGpuInstanceRef>& OutDrawn, TArray<FGpuInstanceRef>* OutContext);
 }

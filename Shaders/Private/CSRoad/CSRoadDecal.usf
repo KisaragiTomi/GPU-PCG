@@ -119,6 +119,8 @@ RWBuffer<uint> RW_Colors;
 RWBuffer<uint> RW_Indices;
 RWBuffer<uint> RW_MaterialIds;
 RWStructuredBuffer<float> DebugVertices;
+// DecalFitCS's heights (FGpuDecalInput::bFitted).
+RWStructuredBuffer<float> FitHeightsRW;
 
 uint RD_GroupIndex(uint3 GroupId, uint GroupsX) { return GroupId.y * GroupsX + GroupId.x; }
 
@@ -676,6 +678,92 @@ void DecalGridCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 			bool bKeep = ((RD_Valid[c.x / 32u] >> (c.x % 32u)) & 1u) != 0u && ((RD_Valid[c.y / 32u] >> (c.y % 32u)) & 1u) != 0u && ((RD_Valid[c.z / 32u] >> (c.z % 32u)) & 1u) != 0u;
 			RD_WriteTriangle(item.IndexOffset + (cell * 2u + k) * 3u, item.VertexOffset, bKeep ? c : c.xxx, item.MaterialSlot);
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fitted grids (the network actor's instanced decals, CSRoadDecalInstances.h)
+// ---------------------------------------------------------------------------------------------
+
+// Columns of a fitted grid (FGpuDecalInput::FitColumns): a projected grid's.
+#define RD_FIT_COLUMNS 6u
+
+// One group per item of a fitted input; strips have none. The heights TryProject lands the item's
+// grid on (Unity metres, NaN where no receiver takes a vertex), Rows + 1 rows of RD_FIT_COLUMNS + 1
+// from VertexOffset on. A junction connector's grid is DecalGridCS's, vertex for vertex; a
+// crosswalk's spans the footprint ClipCS clips, straight between its curve's ends, each vertex taking
+// the receiver closest to the footprint's height there.
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void DecalFitCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint itemIndex = RD_GroupIndex(GroupId, ItemGroupsX);
+	if (itemIndex >= NumItems) return;
+	FDecalItem item = Items[itemIndex];
+	if (item.Kind == RD_STRIP) return;
+	bool bClip = item.Kind == RD_CLIPPED;
+	uint stride = RD_FIT_COLUMNS + 1u;
+	uint count = item.Rows;
+	uint numVertices = (count + 1u) * stride;
+
+	float3 a = item.Curve.a;
+	float3 dd = item.Curve.d;
+	float3 side = normalizesafe(float3(dd.z - a.z, 0.0f, a.x - dd.x));
+	float2 lo;
+	float2 hi;
+	if (bClip)
+	{
+		float3 reach = side * item.Width * 0.5f;
+		lo = U_min(U_min((a - reach).xz, (a + reach).xz), U_min((dd - reach).xz, (dd + reach).xz)) - 0.01f;
+		hi = U_max(U_max((a - reach).xz, (a + reach).xz), U_max((dd - reach).xz, (dd + reach).xz)) + 0.01f;
+	}
+	else
+	{
+		lo = U_min(U_min(item.Curve.a.xz, item.Curve.b.xz), U_min(item.Curve.c.xz, item.Curve.d.xz)) - item.Width * 0.5f - 0.01f;
+		hi = U_max(U_max(item.Curve.a.xz, item.Curve.b.xz), U_max(item.Curve.c.xz, item.Curve.d.xz)) + item.Width * 0.5f + 0.01f;
+	}
+	FItemArea area = RD_MakeArea(lo, hi);
+	bool bPerRun = !RD_GatherCandidates(item.Receiver, area, GroupIndex) || ForceFallback != 0u;
+	if (bPerRun && GroupIndex == 0u) InterlockedAdd(StatsRW[1], 1u);
+
+	for (uint start = 0u; start < numVertices; start += THREADGROUP_SIZE)
+	{
+		uint vertex = start + GroupIndex;
+		bool bActive = vertex < numVertices;
+		uint i = min(vertex, numVertices - 1u) / stride;
+		uint column = vertex % stride;
+		float t = float(i) / float(count);
+		float across = float(column) / float(RD_FIT_COLUMNS);
+		precise float3 position;
+		if (bClip)
+		{
+			position = U_lerp(a, dd, t) + side * ((across - 0.5f) * item.Width);
+		}
+		else
+		{
+			// As DecalGridCS, to the bit.
+			precise float3 p = MU_Position(item.Curve, t);
+			precise float3 tangent = normalizesafe(MU_Tangent(item.Curve, t));
+			float3 right = float3(tangent.z, 0.0f, 0.0f - tangent.x);
+			position = p + right * (across - 0.5f) * item.Width;
+		}
+		FProjection state = RD_StartProjection(position);
+		if (!bPerRun)
+		{
+			if (bActive) RD_ProjectOver(item.Receiver, position, area, state);
+		}
+		else
+		{
+			FItemArea run = RD_GroupArea(bActive ? float4(position.xz, position.xz) : RD_EMPTY_BOX, GroupIndex);
+			uint2 cursor = uint2(0u, 0u);
+			bool bMore = true;
+			while (bMore)
+			{
+				bMore = RD_GatherRun(item.Receiver, run, GroupIndex, cursor);
+				if (bActive) RD_ProjectOver(item.Receiver, position, run, state);
+				GroupMemoryBarrierWithGroupSync();
+			}
+		}
+		if (bActive) FitHeightsRW[item.VertexOffset + vertex] = state.bFound != 0u ? state.Y : asfloat(0x7FC00000u);
 	}
 }
 

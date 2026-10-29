@@ -8,6 +8,7 @@
 #include "CSRoadSplineActor.h"
 #include "CSRoadSplineNetwork.h"
 #include "CSRoadTestUtils.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/World.h"
 #include "Misc/Paths.h"
 #include "Tests/AutomationEditorCommon.h"
@@ -563,12 +564,13 @@ bool FCSRoadSplinesActorTest::RunTest(const FString& Parameters)
 		const FString Case = bMoved ? TEXT("moved") : TEXT("placed");
 		if (bMoved) Network->SetActorLocation(Network->GetActorLocation() + FVector(10000.0, 5000.0, 0.0));
 		Network->Rebuild();
+		Network->FinishDecalFits();
 		TestEqual(Case + TEXT(": error"), Network->LastError, FString());
 		TestEqual(Case + TEXT(": splines"), Network->NumSplines, 2);
 		TestEqual(Case + TEXT(": roads"), Network->NumRoads, 4);
-		TestTrue(Case + TEXT(": markings"), Network->NumMarkingTriangles > 0);
+		TestTrue(Case + TEXT(": markings"), Network->NumMarkingInstances > 0 && Network->MarkingDecals.Num() > 0);
 		TestTrue(Case + TEXT(": road mesh at identity"), Network->RoadMesh->GetComponentTransform().Equals(FTransform::Identity));
-		TestTrue(Case + TEXT(": marking mesh at identity"), Network->MarkingMesh->GetComponentTransform().Equals(FTransform::Identity));
+		for (const UInstancedStaticMeshComponent* Decals : Network->MarkingDecals) TestTrue(Case + TEXT(": decals at identity"), Decals && Decals->GetComponentTransform().Equals(FTransform::Identity));
 		const FBox Bounds = Network->RoadMesh->Bounds.GetBox();
 		for (const FVector& End : Ends) TestTrue(Case + TEXT(": bounds hold the road ends"), Bounds.IsInside(Network->GetActorTransform().TransformPosition(End)));
 		TestTrue(Case + TEXT(": bounds centred on the crossing"), FVector::Dist2D(Bounds.GetCenter(), Network->GetActorLocation()) < 500.0);

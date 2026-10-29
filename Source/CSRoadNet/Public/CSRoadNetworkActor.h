@@ -1,8 +1,9 @@
 // A Cities: Skylines II road network built in UE: compositions on the CPU, then the GeometrySystem
 // jobs, the composition parameters, RoadLab's junction seams and node refinement and the mesh
 // deformation on the GPU, straight into a UCSMesh; the lane markings and crosswalks (RoadLab's
-// decals) are projected onto that surface into a second one. The roads come from a snapshot file
-// or from spline roads (ACSRoadSplineActor), which a snapshot can also be converted into.
+// decals) are instanced mesh decals laid along their curves (CSRoadDecalInstances.h). The roads
+// come from a snapshot file or from spline roads (ACSRoadSplineActor), which a snapshot can also be
+// converted into.
 #pragma once
 
 #include "CoreMinimal.h"
@@ -10,19 +11,21 @@
 #include "GameFramework/Actor.h"
 #include "CSRoadNetworkActor.generated.h"
 
-class FRHIGPUBufferReadback;
 class ULevel;
 class UCSMesh;
 class UCSMeshRenderComponent;
 class UMaterialInterface;
+class UMaterialInstanceDynamic;
 class UInstancedStaticMeshComponent;
 class UStaticMesh;
+class UStaticMeshComponent;
 struct FCSRoadNetworkPreview;
 namespace CSRoad
 {
 class FAssets;
+class FDecalFitReadback;
+class FRoadBake;
 struct FGpuDecalInput;
-struct FPooledDecalReceivers;
 struct FGpuRoadMeshInput;
 struct FPooledGeometry;
 struct FRoadSpec;
@@ -132,7 +135,7 @@ struct FCSCityBuildingTile
 	int32 Buildings = 0;
 };
 
-/** One tile of a network built in tiles: the road and decal meshes of the roads whose middle lies in it. */
+/** One tile of a network built in tiles: the road mesh and the decals of the roads whose middle lies in it. */
 USTRUCT()
 struct FCSRoadTile
 {
@@ -142,18 +145,34 @@ struct FCSRoadTile
 	TObjectPtr<UCSMeshRenderComponent> Road;
 
 	UPROPERTY(Transient)
-	TObjectPtr<UCSMeshRenderComponent> Markings;
-
-	UPROPERTY(Transient)
 	TObjectPtr<UCSMesh> RoadMesh;
 
+	/** The decals as instanced mesh decals, one component per material slot and priority. */
 	UPROPERTY(Transient)
-	TObjectPtr<UCSMesh> MarkingMesh;
+	TArray<TObjectPtr<UInstancedStaticMeshComponent>> Decals;
+
+	// The heights the decals of each write since the last drawn ones are fitted to, oldest first: the
+	// latest to land draws, and those before it go.
+	TArray<TSharedPtr<CSRoad::FDecalFitReadback>> DecalFits;
+
+	/** The road baked into a Nanite mesh (bBakeNanite): drawn in place of RoadMesh, which is then freed. */
+	UPROPERTY(Transient)
+	TObjectPtr<UStaticMeshComponent> Nanite;
+
+	/** What a bake in progress builds. */
+	UPROPERTY(Transient)
+	TObjectPtr<UStaticMesh> Baking;
+
+	TSharedPtr<CSRoad::FRoadBake> Bake;
 
 	int32 Roads = 0;
 	int32 Vertices = 0;
 	int32 Triangles = 0;
-	int32 MarkingTriangles = 0;
+	int32 DecalInstances = 0;
+	// When RoadMesh was last written: a bake starts once it has stood a moment.
+	double WrittenSeconds = 0.0;
+	// RoadMesh as written could not be baked: it stays until written again.
+	bool bBakeFailed = false;
 };
 
 UCLASS()
@@ -198,9 +217,18 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CS2 Road")
 	TObjectPtr<UMaterialInterface> FallbackMaterial;
 
-	/** Lane markings, tire tracks and crosswalks: RoadLab's decals, drawn with the M_CS2 decal materials. */
+	/** Lane markings, tire tracks and crosswalks: RoadLab's decals, drawn as instanced mesh decals with DecalMaterial
+	 *  and the albedo and tint of each surface's M_CS2 material. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road")
 	bool bBuildMarkings = true;
+
+	/** Lays a unit strip along a lane decal's curve (Scripts/CS2Road/MakeRoadDecalMaterial.py). */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (EditCondition = "bBuildMarkings"))
+	TSoftObjectPtr<UMaterialInterface> DecalMaterial;
+
+	/** Lays a unit grid on the surface along a junction connector's or crosswalk's curve, at the heights found for it. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (EditCondition = "bBuildMarkings"))
+	TSoftObjectPtr<UMaterialInterface> FittedDecalMaterial;
 
 	/** Draw the roads in square tiles of TileSize and, after an edit, rebuild only the tiles whose roads came out
 	 *  different, or meet such a road (or a removed one) at a node. The graph and the GPU geometry still cover
@@ -219,9 +247,27 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Local Update", meta = (ClampMin = "0"))
 	int32 MaxTilesPerBatch = 16;
 
+	/** Bake each road tile into a Nanite mesh once it has stood unchanged for a moment, and draw that in place of its GPU
+	 *  mesh, which is then freed (editor only). A tile an edit rewrites draws its GPU mesh again until the new bake is in. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Local Update", meta = (EditCondition = "bLocalUpdate"))
+	bool bBakeNanite = true;
+
+	/** Video memory the GPU meshes of the tiles not yet baked may hold (MiB): past it, tiles wait to be built until bakes
+	 *  free theirs. Counts their streams as the pools hand them out and their ray tracing BLAS. 0: no limit. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Local Update", meta = (ClampMin = "0", DisplayName = "GPU Mesh Budget (MiB)", EditCondition = "bLocalUpdate && bBakeNanite"))
+	int32 GpuMeshBudget = 200;
+
 	/** Tiles with roads. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumTiles = 0;
+
+	/** Tiles drawn from their Nanite bake. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 NumNaniteTiles = 0;
+
+	/** What the tiles' GPU meshes hold now, as GpuMeshBudget counts it (MiB). */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats", meta = (DisplayName = "GPU Mesh MiB"))
+	float GpuMeshMiB = 0.0f;
 
 	/** Tiles the last rebuild wrote or removed. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
@@ -363,9 +409,9 @@ public:
 	UPROPERTY(VisibleAnywhere, Category = "CS2 Road")
 	TObjectPtr<UCSMeshRenderComponent> RoadMesh;
 
-	/** The decals; no shadows, kept out of ray tracing (they float 2 cm over the road). */
-	UPROPERTY(VisibleAnywhere, Category = "CS2 Road")
-	TObjectPtr<UCSMeshRenderComponent> MarkingMesh;
+	/** The decals of a whole build, one component per material slot and priority (tiles have their own). */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road")
+	TArray<TObjectPtr<UInstancedStaticMeshComponent>> MarkingDecals;
 
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumRoads = 0;
@@ -380,9 +426,9 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumTriangles = 0;
 
-	/** Decal triangles written, dropped (off-surface) grid cells included as degenerate ones. */
+	/** Decal instances drawn: a decal takes one per CSRoad::DecalStripRows rows. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
-	int32 NumMarkingTriangles = 0;
+	int32 NumMarkingInstances = 0;
 
 	/** Whole rebuild, game thread: file loads, compositions, GPU passes and the flush. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
@@ -410,6 +456,9 @@ public:
 	// Rebuilds on the next tick: spline roads call it as they change, many times a frame.
 	void RequestRebuild();
 
+	// Tests: waits for the GPU until every decal fit has landed, and draws them.
+	void FinishDecalFits();
+
 	// The road prefabs of the network's asset directory (the default one without a network).
 	static TArray<FString> RoadPrefabNames(const ACSRoadNetworkActor* Network);
 	// The level's network building from splines if it has exactly one, which also takes the level's
@@ -434,8 +483,20 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UCSMesh> Mesh;
 
+	// The unit meshes the decal instances draw, and DecalMaterial or FittedDecalMaterial per decal
+	// surface (keyed "<surface>" and "<surface>|fitted").
 	UPROPERTY(Transient)
-	TObjectPtr<UCSMesh> Markings;
+	TObjectPtr<UStaticMesh> DecalStrip;
+
+	// By columns.
+	UPROPERTY(Transient)
+	TMap<int32, TObjectPtr<UStaticMesh>> DecalGrids;
+
+	// MarkingDecals' heights on their way, as a tile's DecalFits.
+	TArray<TSharedPtr<CSRoad::FDecalFitReadback>> MarkingFits;
+
+	UPROPERTY(Transient)
+	TMap<FString, TObjectPtr<UMaterialInstanceDynamic>> DecalSurfaces;
 
 	bool bRebuildRequested = false;
 	TUniquePtr<FCSRoadNetworkPreview> Preview;
@@ -461,19 +522,37 @@ private:
 
 	TUniquePtr<CSRoad::FTileState> TileState;
 
-	// Where one road mesh and its decal mesh go, and what came of them.
+	// The rebuild asked for only finishes pending tiles (no edit since): it waits until the budget has
+	// room for the next tile (NextTileBytes, as the last build found it), and builds from the last
+	// build's spline network (LastSplines, PreviewRoads) without gathering the splines again.
+	bool bPendingOnly = false;
+	bool bReuseNetwork = false;
+	int64 NextTileBytes = 0;
+	TSharedPtr<const TArray<CSRoad::FSplineRoad>> LastSplines;
+	// Moves the tiles' Nanite bakes on, a little game-thread time a tick; a finished one replaces its
+	// tile's GPU mesh.
+	void TickBakes();
+	// NumNaniteTiles and GpuMeshMiB as the tiles stand.
+	void UpdateBakeStats();
+	// What a tile's GPU mesh holds as GpuMeshBudget counts it, and all of them.
+	static int64 TileGpuBytes(const FCSRoadTile& Tile);
+	int64 GpuMeshBytes() const;
+	// What a tile of Roads roads will hold: as its last build (Known), else TrianglesPerRoad a road.
+	static int64 EstimateTileBytes(const FCSRoadTile* Known, int32 Roads, double TrianglesPerRoad);
+	// GpuMeshBudget in bytes; MAX_int64 when it does not apply.
+	int64 GpuMeshBudgetBytes() const;
+
+	// Where one road mesh goes, and what it took. With Decals (a fitted input over the road mesh
+	// input), the same graph finds the heights their connectors and crosswalks lie at: Fit, unless the
+	// decals have none.
 	struct FMeshTargets
 	{
 		UCSMeshRenderComponent* Road = nullptr;
 		TObjectPtr<UCSMesh>* RoadMesh = nullptr;
-		UCSMeshRenderComponent* Markings = nullptr;
-		TObjectPtr<UCSMesh>* MarkingMesh = nullptr;
-		int32 MarkingTriangles = 0;
-		// Set when only the decals failed: the road mesh stands.
-		FString MarkingError;
+		const CSRoad::FGpuDecalInput* Decals = nullptr;
+		TSharedPtr<CSRoad::FDecalFitReadback> Fit;
 		double AllocationMs = 0.0;
 		double RoadMs = 0.0;
-		double MarkingMs = 0.0;
 	};
 
 	FString ResolveAssetDirectory() const;
@@ -483,15 +562,25 @@ private:
 	// BuildRoads in tiles, from sub-graphs of the roads near what changed (CSRoadTiles.h).
 	bool BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoad::FRoadSpec>& Specs, const TArray<CSRoad::FSavedNode>& Nodes, bool bLeftHand,
 		const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FSavedTerrain* Terrain, bool bMarkings, FString& OutError);
-	// Allocates the targets and records the road mesh (and the decals, when Decals has items) into them,
-	// on the build's geometry when SharedGeometry holds it (else the graph runs it again).
-	bool WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry, const CSRoad::FPooledGeometry& SharedGeometry, const CSRoad::FGpuRoadMeshInput& MeshInput, CSRoad::FGpuDecalInput* Decals,
+	// Allocates the target and records the road mesh into it, on the build's geometry when
+	// SharedGeometry holds it (else the graph runs it again).
+	bool WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry, const CSRoad::FPooledGeometry& SharedGeometry, const CSRoad::FGpuRoadMeshInput& MeshInput,
 		const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FAssets& Assets, FMeshTargets& Targets, FString& OutError);
-	// The decal mesh: reads back the crosswalk clip counts, lays the decals out and draws them onto
-	// the road mesh just built (its receivers gathered into Receivers).
-	bool BuildMarkingMesh(CSRoad::FGpuDecalInput& Decals, const CSRoad::FGpuRoadMeshInput& MeshInput, const TMap<FString, UMaterialInterface*>& ByBaseColor,
-		const CSRoad::FAssets& Assets, const CSRoad::FPooledDecalReceivers& Receivers, FRHIGPUBufferReadback* ClipReadback, UCSMesh* RoadObject, FMeshTargets& Targets,
-		const FMatrix44f& LocalToWorld, const FMatrix44f& WorldToLocal, const FBox& WorldBounds, FString& OutError);
+	// The decals' instances into Components (made or dropped to fit, named Name_<n>); returns how many.
+	// The connectors and crosswalks need FitHeights (else they are left out).
+	int32 WriteDecals(const CSRoad::FGpuDecalInput& Decals, const TArray<float>* FitHeights, TArray<TObjectPtr<UInstancedStaticMeshComponent>>& Components, const FString& Name);
+	// Decals written with Write: drawn now unless Fit holds heights still to land (queued in Fits).
+	int32 DrawDecals(const CSRoad::FGpuDecalInput& Decals, const TSharedPtr<CSRoad::FDecalFitReadback>& Fit, TArray<TSharedPtr<CSRoad::FDecalFitReadback>>& Fits,
+		TArray<TObjectPtr<UInstancedStaticMeshComponent>>& Components, const FString& Name);
+	// Draws whichever queued decals have landed; the latest of them wins. Returns whether any did.
+	bool TickDecalFits(TArray<TSharedPtr<CSRoad::FDecalFitReadback>>& Fits, TArray<TObjectPtr<UInstancedStaticMeshComponent>>& Components, const FString& Name, int32& OutInstances);
+	void TickAllDecalFits();
+	// DecalMaterial and FittedDecalMaterial with the albedo and tint of each of the decals' surfaces'
+	// M_CS2 materials, made now for when the decals draw (MissingMarkingSurfaces: those without).
+	void ResolveDecalMaterials(const CSRoad::FGpuDecalInput& Decals, const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FAssets& Assets);
+	// As resolved for a surface; null when it could not be.
+	UMaterialInterface* DecalSurfaceMaterial(const FString& Surface, bool bFitted) const;
+	static void DestroyComponents(TArray<TObjectPtr<UInstancedStaticMeshComponent>>& Components);
 	// The tile's components, made when it first gets roads.
 	FCSRoadTile& EnsureTile(const FIntPoint& Key);
 	void RemoveTile(const FIntPoint& Key);

@@ -5,7 +5,7 @@
 
 Builds the Palmsland snapshot into an ACSRoadNetworkActor, then captures every view twice from
 the same SceneCapture2D: the static import (Scripts/ImportCS2Roads.py) and the GPU meshes. By
-default both carry their markings (the static Markings layer against the actor's decal mesh);
+default both carry their markings (the static Markings layer against the actor's mesh decals);
 CS2ROAD_SHOTS=roads compares the road surfaces alone. Needs the real editor (in
 UnrealEditor-Cmd the captures come out black). Nothing is saved.
 
@@ -39,7 +39,7 @@ road = ACTORS.spawn_actor_from_class(road_class, unreal.Vector(0, 0, 0))
 road.set_actor_label("CS2 GPU Roads")
 road.set_editor_property("network_file", unreal.FilePath(NETWORK), notify_mode=unreal.PropertyAccessChangeNotifyMode.NEVER)
 road.rebuild()
-stats = {k: road.get_editor_property(k) for k in ("num_roads", "num_vertices", "num_triangles", "num_marking_triangles", "build_milliseconds", "last_error")}
+stats = {k: road.get_editor_property(k) for k in ("num_roads", "num_vertices", "num_triangles", "num_marking_instances", "build_milliseconds", "last_error")}
 stats["missing_atlases"] = [str(a) for a in road.get_editor_property("missing_atlases")]
 stats["missing_marking_surfaces"] = [str(a) for a in road.get_editor_property("missing_marking_surfaces")]
 unreal.log("CS2ROADSHOT build " + json.dumps(stats))
@@ -78,7 +78,7 @@ comp.set_editor_property("always_persist_rendering_state", True)
 # Per shot: the actors and the components the capture leaves out.
 static_hidden = [road] + ([] if MARKINGS else static_markings)
 gpu_hidden = static_roads + static_markings
-gpu_hidden_components = [] if MARKINGS else [road.get_editor_property("marking_mesh")]
+gpu_hidden_components = [] if MARKINGS else list(road.get_editor_property("marking_decals"))
 shots = []
 for name, location, target in views:
     rotation = unreal.MathLibrary.find_look_at_rotation(location, target)

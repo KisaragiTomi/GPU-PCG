@@ -22,7 +22,7 @@ LEVEL = "/PCGPlugins/CSRoadNet/L_PalmslandSplines"
 TEMPLATE = "/Engine/Maps/Templates/Template_Default"
 NETWORK = os.environ.get("CS2ROAD_NETWORK", r"D:/MyProject/CitiesSkylines-Road2-C#/Artifacts/public-saves/palmsland-3/network.json")
 NEVER = unreal.PropertyAccessChangeNotifyMode.NEVER
-STATS = ("num_splines", "num_roads", "num_vertices", "num_triangles", "num_marking_triangles", "build_milliseconds", "last_error")
+STATS = ("num_splines", "num_roads", "num_vertices", "num_triangles", "num_marking_instances", "build_milliseconds", "last_error")
 
 ASSETS = unreal.EditorAssetLibrary
 ACTORS = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)

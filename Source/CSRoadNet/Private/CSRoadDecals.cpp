@@ -177,6 +177,7 @@ bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGp
 	TMap<int32, uint32> ReceiverOfNode;
 	auto Receiver = [&](int32 Node) -> uint32
 	{
+		if (bItemsOnly) return 0u;
 		if (const uint32* Known = ReceiverOfNode.Find(Node)) return *Known;
 		const uint32 Index = uint32(ReceiverNodes.Add(Node));
 		ReceiverOfNode.Add(Node, Index);
@@ -304,12 +305,38 @@ bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGp
 		Block++;
 	}
 	NumBlocks = Block;
+	if (bItemsOnly) return true;
 	if (MissingSlot != INDEX_NONE)
 	{
 		OutError = FString::Printf(TEXT("The road mesh input does not write mesh instance %d of road %d, which a decal receiver needs"), MissingSlot % 3, MissingSlot / 3);
 		return false;
 	}
-	return Layout(OutError);
+	return bFitted ? FitLayout(OutError) : Layout(OutError);
+}
+
+bool FGpuDecalInput::FitLayout(FString& OutError)
+{
+	uint64 Heights = 0;
+	for (FGpuDecalItem& Item : Items)
+	{
+		Item.VertexOffset = 0;
+		Item.IndexOffset = 0;
+		if (EDecalKind(Item.Kind) == EDecalKind::Strip) continue;
+		if (EDecalKind(Item.Kind) == EDecalKind::Clipped)
+		{
+			const double Along = math::distance(Item.Curve.a, Item.Curve.d);
+			Item.Rows = uint32(FMath::Clamp(static_cast<int32>(std::ceil(Along / double(FitRowLength))), 1, 400));
+		}
+		Item.VertexOffset = uint32(FMath::Min(Heights, uint64(MAX_uint32)));
+		Heights += (uint64(Item.Rows) + 1) * (FitColumns + 1);
+	}
+	if (Heights > uint64(MAX_int32))
+	{
+		OutError = FString::Printf(TEXT("The decals' fitted grids need %llu heights"), Heights);
+		return false;
+	}
+	NumFitHeights = uint32(Heights);
+	return true;
 }
 
 bool FGpuDecalInput::ApplyClipCounts(const TArray<uint32>& Triangles, FString& OutError)

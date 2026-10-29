@@ -61,7 +61,7 @@ road("Side Street", "Small Road", [(8000, 50), (8000, 6000), (12000, 12000)])
 road("Highway", "Highway Twoway - 2 lanes", [(-8000, -12000), (-8000, 12000)], height=1200.0)
 road("Short Segment Street", "Small Road", [(-15000, -8000), (-14700, -8000), (-2000, -8000)])
 network.rebuild()
-stats = {k: network.get_editor_property(k) for k in ("num_splines", "num_roads", "num_vertices", "num_triangles", "num_marking_triangles", "build_milliseconds", "last_error")}
+stats = {k: network.get_editor_property(k) for k in ("num_splines", "num_roads", "num_vertices", "num_triangles", "num_marking_instances", "build_milliseconds", "last_error")}
 unreal.log("CS2SPLINESHOT build " + json.dumps(stats))
 
 

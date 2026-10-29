@@ -97,7 +97,7 @@ def build():
     road("Ring Link", "Small Road", [(50, -8500, 0), (2000, -8500, 0)])
 
     network.rebuild()
-    stats = {k: network.get_editor_property(k) for k in ("num_splines", "num_roads", "num_triangles", "num_marking_triangles", "last_error")}
+    stats = {k: network.get_editor_property(k) for k in ("num_splines", "num_roads", "num_triangles", "num_marking_instances", "last_error")}
     log("build " + str(stats))
     log("actors " + ", ".join(sorted("{} ({})".format(a.get_actor_label(), a.get_class().get_name()) for a in ACTORS.get_all_level_actors())))
     if not LEVELS.save_current_level():

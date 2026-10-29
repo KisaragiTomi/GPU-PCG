@@ -31,6 +31,8 @@ public class CSRoadNet : ModuleRules
 				"Renderer",
 				"Json",
 				"AssetRegistry",
+				"MeshDescription",
+				"StaticMeshDescription",
 			}
 			);
 

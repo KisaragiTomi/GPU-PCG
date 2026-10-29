@@ -42,8 +42,12 @@ struct FGpuDecalReceivers
 	FRDGBufferRef Stats = nullptr;
 };
 
-// Render thread, after the road mesh passes of the same graph.
+// Render thread, after the road mesh passes of the same graph. A fitted input (bFitted) counts no clips.
 FGpuDecalReceivers AddDecalReceiverPasses(FRDGBuilder& GraphBuilder, const FGpuRoadMeshInput& Mesh, const FGpuDecalInput& Decals, const FGpuRoadStreams& Road);
+
+// Render thread, a fitted input (bFitted) after its receivers: the heights its projected and clipped
+// items' grids land on (FGpuDecalInput::NumFitHeights floats, Unity metres; NaN off the surface).
+FRDGBufferRef AddDecalFitPasses(FRDGBuilder& GraphBuilder, const FGpuRoadMeshInput& Mesh, const FGpuDecalInput& Decals, const FGpuRoadStreams& Road, const FGpuDecalReceivers& Receivers);
 
 // The receivers kept from the road mesh's graph for the decal graph.
 struct FPooledDecalReceivers
@@ -86,4 +90,32 @@ FRDGBufferRef AddDecalMeshPasses(FRDGBuilder& GraphBuilder, const FGpuRoadMeshIn
 // Unity-space vertices (14 floats each) and the decal index buffer. Mesh must have its refinement.
 bool RunDecalsBlocking(const FGpuGeometryInput& Geometry, const FGpuRoadMeshInput& Mesh, FGpuDecalInput& Decals, TArray<float>& OutVertices, TArray<uint32>& OutIndices,
 	FGpuDecalStats& OutStats, FString& OutError);
+
+// Game thread, tests: the road mesh, then a fitted input's receivers and heights (AddDecalFitPasses).
+bool RunDecalFitBlocking(const FGpuGeometryInput& Geometry, const FGpuRoadMeshInput& Mesh, const FGpuDecalInput& Decals, TArray<float>& OutHeights, FString& OutError);
+
+// A fitted input's heights on their way back from the GPU, with the items they are for: the network
+// actor draws the connectors and crosswalks once they land, a frame or two after the road.
+class FDecalFitReadback
+{
+public:
+	FDecalFitReadback();
+	~FDecalFitReadback();
+
+	// The fitted input's items and decal surfaces.
+	TArray<FGpuDecalItem> Items;
+	TArray<FString> MaterialSlots;
+
+	// Render thread, in the graph AddDecalFitPasses recorded Heights in: queues their copy.
+	void Enqueue(FRDGBuilder& GraphBuilder, FRDGBufferRef Heights, uint32 NumHeights);
+	// Game thread: whether the copy has landed or failed; looks at most once a frame, never waits.
+	bool Poll();
+	bool IsFailed() const;
+	// Once Poll is true and the copy did not fail.
+	const TArray<float>& Heights() const;
+
+private:
+	struct FShared;
+	TSharedPtr<FShared, ESPMode::ThreadSafe> Shared;
+};
 }

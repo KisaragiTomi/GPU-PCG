@@ -2,22 +2,32 @@
 
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 
+#include "AssetCompilingManager.h"
 #include "CSMesh.h"
 #include "CSMeshRenderComponent.h"
 #include "CSRoadNetworkActor.h"
 #include "CSRoadSplineActor.h"
 #include "CSRoadTestUtils.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "HAL/IConsoleManager.h"
 #include "Materials/MaterialInterface.h"
+#include "Rendering/NaniteResources.h"
+#include "RenderingThread.h"
+#include "StaticMeshResources.h"
 #include "Tests/AutomationEditorCommon.h"
 
 namespace
 {
-// The drawn triangles of a mesh, each as its three corners (0.1 mm) and its material, counted.
-void CSRoadTileTests_Triangles(const UCSMesh* Mesh, TMap<FString, int32>& Out, int32& OutCount)
+// The drawn triangles of a mesh, each as its three corners (0.1 mm) and its material, counted; the
+// box of its vertices, and how many triangles have two corners in one place.
+void CSRoadTileTests_Triangles(const UCSMesh* Mesh, TMap<FString, int32>& Out, int32& OutCount, FBox* OutBounds = nullptr, int32* OutDegenerate = nullptr)
 {
 	FCSGpuMeshCPUData Data;
 	if (!Mesh || !Mesh->ReadbackMeshSync(Data)) return;
+	if (OutBounds) for (const FVector3f& P : Data.Positions) *OutBounds += FVector(P);
 	for (int32 Triangle = 0; Triangle + 2 < Data.Indices.Num() / 3 * 3; Triangle += 3)
 	{
 		TArray<FString, TInlineAllocator<3>> Corners;
@@ -32,6 +42,7 @@ void CSRoadTileTests_Triangles(const UCSMesh* Mesh, TMap<FString, int32>& Out, i
 			const FVector3f& P = Data.Positions[Index];
 			Corners.Add(P.ContainsNaN() ? FString(TEXT("nan")) : FString::Printf(TEXT("%lld,%lld,%lld"), FMath::RoundToInt64(P.X * 10.0f), FMath::RoundToInt64(P.Y * 10.0f), FMath::RoundToInt64(P.Z * 10.0f)));
 		}
+		if (OutDegenerate && (Corners[0] == Corners[1] || Corners[1] == Corners[2] || Corners[0] == Corners[2])) (*OutDegenerate)++;
 		// The winding stays; only where the corner list starts differs.
 		int32 First = 0;
 		for (int32 Corner = 1; Corner < 3; Corner++) if (Corners[Corner] < Corners[First]) First = Corner;
@@ -42,26 +53,50 @@ void CSRoadTileTests_Triangles(const UCSMesh* Mesh, TMap<FString, int32>& Out, i
 	}
 }
 
+// Each decal instance as its transform (0.1 mm), data, material and priority, counted.
+void CSRoadTileTests_Decals(const UInstancedStaticMeshComponent* Component, TMap<FString, int32>& Out, int32& OutCount)
+{
+	const UMaterialInterface* Material = Component->GetMaterial(0);
+	const int32 Floats = Component->NumCustomDataFloats;
+	for (int32 Instance = 0; Instance < Component->GetInstanceCount(); Instance++)
+	{
+		FTransform Transform;
+		Component->GetInstanceTransform(Instance, Transform, true);
+		const FVector L = Transform.GetLocation();
+		const FVector S = Transform.GetScale3D();
+		FString Key = FString::Printf(TEXT("%s|%d|%lld,%lld,%lld|%lld,%lld,%lld|"), Material ? *Material->GetPathName() : TEXT("none"), Component->TranslucencySortPriority,
+			FMath::RoundToInt64(L.X * 10.0), FMath::RoundToInt64(L.Y * 10.0), FMath::RoundToInt64(L.Z * 10.0), FMath::RoundToInt64(S.X * 10.0), FMath::RoundToInt64(S.Y * 10.0), FMath::RoundToInt64(S.Z * 10.0));
+		for (int32 Float = 0; Float < Floats; Float++) Key += FString::Printf(TEXT("%.4f,"), Component->PerInstanceSMCustomData[Instance * Floats + Float]);
+		Out.FindOrAdd(Key)++;
+		OutCount++;
+	}
+}
+
 struct FCSRoadTileTests_Output
 {
 	TMap<FString, int32> Roads;
 	TMap<FString, int32> Markings;
 	int32 RoadTriangles = 0;
-	int32 MarkingTriangles = 0;
+	int32 MarkingInstances = 0;
+	FBox RoadBounds = FBox(ForceInit);
+	int32 RoadDegenerate = 0;
 };
 
-// What the network draws: its whole-build meshes, or every tile's.
+// What the network draws: its whole-build mesh and decals, or every tile's, once their heights landed.
 FCSRoadTileTests_Output CSRoadTileTests_Read(ACSRoadNetworkActor* Network)
 {
+	Network->FinishDecalFits();
 	FCSRoadTileTests_Output Out;
 	TArray<UCSMeshRenderComponent*> Components;
 	Network->GetComponents<UCSMeshRenderComponent>(Components);
 	for (const UCSMeshRenderComponent* Component : Components)
 	{
 		if (!Component->IsVisible() || !Component->GetGpuMesh() || Component->GetName().StartsWith(TEXT("BuildingTile"))) continue;
-		const bool bMarkings = Component == Network->MarkingMesh || Component->GetName().StartsWith(TEXT("MarkingTile"));
-		CSRoadTileTests_Triangles(Component->GetGpuMesh(), bMarkings ? Out.Markings : Out.Roads, bMarkings ? Out.MarkingTriangles : Out.RoadTriangles);
+		CSRoadTileTests_Triangles(Component->GetGpuMesh(), Out.Roads, Out.RoadTriangles, &Out.RoadBounds, &Out.RoadDegenerate);
 	}
+	TArray<UInstancedStaticMeshComponent*> Decals;
+	Network->GetComponents<UInstancedStaticMeshComponent>(Decals);
+	for (const UInstancedStaticMeshComponent* Component : Decals) if (Component->GetName().StartsWith(TEXT("Marking"))) CSRoadTileTests_Decals(Component, Out.Markings, Out.MarkingInstances);
 	return Out;
 }
 
@@ -102,20 +137,20 @@ TArray<ACSRoadSplineActor*> CSRoadTileTests_Grid(UWorld* World, ACSRoadNetworkAc
 	return Roads;
 }
 
-// The tiles draw exactly the triangles of the whole build, roads and decals alike.
+// The tiles draw exactly the road triangles and the decal instances of the whole build.
 void CSRoadTileTests_Compare(FAutomationTestBase& Test, const FString& Case, const FCSRoadTileTests_Output& Tiled, const FCSRoadTileTests_Output& Whole)
 {
 	Test.TestTrue(Case + TEXT(": the whole build has roads"), Whole.RoadTriangles > 0);
-	Test.TestTrue(Case + TEXT(": the whole build has decals"), Whole.MarkingTriangles > 0);
+	Test.TestTrue(Case + TEXT(": the whole build has decals"), Whole.MarkingInstances > 0);
 	Test.TestEqual(Case + TEXT(": road triangles"), Tiled.RoadTriangles, Whole.RoadTriangles);
-	Test.TestEqual(Case + TEXT(": decal triangles"), Tiled.MarkingTriangles, Whole.MarkingTriangles);
+	Test.TestEqual(Case + TEXT(": decal instances"), Tiled.MarkingInstances, Whole.MarkingInstances);
 	Test.TestEqual(Case + TEXT(": road triangles that differ"), CSRoadTileTests_Differences(Test, Case + TEXT(" roads"), Tiled.Roads, Whole.Roads), 0);
-	Test.TestEqual(Case + TEXT(": decal triangles that differ"), CSRoadTileTests_Differences(Test, Case + TEXT(" decals"), Tiled.Markings, Whole.Markings), 0);
+	Test.TestEqual(Case + TEXT(": decal instances that differ"), CSRoadTileTests_Differences(Test, Case + TEXT(" decals"), Tiled.Markings, Whole.Markings), 0);
 }
 }
 
-// A network of crossing streets drawn whole and in tiles: the tiles together draw exactly the
-// triangles of the whole build, roads and decals alike; an edit rebuilds only the tiles at the roads
+// A network of crossing streets drawn whole and in tiles: the tiles together draw exactly the road
+// triangles and the decal instances of the whole build; an edit rebuilds only the tiles at the roads
 // it changed and leaves the meshes of the others alone, and what that leaves equals a whole build of
 // the edited network; a removed road takes its tile's triangles with it.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadTilesActorTest, "PCGPlugins.CSRoadNet.Tiles.Actor",
@@ -163,7 +198,7 @@ bool FCSRoadTilesActorTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("the first tiled build writes every tile"), Network->TilesRebuilt, Network->NumTiles);
 	TestEqual(TEXT("the first tiled build draws every road"), Network->RoadsRebuilt, Network->NumRoads);
 	Compare(TEXT("placed"), Tiled, Whole);
-	AddInfo(FString::Printf(TEXT("%d roads in %d tiles: %d road and %d decal triangles"), Network->NumRoads, Network->NumTiles, Tiled.RoadTriangles, Tiled.MarkingTriangles));
+	AddInfo(FString::Printf(TEXT("%d roads in %d tiles: %d road triangles and %d decal instances"), Network->NumRoads, Network->NumTiles, Tiled.RoadTriangles, Tiled.MarkingInstances));
 
 	// Nothing changed: nothing rebuilt.
 	const TMap<FString, uint32> Before = Generations();
@@ -360,6 +395,139 @@ bool FCSRoadTilesBatchesTest::RunTest(const FString& Parameters)
 	Finish(TEXT("resized and edited"));
 	const FCSRoadTileTests_Output Edited = CSRoadTileTests_Read(Network);
 	CSRoadTileTests_Compare(*this, TEXT("resized and edited"), Edited, Whole());
+	return true;
+}
+
+namespace
+{
+// Runs what the editor's frames would for a network baking its tiles: its tick, the render thread
+// (the bakes' readbacks) and the static mesh compiler, until Done holds or Seconds pass.
+bool CSRoadTileTests_Drive(ACSRoadNetworkActor* Network, double Seconds, TFunctionRef<bool()> Done)
+{
+	const double End = FPlatformTime::Seconds() + Seconds;
+	while (FPlatformTime::Seconds() < End)
+	{
+		Network->Tick(0.0f);
+		if (Done()) return true;
+		FlushRenderingCommands();
+		FAssetCompilingManager::Get().ProcessAsyncTasks(false);
+		FPlatformProcess::Sleep(0.01f);
+	}
+	return Done();
+}
+
+// Road tiles drawn from a GPU mesh.
+int32 CSRoadTileTests_GpuTiles(ACSRoadNetworkActor* Network)
+{
+	TArray<UCSMeshRenderComponent*> Components;
+	Network->GetComponents<UCSMeshRenderComponent>(Components);
+	int32 Count = 0;
+	for (const UCSMeshRenderComponent* Component : Components) Count += Component->GetName().StartsWith(TEXT("RoadTile")) && Component->GetGpuMesh() ? 1 : 0;
+	return Count;
+}
+
+// The tiles' Nanite components with a mesh: the triangles their Nanite data was built from, the union
+// of their bounds, and how many have no Nanite data.
+int32 CSRoadTileTests_Baked(ACSRoadNetworkActor* Network, int32& OutTriangles, FBox& OutBounds, int32& OutInvalid)
+{
+	int32 Baked = 0;
+	OutTriangles = 0;
+	OutInvalid = 0;
+	OutBounds = FBox(ForceInit);
+	TArray<UStaticMeshComponent*> Components;
+	Network->GetComponents<UStaticMeshComponent>(Components);
+	for (const UStaticMeshComponent* Component : Components)
+	{
+		if (!Component->GetName().StartsWith(TEXT("NaniteTile")) || !Component->GetStaticMesh()) continue;
+		UStaticMesh* Mesh = Component->GetStaticMesh();
+		Baked++;
+		OutInvalid += Mesh->HasValidNaniteData() ? 0 : 1;
+		if (Mesh->GetRenderData() && Mesh->GetRenderData()->NaniteResourcesPtr.IsValid()) OutTriangles += int32(Mesh->GetRenderData()->NaniteResourcesPtr->NumInputTriangles);
+		OutBounds += Component->Bounds.GetBox();
+	}
+	return Baked;
+}
+}
+
+// The crossing streets in tiles, each baked into a Nanite mesh once it stands: every tile ends up
+// drawn from its bake with its GPU mesh freed, the bakes holding the triangles the GPU meshes drew
+// over the same box. An edit draws the tiles it rewrites from GPU meshes again and the others keep
+// their bakes, until the new bakes come in. With a budget below two tiles' GPU meshes, the tiles are
+// written one or two at a time, each batch waiting for the last one's bakes.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadTilesNaniteTest, "PCGPlugins.CSRoadNet.Tiles.Nanite",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSRoadTilesNaniteTest::RunTest(const FString& Parameters)
+{
+	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
+	if (!Lib.bLoaded)
+	{
+		AddWarning(Lib.Error + TEXT(" (skipped)"));
+		return true;
+	}
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("editor world"), World)) return false;
+	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>(FVector(40000.0, -20000.0, 0.0), FRotator(0.0, 15.0, 0.0));
+	if (!TestNotNull(TEXT("network actor"), Network)) return false;
+	Network->Source = ECSRoadNetworkSource::Splines;
+	Network->TileSize = 128.0f;
+	Network->MaxTilesPerBatch = 0;
+	Network->bLocalUpdate = true;
+	Network->bBakeNanite = true;
+	const TArray<ACSRoadSplineActor*> Roads = CSRoadTileTests_Grid(World, Network);
+
+	Network->Rebuild();
+	TestEqual(TEXT("built: error"), Network->LastError, FString());
+	const FCSRoadTileTests_Output Drawn = CSRoadTileTests_Read(Network);
+	const int32 NumTiles = Network->NumTiles;
+	TestTrue(TEXT("built: GPU meshes before the bakes"), Network->NumNaniteTiles == 0 && Drawn.RoadTriangles > 0 && CSRoadTileTests_GpuTiles(Network) == NumTiles);
+
+	auto AllBaked = [&]() { return Network->NumTiles > 0 && Network->PendingTiles == 0 && Network->NumNaniteTiles == Network->NumTiles; };
+	TestTrue(TEXT("baked within a minute"), CSRoadTileTests_Drive(Network, 60.0, AllBaked));
+	int32 Triangles = 0;
+	int32 Invalid = 0;
+	FBox Bounds;
+	TestEqual(TEXT("baked: Nanite tiles"), CSRoadTileTests_Baked(Network, Triangles, Bounds, Invalid), NumTiles);
+	TestEqual(TEXT("baked: every bake holds Nanite data"), Invalid, 0);
+	TestEqual(TEXT("baked: GPU meshes freed"), CSRoadTileTests_GpuTiles(Network), 0);
+	TestEqual(TEXT("baked: what the budget counts"), Network->GpuMeshMiB, 0.0f);
+	// The static mesh build drops triangles with two corners in one place.
+	TestTrue(TEXT("baked: the GPU meshes' triangles, less degenerate ones"), Triangles <= Drawn.RoadTriangles && Triangles >= Drawn.RoadTriangles - Drawn.RoadDegenerate);
+	TestTrue(TEXT("baked: over the GPU meshes' vertices"), Bounds.Min.Equals(Drawn.RoadBounds.Min, 1.0) && Bounds.Max.Equals(Drawn.RoadBounds.Max, 1.0));
+	TestEqual(TEXT("baked: the decals stay"), CSRoadTileTests_Read(Network).MarkingInstances, Drawn.MarkingInstances);
+	// Shadow pages drawn from a bake's root clusters are drawn again once finer ones stream in, unless
+	// an ini or the console said otherwise.
+	const IConsoleVariable* Redraw = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Nanite.VSMInvalidateOnLODDelta"));
+	TestTrue(TEXT("baked: shadows redrawn as the bakes stream in"), Redraw && (Redraw->GetInt() != 0 || (Redraw->GetFlags() & ECVF_SetByMask) > ECVF_SetByProjectSetting));
+	AddInfo(FString::Printf(TEXT("%d tiles baked: %d triangles of the GPU meshes' %d (%d with two corners within 0.1 mm)"), NumTiles, Triangles, Drawn.RoadTriangles, Drawn.RoadDegenerate));
+
+	// An edit: the tiles it rewrites draw GPU meshes again, the others keep their bakes.
+	Roads.Last()->Spline->SetLocationAtSplinePoint(2, FVector(18000.0 + 4000.0, 15000.0, 0.0), ESplineCoordinateSpace::Local);
+	Network->Tick(0.0f);
+	TestEqual(TEXT("edited: error"), Network->LastError, FString());
+	const int32 Rebuilt = Network->TilesRebuilt;
+	TestTrue(TEXT("edited: some tiles rebuilt"), Rebuilt > 0 && Rebuilt < NumTiles);
+	TestEqual(TEXT("edited: GPU meshes for the rebuilt tiles"), CSRoadTileTests_GpuTiles(Network), Rebuilt);
+	TestEqual(TEXT("edited: the others keep their bakes"), Network->NumNaniteTiles, Network->NumTiles - Rebuilt);
+	TestTrue(TEXT("edited: baked again"), CSRoadTileTests_Drive(Network, 60.0, AllBaked));
+	TestEqual(TEXT("edited: GPU meshes freed"), CSRoadTileTests_GpuTiles(Network), 0);
+
+	// A budget below two tiles: a batch at a time, each waiting for the last one's bakes.
+	Network->GpuMeshBudget = 1;
+	Network->TileSize = 96.0f;
+	Network->Rebuild();
+	TestEqual(TEXT("budget: error"), Network->LastError, FString());
+	TestTrue(TEXT("budget: the others pending"), Network->PendingTiles > 0);
+	int32 MostAtOnce = CSRoadTileTests_GpuTiles(Network);
+	float Peak = Network->GpuMeshMiB;
+	TestTrue(TEXT("budget: baked"), CSRoadTileTests_Drive(Network, 120.0, [&]()
+	{
+		MostAtOnce = FMath::Max(MostAtOnce, CSRoadTileTests_GpuTiles(Network));
+		Peak = FMath::Max(Peak, Network->GpuMeshMiB);
+		return AllBaked();
+	}));
+	TestTrue(TEXT("budget: at most two GPU meshes at once"), MostAtOnce <= 2);
+	AddInfo(FString::Printf(TEXT("budget of 1 MiB: %d tiles, at most %d GPU meshes at once, peaking at %.2f MiB"), Network->NumTiles, MostAtOnce, Peak));
 	return true;
 }
 

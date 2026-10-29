@@ -29,7 +29,7 @@ network = next(a for a in level_actors if a.get_class().get_name() == "CSRoadNet
 avenue = next(a for a in level_actors if a.get_actor_label() == "Avenue")
 tower = next(a for a in level_actors if a.get_actor_label() == "Tower")
 network.rebuild()
-keys = ("num_splines", "num_roads", "num_tiles", "num_buildings", "num_triangles", "num_marking_triangles", "build_milliseconds", "last_error")
+keys = ("num_splines", "num_roads", "num_tiles", "num_buildings", "num_triangles", "num_marking_instances", "build_milliseconds", "last_error")
 stats = {k: network.get_editor_property(k) for k in keys}
 unreal.log("CS2CITYSHOT build " + json.dumps(stats))
 
