@@ -1,4 +1,6 @@
-// RoadLab's lane and crosswalk decals on the GPU; CSRoadDecals.h builds the items on the CPU.
+// The surface RoadLab's junction connectors and crosswalks lie on, found on the GPU; CSRoadDecals.h
+// builds the items on the CPU, and the network actor draws them as instanced mesh decals at these
+// heights (CSRoadDecalInstances.h).
 //
 // Receivers. A node's RoadSurfaceProjection holds the road triangles RoadRenderer.Add put into it:
 // every triangle of the node instances there and the triangles of each edge near the node, keeping
@@ -10,14 +12,11 @@
 //
 // Projection. TryProject's candidates are the receivers registered in the point's 8 m cell, and of
 // equally close surfaces the first wins. Each item first gathers, in order, the receivers whose
-// footprint can reach its own into groupshared memory (a superset: the barycentric test and the
-// clip reject the rest), with their 8 m cells and their xz box in centimetres from the item's
-// corner; a vertex reads the corners of only the few whose box holds it. When that list does not
-// fit, a grid gathers again for each run of THREADGROUP_SIZE vertices over their own box, and a
-// crosswalk takes the node's receivers a chunk at a time and projects each chunk's fan centres over
-// a list gathered for their box; as many lists in turn as that takes. The result is the same.
-//
-// Vertices stay in Unity space until written: UE = (x, -z, y) * 100, then LocalToWorld.
+// footprint can reach its own into groupshared memory (a superset: the barycentric test rejects
+// the rest), with their 8 m cells and their xz box in centimetres from the item's corner; a vertex
+// reads the corners of only the few whose box holds it. When that list does not fit, a grid
+// gathers again for each run of THREADGROUP_SIZE vertices over their own box, as many lists in turn
+// as that takes. The result is the same.
 
 #include "CSRoadGeometryCommon.ush"
 #include "CSRoadMeshLayout.ush"
@@ -54,7 +53,6 @@ struct FDecalItem
 	uint Receiver;
 	uint MaterialSlot;
 	uint VertexOffset;
-	uint IndexOffset;
 };
 
 // CSRoadDecals.h FGpuReceiverSegment.
@@ -94,32 +92,11 @@ float4x4 WorldToLocal;
 uint NumItems;
 uint ItemGroupsX;
 StructuredBuffer<FDecalItem> Items;
-uint NumClipped;
-uint ClippedGroupsX;
-StructuredBuffer<uint> ClippedItems;
-// 0: count each clipped item's triangles into ClipCountsRW; 1: write them.
-uint ClipMode;
-RWStructuredBuffer<uint> ClipCountsRW;
-// [0]: runs walking their receivers in memory; [1]: grids gathering per run of vertices;
-// [2]: crosswalks taking the receivers a chunk at a time.
+// [0]: runs walking their receivers in memory; [1]: grids gathering per run of vertices.
 RWStructuredBuffer<uint> StatsRW;
-// Tests: every grid and crosswalk takes the way of a list that does not fit.
+// Tests: every grid takes the way of a list that does not fit.
 uint ForceFallback;
-
-// 0: the decal mesh streams (four UV sets). 1: Unity-space position, normal, uv, uv2 and colour
-// (14 floats per vertex) into DebugVertices, for the golden tests.
-uint OutputMode;
-float4x4 LocalToWorld;
-uint VertexCapacity;
-uint IndexCapacity;
-RWBuffer<float> RW_Positions;
-RWBuffer<uint> RW_Tangents;
-RWBuffer<float> RW_TexCoords;
-RWBuffer<uint> RW_Colors;
-RWBuffer<uint> RW_Indices;
-RWBuffer<uint> RW_MaterialIds;
-RWStructuredBuffer<float> DebugVertices;
-// DecalFitCS's heights (FGpuDecalInput::bFitted).
+// DecalFitCS's heights (FGpuDecalInput::NumFitHeights).
 RWStructuredBuffer<float> FitHeightsRW;
 
 uint RD_GroupIndex(uint3 GroupId, uint GroupsX) { return GroupId.y * GroupsX + GroupId.x; }
@@ -538,161 +515,17 @@ bool RD_TryProject(uint node, float3 pt, FItemArea area, out float y, out uint b
 }
 
 // ---------------------------------------------------------------------------------------------
-// Output
-// ---------------------------------------------------------------------------------------------
-
-float3 RD_ToUnreal(float3 v) { return float3(v.x, 0.0f - v.z, v.y); }
-
-void RD_WriteVertex(uint dst, float3 position, float3 normal, float3 along, float2 uv, float2 uv2, float4 color)
-{
-	if (OutputMode == 1u)
-	{
-		float values[14] = { position.x, position.y, position.z, normal.x, normal.y, normal.z, uv.x, uv.y, uv2.x, uv2.y, color.x, color.y, color.z, color.w };
-		for (uint k = 0u; k < 14u; k++) DebugVertices[dst * 14u + k] = values[k];
-		return;
-	}
-	if (dst >= VertexCapacity) return;
-	float3 world = mul(float4(RD_ToUnreal(position) * 100.0f, 1.0f), LocalToWorld).xyz;
-	float3 n = normalize(mul(float4(RD_ToUnreal(normal), 0.0f), LocalToWorld).xyz);
-	float3 t = normalizesafe(mul(float4(RD_ToUnreal(along), 0.0f), LocalToWorld).xyz, float3(1.0f, 0.0f, 0.0f));
-	RW_Positions[dst * 3u + 0u] = world.x;
-	RW_Positions[dst * 3u + 1u] = world.y;
-	RW_Positions[dst * 3u + 2u] = world.z;
-	RW_Tangents[dst * 2u + 0u] = PackSnorm8888(float4(t, 0.0f));
-	RW_Tangents[dst * 2u + 1u] = PackSnorm8888(float4(n, 1.0f));
-	// UV0 the decal texture, UV1 the distances to both ends, UV2 / UV3 the colour (the static
-	// import's layout, which the M_CS2 decal materials read).
-	float2 sets[4] = { uv, uv2, color.xy, color.zw };
-	for (uint k = 0u; k < 4u; k++)
-	{
-		RW_TexCoords[(dst * 4u + k) * 2u + 0u] = sets[k].x;
-		RW_TexCoords[(dst * 4u + k) * 2u + 1u] = sets[k].y;
-	}
-	RW_Colors[dst] = PackColorBGRA(color);
-}
-
-// A triangle of local corners into the index stream (corners 1 and 2 swapped like the road mesh).
-void RD_WriteTriangle(uint dst, uint vertexBase, uint3 corners, uint materialSlot)
-{
-	if (dst + 2u >= IndexCapacity) return;
-	RW_Indices[dst + 0u] = vertexBase + corners.x;
-	RW_Indices[dst + 1u] = vertexBase + corners.z;
-	RW_Indices[dst + 2u] = vertexBase + corners.y;
-	if (OutputMode == 0u) RW_MaterialIds[dst / 3u] = materialSlot;
-}
-
-// ---------------------------------------------------------------------------------------------
-// Strips and projected grids (RoadDecals.AddLane without clipToSurface)
-// ---------------------------------------------------------------------------------------------
-
-// Validity bits of a grid's vertices: (400 + 1) rows of 7.
-groupshared uint RD_Valid[88];
-
-[numthreads(THREADGROUP_SIZE, 1, 1)]
-void DecalGridCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
-{
-	uint itemIndex = RD_GroupIndex(GroupId, ItemGroupsX);
-	if (itemIndex >= NumItems) return;
-	FDecalItem item = Items[itemIndex];
-	if (item.Kind == RD_CLIPPED) return;
-	bool bProject = item.Kind == RD_PROJECTED;
-	uint columns = bProject ? 6u : 1u;
-	uint stride = columns + 1u;
-	uint count = item.Rows;
-	uint numVertices = (count + 1u) * stride;
-
-	// The grid stays within the control points' hull widened by half the decal's width.
-	float2 lo = U_min(U_min(item.Curve.a.xz, item.Curve.b.xz), U_min(item.Curve.c.xz, item.Curve.d.xz)) - item.Width * 0.5f - 0.01f;
-	float2 hi = U_max(U_max(item.Curve.a.xz, item.Curve.b.xz), U_max(item.Curve.c.xz, item.Curve.d.xz)) + item.Width * 0.5f + 0.01f;
-	FItemArea area = RD_MakeArea(lo, hi);
-	bool bPerRun = bProject && (!RD_GatherCandidates(item.Receiver, area, GroupIndex) || ForceFallback != 0u);
-	if (bPerRun && GroupIndex == 0u) InterlockedAdd(StatsRW[1], 1u);
-	for (uint w = GroupIndex; w < 88u; w += THREADGROUP_SIZE) RD_Valid[w] = 0u;
-	GroupMemoryBarrierWithGroupSync();
-
-	// A run of THREADGROUP_SIZE vertices at a time, so a grid gathering per run has one per thread.
-	for (uint start = 0u; start < numVertices; start += THREADGROUP_SIZE)
-	{
-		uint vertex = start + GroupIndex;
-		bool bActive = vertex < numVertices;
-		uint i = min(vertex, numVertices - 1u) / stride;
-		uint side = vertex % stride;
-		float t = float(i) / float(count);
-		float s = 1.0f - t;
-		precise float3 p = MU_Position(item.Curve, t);
-		precise float3 tangent = normalizesafe(MU_Tangent(item.Curve, t));
-		float3 right = float3(tangent.z, 0.0f, 0.0f - tangent.x);
-		precise float distance = item.Distance.x * s * s * s + 3.0f * item.Distance.y * s * s * t + 3.0f * item.Distance.z * s * t * t + item.Distance.w * t * t * t;
-		float across = float(side) / float(columns);
-		precise float3 position = p + right * (across - 0.5f) * item.Width;
-		precise float3 normal = normalizesafe(cross(tangent, right), float3(0.0f, 1.0f, 0.0f));
-		if (normal.y < 0.0f) normal = -normal;
-		bool bValid = true;
-		if (bProject)
-		{
-			FProjection state = RD_StartProjection(position);
-			if (!bPerRun)
-			{
-				if (bActive) RD_ProjectOver(item.Receiver, position, area, state);
-			}
-			else
-			{
-				FItemArea run = RD_GroupArea(bActive ? float4(position.xz, position.xz) : RD_EMPTY_BOX, GroupIndex);
-				uint2 cursor = uint2(0u, 0u);
-				bool bMore = true;
-				while (bMore)
-				{
-					bMore = RD_GatherRun(item.Receiver, run, GroupIndex, cursor);
-					if (bActive) RD_ProjectOver(item.Receiver, position, run, state);
-					GroupMemoryBarrierWithGroupSync();
-				}
-			}
-			// TryProject's out parameters: the point and an up normal unless a receiver takes it.
-			bValid = state.bFound != 0u;
-			normal = float3(0.0f, 1.0f, 0.0f);
-			if (bValid)
-			{
-				position.y = state.Y;
-				normal = RD_ReceiverNormal(state.Best);
-			}
-		}
-		if (!bActive) continue;
-		if (bValid) InterlockedOr(RD_Valid[vertex / 32u], 1u << (vertex % 32u));
-		float2 uv = float2(U_lerp(item.UVArea.x, item.UVArea.z, across), item.UVArea.y + distance * (item.UVArea.w - item.UVArea.y));
-		float2 uv2 = float2(t * item.Length, (1.0f - t) * item.Length);
-		float4 color = float4(U_lerp(item.Weights.x, item.Weights.y, t), item.Connected.x, item.Connected.y, item.Smoothing);
-		RD_WriteVertex(item.VertexOffset + vertex, position + normal * item.Lift, normal, right, uv, uv2, color);
-	}
-	GroupMemoryBarrierWithGroupSync();
-
-	// Two triangles per cell, kept only when all three corners landed on the surface (a dropped
-	// one is written degenerate so the layout stays fixed).
-	for (uint cell = GroupIndex; cell < count * columns; cell += THREADGROUP_SIZE)
-	{
-		uint i = cell / columns;
-		uint corner = i * stride + cell % columns;
-		uint3 triangles[2] = { uint3(0u, stride, 1u), uint3(1u, stride, stride + 1u) };
-		for (uint k = 0u; k < 2u; k++)
-		{
-			uint3 c = corner + triangles[k];
-			bool bKeep = ((RD_Valid[c.x / 32u] >> (c.x % 32u)) & 1u) != 0u && ((RD_Valid[c.y / 32u] >> (c.y % 32u)) & 1u) != 0u && ((RD_Valid[c.z / 32u] >> (c.z % 32u)) & 1u) != 0u;
-			RD_WriteTriangle(item.IndexOffset + (cell * 2u + k) * 3u, item.VertexOffset, bKeep ? c : c.xxx, item.MaterialSlot);
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------------------------
 // Fitted grids (the network actor's instanced decals, CSRoadDecalInstances.h)
 // ---------------------------------------------------------------------------------------------
 
 // Columns of a fitted grid (FGpuDecalInput::FitColumns): a projected grid's.
 #define RD_FIT_COLUMNS 6u
 
-// One group per item of a fitted input; strips have none. The heights TryProject lands the item's
-// grid on (Unity metres, NaN where no receiver takes a vertex), Rows + 1 rows of RD_FIT_COLUMNS + 1
-// from VertexOffset on. A junction connector's grid is DecalGridCS's, vertex for vertex; a
-// crosswalk's spans the footprint ClipCS clips, straight between its curve's ends, each vertex taking
-// the receiver closest to the footprint's height there.
+// One group per item; strips have none. The heights TryProject lands the item's grid on (Unity
+// metres, NaN where no receiver takes a vertex), Rows + 1 rows of RD_FIT_COLUMNS + 1 from
+// VertexOffset on. A junction connector's grid is the one RoadDecals.AddLane projects, vertex for
+// vertex; a crosswalk's spans the footprint AddLane(clipToSurface) clips to the surface, straight
+// between its curve's ends, each vertex taking the receiver closest to the footprint's height there.
 [numthreads(THREADGROUP_SIZE, 1, 1)]
 void DecalFitCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 {
@@ -740,7 +573,7 @@ void DecalFitCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		}
 		else
 		{
-			// As DecalGridCS, to the bit.
+			// RoadDecals.AddLane's grid vertex.
 			precise float3 p = MU_Position(item.Curve, t);
 			precise float3 tangent = normalizesafe(MU_Tangent(item.Curve, t));
 			float3 right = float3(tangent.z, 0.0f, 0.0f - tangent.x);
@@ -765,297 +598,4 @@ void DecalFitCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		}
 		if (bActive) FitHeightsRW[item.VertexOffset + vertex] = state.bFound != 0u ? state.Y : asfloat(0x7FC00000u);
 	}
-}
-
-// ---------------------------------------------------------------------------------------------
-// Crosswalks (RoadDecals.AddLane(clipToSurface): RoadSurfaceProjection.ProjectTriangle)
-// ---------------------------------------------------------------------------------------------
-
-float RD_Cross(float2 u, float2 v) { return u.x * v.y - u.y * v.x; }
-
-// The footprint triangle being clipped: its corners, and Point(w) = a + (b - a) w.y + (c - a) w.z.
-struct FFootprint
-{
-	float3 A;
-	float3 B;
-	float3 C;
-};
-
-float3 RD_Point(FFootprint f, float3 w) { return f.A + (f.B - f.A) * w.y + (f.C - f.A) * w.z; }
-
-float RD_Height(FReceiver t, float d, float3 p)
-{
-	float2 u = t.B.xz - t.A.xz;
-	float2 v = t.C.xz - t.A.xz;
-	float2 delta = p.xz - t.A.xz;
-	return t.A.y + RD_Cross(delta, v) / d * (t.B.y - t.A.y) + RD_Cross(u, delta) / d * (t.C.y - t.A.y);
-}
-
-// Up to 3 + 5 polygon corners (barycentric weights of the footprint triangle) after the five clips.
-#define RD_MAX_POLYGON 8
-#define RD_MAX_FANS 6
-
-// One Sutherland-Hodgman step; mode 0..2: inside the receiver's edge (by winding), 3 / 4: within
-// 2 m below / above its plane.
-void RD_Clip(inout float3 polygon[RD_MAX_POLYGON], inout uint count, FFootprint f, FReceiver t, float d, float winding, uint mode)
-{
-	if (count == 0u) return;
-	float3 next[RD_MAX_POLYGON];
-	uint n = 0u;
-	float3 edgeA = mode == 0u ? t.A : (mode == 1u ? t.B : t.C);
-	float3 edgeB = mode == 0u ? t.B : (mode == 1u ? t.C : t.A);
-	float3 previous = polygon[count - 1u];
-	float3 pp = RD_Point(f, previous);
-	float before = mode < 3u ? RD_Cross((edgeB - edgeA).xz, (pp - edgeA).xz) * winding : (mode == 3u ? 2.0f - (RD_Height(t, d, pp) - pp.y) : 2.0f + (RD_Height(t, d, pp) - pp.y));
-	for (uint i = 0u; i < count; i++)
-	{
-		float3 current = polygon[i];
-		float3 cp = RD_Point(f, current);
-		float after = mode < 3u ? RD_Cross((edgeB - edgeA).xz, (cp - edgeA).xz) * winding : (mode == 3u ? 2.0f - (RD_Height(t, d, cp) - cp.y) : 2.0f + (RD_Height(t, d, cp) - cp.y));
-		if ((before >= 0.0f) != (after >= 0.0f) && n < RD_MAX_POLYGON) next[n++] = U_lerp(previous, current, before / (before - after));
-		if (after >= 0.0f && n < RD_MAX_POLYGON) next[n++] = current;
-		previous = current;
-		before = after;
-	}
-	for (uint k = 0u; k < RD_MAX_POLYGON; k++) polygon[k] = next[k];
-	count = n;
-}
-
-// The footprint clipped to one receiver.
-void RD_ClipPolygon(FFootprint f, FReceiver t, out float3 polygon[RD_MAX_POLYGON], out uint count)
-{
-	float d = RD_Cross(t.B.xz - t.A.xz, t.C.xz - t.A.xz);
-	polygon[0] = float3(1.0f, 0.0f, 0.0f);
-	polygon[1] = float3(0.0f, 1.0f, 0.0f);
-	polygon[2] = float3(0.0f, 0.0f, 1.0f);
-	for (uint k = 3u; k < RD_MAX_POLYGON; k++) polygon[k] = 0.0f;
-	count = 3u;
-	float winding = sign(d);
-	for (uint mode = 0u; mode < 5u; mode++) RD_Clip(polygon, count, f, t, d, winding, mode);
-}
-
-// Fan triangle i of the clipped polygon (corners 0, i + 1, i + 2): its centre, and false when it is
-// degenerate.
-bool RD_Fan(FFootprint f, float3 polygon[RD_MAX_POLYGON], uint i, out float3 centre)
-{
-	float3 p0 = RD_Point(f, polygon[0]);
-	float3 p1 = RD_Point(f, polygon[i + 1u]);
-	float3 p2 = RD_Point(f, polygon[i + 2u]);
-	centre = p0 + ((p1 - p0) + (p2 - p0)) / 3.0f;
-	return !(abs(RD_Cross((p1 - p0).xz, (p2 - p0).xz)) < 1e-8f);
-}
-
-// Whether ProjectTriangle's closest-surface check keeps a fan of receiver t: TryProject found its
-// centre and on this receiver's plane.
-bool RD_KeepsFan(FProjection state, FReceiver t, float3 centre)
-{
-	float d = RD_Cross(t.B.xz - t.A.xz, t.C.xz - t.A.xz);
-	return state.bFound != 0u && !(abs(state.Y - RD_Height(t, d, centre)) > 0.002f);
-}
-
-// The footprint clipped to a receiver of the candidate list: polygon corners and which fans survive
-// the degenerate and the closest-surface checks (bit i: RD_Fan i).
-uint RD_ClipCandidate(uint node, FItemArea area, FFootprint f, uint tri, out float3 polygon[RD_MAX_POLYGON], out uint count)
-{
-	FReceiver t = RD_Receiver(tri);
-	RD_ClipPolygon(f, t, polygon, count);
-	uint keep = 0u;
-	for (uint i = 0u; i + 2u < count; i++)
-	{
-		float3 centre;
-		if (!RD_Fan(f, polygon, i, centre)) continue;
-		FProjection state = RD_StartProjection(centre);
-		RD_ProjectOver(node, centre, area, state);
-		if (RD_KeepsFan(state, t, centre)) keep |= 1u << i;
-	}
-	return keep;
-}
-
-// The kept fans of a clipped receiver as the item's triangles from slot on.
-void RD_EmitClip(FDecalItem item, FFootprint f, uint3 corners, float3 right, uint tri, float3 polygon[RD_MAX_POLYGON], uint count, uint keep, uint slot)
-{
-	float2 coordinates[4] = { float2(0.0f, 0.0f), float2(1.0f, 0.0f), float2(0.0f, 1.0f), float2(1.0f, 1.0f) };
-	float3 normal = RD_ReceiverNormal(tri);
-	FReceiver t = RD_Receiver(tri);
-	float d = RD_Cross(t.B.xz - t.A.xz, t.C.xz - t.A.xz);
-	for (uint fan = 0u; fan + 2u < count; fan++)
-	{
-		if ((keep & (1u << fan)) == 0u) continue;
-		float3 weights[3] = { polygon[0], polygon[fan + 1u], polygon[fan + 2u] };
-		for (uint k = 0u; k < 3u; k++)
-		{
-			float3 w = weights[k];
-			float3 p = RD_Point(f, w);
-			p.y = RD_Height(t, d, p);
-			float2 uv = coordinates[corners.x] * w.x + coordinates[corners.y] * w.y + coordinates[corners.z] * w.z;
-			float2 uv0 = float2(U_lerp(item.UVArea.x, item.UVArea.z, uv.x), item.UVArea.y + item.Distance.w * uv.y * (item.UVArea.w - item.UVArea.y));
-			float2 uv2 = float2(uv.y * item.Length, (1.0f - uv.y) * item.Length);
-			float4 color = float4(U_lerp(item.Weights.x, item.Weights.y, uv.y), item.Connected.x, item.Connected.y, item.Smoothing);
-			RD_WriteVertex(item.VertexOffset + slot * 3u + k, p + float3(0.0f, item.Lift, 0.0f), normal, right, uv0, uv2, color);
-		}
-		RD_WriteTriangle(item.IndexOffset + slot * 3u, item.VertexOffset, uint3(slot * 3u, slot * 3u + 1u, slot * 3u + 2u), item.MaterialSlot);
-		slot++;
-	}
-}
-
-// One round of a footprint cell: each thread's receiver (bCandidate) clipped, its fans checked and
-// the kept ones written from written on; every thread must call it. With bList the fans project
-// over the item's list, else over lists gathered for the round's fan centres. Returns the round's
-// triangles.
-uint RD_ClipRound(FDecalItem item, FItemArea area, bool bList, FFootprint f, uint3 corners, float3 right, bool bCandidate, uint tri, uint written, uint GroupIndex)
-{
-	float3 polygon[RD_MAX_POLYGON];
-	for (uint k = 0u; k < RD_MAX_POLYGON; k++) polygon[k] = 0.0f;
-	uint count = 0u;
-	uint keep = 0u;
-	if (bList)
-	{
-		if (bCandidate) keep = RD_ClipCandidate(item.Receiver, area, f, tri, polygon, count);
-	}
-	else
-	{
-		// The fans that are not degenerate and their centres' box.
-		FReceiver t = (FReceiver)0;
-		uint fans = 0u;
-		float4 box = RD_EMPTY_BOX;
-		if (bCandidate)
-		{
-			t = RD_Receiver(tri);
-			RD_ClipPolygon(f, t, polygon, count);
-			for (uint i = 0u; i + 2u < count; i++)
-			{
-				float3 centre;
-				if (!RD_Fan(f, polygon, i, centre)) continue;
-				fans |= 1u << i;
-				box = float4(min(box.xy, centre.xz), max(box.zw, centre.xz));
-			}
-		}
-		uint withFans;
-		RD_ExclusiveScan(fans != 0u ? 1u : 0u, GroupIndex, withFans);
-		if (withFans > 0u)
-		{
-			FItemArea run = RD_GroupArea(box, GroupIndex);
-			FProjection states[RD_MAX_FANS];
-			[unroll] for (uint j = 0u; j < RD_MAX_FANS; j++)
-			{
-				float3 centre;
-				RD_Fan(f, polygon, j, centre);
-				states[j] = RD_StartProjection(centre);
-			}
-			uint2 cursor = uint2(0u, 0u);
-			bool bMore = true;
-			while (bMore)
-			{
-				bMore = RD_GatherRun(item.Receiver, run, GroupIndex, cursor);
-				[unroll] for (uint j = 0u; j < RD_MAX_FANS; j++)
-				{
-					if ((fans & (1u << j)) == 0u) continue;
-					float3 centre;
-					RD_Fan(f, polygon, j, centre);
-					RD_ProjectOver(item.Receiver, centre, run, states[j]);
-				}
-				GroupMemoryBarrierWithGroupSync();
-			}
-			[unroll] for (uint j = 0u; j < RD_MAX_FANS; j++)
-			{
-				if ((fans & (1u << j)) == 0u) continue;
-				float3 centre;
-				RD_Fan(f, polygon, j, centre);
-				if (RD_KeepsFan(states[j], t, centre)) keep |= 1u << j;
-			}
-		}
-	}
-	uint total;
-	uint rank = RD_ExclusiveScan(countbits(keep), GroupIndex, total);
-	if (ClipMode == 1u && keep != 0u) RD_EmitClip(item, f, corners, right, tri, polygon, count, keep, written + rank);
-	return total;
-}
-
-// Whether a receiver over the cell range is visited at cell: the first of its cells among cells.
-bool RD_FirstCellIs(int4 range, int4 cells, int2 cell)
-{
-	return all(range.xy <= cells.zw) && all(range.zw >= cells.xy) && all(max(range.xy, cells.xy) == cell);
-}
-
-// One group per clipped item. The receivers are visited the way ProjectTriangle's HashSet holds
-// them: footprint cells in x-major order, each receiver at the first of its cells, then in order.
-[numthreads(THREADGROUP_SIZE, 1, 1)]
-void ClipCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
-{
-	uint clipIndex = RD_GroupIndex(GroupId, ClippedGroupsX);
-	if (clipIndex >= NumClipped) return;
-	FDecalItem item = Items[ClippedItems[clipIndex]];
-	// The straight path's footprint: two triangles across the decal's width.
-	float3 a = item.Curve.a;
-	float3 dd = item.Curve.d;
-	float3 right = normalizesafe(float3(dd.z - a.z, 0.0f, a.x - dd.x)) * item.Width * 0.5f;
-	float3 points[4] = { a - right, a + right, dd - right, dd + right };
-	float2 lo = U_min(U_min(points[0].xz, points[1].xz), U_min(points[2].xz, points[3].xz));
-	float2 hi = U_max(U_max(points[0].xz, points[1].xz), U_max(points[2].xz, points[3].xz));
-	FItemArea area = RD_MakeArea(lo, hi);
-	bool bList = RD_GatherCandidates(item.Receiver, area, GroupIndex) && ForceFallback == 0u;
-	if (!bList && GroupIndex == 0u) InterlockedAdd(StatsRW[2], 1u);
-	uint2 segments = ReceiverNodes[item.Receiver];
-
-	uint written = 0u;
-	for (uint ft = 0u; ft < 2u; ft++)
-	{
-		uint3 corners = ft == 0u ? uint3(0u, 2u, 1u) : uint3(1u, 2u, 3u);
-		FFootprint f;
-		f.A = points[corners.x];
-		f.B = points[corners.y];
-		f.C = points[corners.z];
-		float2 footMin = U_min(f.A.xz, U_min(f.B.xz, f.C.xz));
-		float2 footMax = U_max(f.A.xz, U_max(f.B.xz, f.C.xz));
-		int4 cells = int4(RD_Cell(footMin), RD_Cell(footMax));
-		// A receiver whose box misses the footprint triangle's clips to nothing.
-		float2 footLo = (footMin - area.Min) * 100.0f - 1.0f;
-		float2 footHi = (footMax - area.Min) * 100.0f + 1.0f;
-		for (int cx = cells.x; cx <= cells.z; cx++)
-		{
-			for (int cz = cells.y; cz <= cells.w; cz++)
-			{
-				if (bList)
-				{
-					for (uint start = 0u; start < RD_CandidateCount; start += THREADGROUP_SIZE)
-					{
-						uint i = start + GroupIndex;
-						uint tri = 0u;
-						bool bCandidate = false;
-						if (i < RD_CandidateCount && RD_BoxOverlaps(RD_CandidateLo[i], RD_CandidateHi[i], footLo, footHi))
-						{
-							int4 range;
-							RD_Candidate(item.Receiver, i, area, tri, range);
-							bCandidate = RD_FirstCellIs(range, cells, int2(cx, cz));
-						}
-						written += RD_ClipRound(item, area, true, f, corners, right, bCandidate, tri, written, GroupIndex);
-					}
-					continue;
-				}
-				// The node's receivers a chunk at a time, skipping the chunks out of the footprint's reach.
-				for (uint k = 0u; k < segments.y; k++)
-				{
-					FReceiverSegment s = Segments[segments.x + k];
-					uint received = SegmentCounts[segments.x + k];
-					for (uint start = 0u; start < received; start += THREADGROUP_SIZE)
-					{
-						if (!RD_BoxesOverlap(ChunkBoxes[(s.Offset + start) / THREADGROUP_SIZE], footMin, footMax)) continue;
-						uint i = start + GroupIndex;
-						uint tri = 0u;
-						bool bCandidate = false;
-						if (i < received)
-						{
-							tri = ReceiverSlots[s.Offset + i];
-							FReceiver t = RD_Receiver(tri);
-							float2 rlo, rhi;
-							RD_Box(t, rlo, rhi);
-							bCandidate = all(rlo <= footMax) && all(rhi >= footMin) && RD_FirstCellIs(RD_Cells(t), cells, int2(cx, cz));
-						}
-						written += RD_ClipRound(item, area, false, f, corners, right, bCandidate, tri, written, GroupIndex);
-					}
-				}
-			}
-		}
-	}
-	if (ClipMode == 0u && GroupIndex == 0u) ClipCountsRW[clipIndex] = written;
 }

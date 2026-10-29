@@ -227,13 +227,11 @@ void ACSRoadNetworkActor::PostRegisterAllComponents()
 	if (!bBuildOnLoad || IsTemplate() || !GetWorld()) return;
 	if ((RoadMesh && RoadMesh->HasGeneratedGeometry()) || Tiles.Num() > 0) return;
 	// Spline roads may register after this actor: build once they all have.
-	if (Source == ECSRoadNetworkSource::Splines) RequestRebuild();
-	else if (!NetworkFile.FilePath.IsEmpty()) Rebuild();
+	RequestRebuild();
 }
 
 void ACSRoadNetworkActor::RequestRebuild()
 {
-	if (Source != ECSRoadNetworkSource::Splines) return;
 	bRebuildRequested = true;
 	bPendingOnly = false;
 }
@@ -298,7 +296,7 @@ ACSRoadNetworkActor* ACSRoadNetworkActor::LevelSplineNetwork(const ULevel* Level
 	ACSRoadNetworkActor* Found = nullptr;
 	for (ACSRoadNetworkActor* Network : TActorRange<ACSRoadNetworkActor>(World))
 	{
-		if (Network->GetLevel() != Level || Network->Source != ECSRoadNetworkSource::Splines) continue;
+		if (Network->GetLevel() != Level) continue;
 		if (Found) return nullptr;
 		Found = Network;
 	}
@@ -437,7 +435,6 @@ void ACSRoadNetworkActor::ConvertToSplines()
 		}
 	}
 	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d edges of %s converted to %d spline roads"), *GetName(), Network->Roads.Num(), *NetworkFile.FilePath, Splines.Num());
-	Source = ECSRoadNetworkSource::Splines;
 	bLeftHandTraffic = Network->bLeftHandTraffic;
 	Rebuild();
 #endif
@@ -455,19 +452,17 @@ void ACSRoadNetworkActor::PostEditChangeProperty(FPropertyChangedEvent& Property
 		else ResetTraffic();
 		return;
 	}
-	// A slider dragged in the details panel changes a property many times a frame: spline networks
-	// build once on the next tick.
-	if (Source == ECSRoadNetworkSource::Splines) RequestRebuild();
-	else if (!NetworkFile.FilePath.IsEmpty()) Rebuild();
+	// A slider dragged in the details panel changes a property many times a frame: the network builds
+	// once on the next tick.
+	RequestRebuild();
 }
 
 void ACSRoadNetworkActor::PostEditMove(bool bFinished)
 {
 	Super::PostEditMove(bFinished);
-	// The resident streams are world space, so the geometry follows the actor only by rebuilding:
-	// a spline network on every tick while it is dragged, a snapshot (a second or more) once let go.
-	if (Source == ECSRoadNetworkSource::Splines) RequestRebuild();
-	else if (bFinished && !NetworkFile.FilePath.IsEmpty()) Rebuild();
+	// The resident streams are world space, so the geometry follows the actor only by rebuilding, on
+	// every tick while it is dragged.
+	RequestRebuild();
 }
 #endif
 
@@ -541,30 +536,24 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	TSharedPtr<FCSRoadNetworkActor_Library> Library = CSRoadNetworkActor_Library(ResolveAssetDirectory(), OutError);
 	if (!Library) return false;
 	const double LibraryMs = Lap();
-	// The snapshot: the roads, or building from splines only its terrain.
-	const bool bSplines = Source == ECSRoadNetworkSource::Splines;
+	// The snapshot lends its terrain.
 	TSharedPtr<const CSRoad::FSavedNetwork> Snapshot;
-	if (!NetworkFile.FilePath.IsEmpty() && (!bSplines || bUseTerrain))
+	if (bUseTerrain && !NetworkFile.FilePath.IsEmpty())
 	{
-		Snapshot = CSRoadNetworkActor_Network(NetworkFile.FilePath, Library->Assets, bUseTerrain, OutError);
+		Snapshot = CSRoadNetworkActor_Network(NetworkFile.FilePath, Library->Assets, true, OutError);
 		if (!Snapshot) return false;
 	}
-	else if (!bSplines)
-	{
-		OutError = TEXT("No network file");
-		return false;
-	}
-	const CSRoad::FSavedTerrain* Terrain = bUseTerrain && Snapshot && Snapshot->Terrain.IsValid() ? &Snapshot->Terrain : nullptr;
-	// Building from splines: the spline roads and their network. A rebuild that only writes pending tiles
-	// (nothing changed since the last one) takes the last build's as they are.
-	TSharedPtr<const TArray<CSRoad::FSplineRoad>> Splines = MakeShared<TArray<CSRoad::FSplineRoad>>();
-	TSharedPtr<const CSRoad::FSavedNetwork> FromSplines;
-	if (bSplines && bReuseNetwork && LastSplines && PreviewRoads)
+	const CSRoad::FSavedTerrain* Terrain = Snapshot && Snapshot->Terrain.IsValid() ? &Snapshot->Terrain : nullptr;
+	// The spline roads and their network. A rebuild that only writes pending tiles (nothing changed
+	// since the last one) takes the last build's as they are.
+	TSharedPtr<const TArray<CSRoad::FSplineRoad>> Splines;
+	TSharedPtr<const CSRoad::FSavedNetwork> Network;
+	if (bReuseNetwork && LastSplines && PreviewRoads)
 	{
 		Splines = LastSplines;
-		FromSplines = PreviewRoads;
+		Network = PreviewRoads;
 	}
-	else if (bSplines)
+	else
 	{
 		TSharedPtr<TArray<CSRoad::FSplineRoad>> Gathered = MakeShared<TArray<CSRoad::FSplineRoad>>(GatherSplines());
 		TSharedPtr<CSRoad::FSavedNetwork> Built = MakeShared<CSRoad::FSavedNetwork>();
@@ -581,12 +570,12 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 		UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d splines make %d nodes and %d edges; %d alley stretches cut under main roads, %d junctions joined, %d segments split, %d merged, %d too short left out"),
 			*GetName(), Gathered->Num(), Built->Nodes.Num(), Built->Roads.Num(), Stats.AlleyCuts, Stats.Junctions, Stats.Splits, Stats.Merges, Stats.Dropped);
 		Splines = Gathered;
-		FromSplines = Built;
+		Network = Built;
 	}
 	NumSplines = Splines->Num();
-	const TArray<CSRoad::FSavedNode>& Nodes = bSplines ? FromSplines->Nodes : Snapshot->Nodes;
-	const TArray<CSRoad::FRoadSpec>& Specs = bSplines ? FromSplines->Roads : Snapshot->Roads;
-	const bool bLeftHand = bSplines ? bLeftHandTraffic : Snapshot->bLeftHandTraffic;
+	const TArray<CSRoad::FSavedNode>& Nodes = Network->Nodes;
+	const TArray<CSRoad::FRoadSpec>& Specs = Network->Roads;
+	const bool bLeftHand = Network->bLeftHandTraffic;
 	const double NetworkMs = Lap();
 	// The buildings need only the roads' curves: they stand even if the road meshes fail below. They
 	// log their own time.
@@ -603,10 +592,10 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	{
 		const bool bBuilt = BuildTiles(Library->Assets, Specs, Nodes, bLeftHand, ByBaseColor, Terrain, bMarkings, OutError);
 		// What RefreshPreview makes the preview from once edits settle.
-		PreviewRoads = bSplines ? FromSplines : Snapshot;
-		LastSplines = bSplines ? Splines : nullptr;
+		PreviewRoads = Network;
+		LastSplines = Splines;
 		PreviewTerrain = Terrain ? Snapshot : nullptr;
-		UE_LOG(LogCSRoadNet, Log, TEXT("%s: prefab data %.0f ms, snapshot %.0f ms, tiles %.0f ms"), *GetName(), LibraryMs, NetworkMs, Lap());
+		UE_LOG(LogCSRoadNet, Log, TEXT("%s: prefab data %.0f ms, splines %.0f ms, tiles %.0f ms"), *GetName(), LibraryMs, NetworkMs, Lap());
 		return bBuilt;
 	}
 	ClearTiles();
@@ -633,7 +622,6 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 	if (MeshInput.NumUnconverged > 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %u node mesh triangles did not converge in 20 refinement passes"), *GetName(), MeshInput.NumUnconverged);
 	const double RefineMs = Lap();
 	CSRoad::FGpuDecalInput Decals;
-	Decals.bFitted = true;
 	if (bMarkings && !Decals.Build(Graph, Library->Assets, GeometryResult, MeshInput, ResolveAssetDirectory(), OutError)) return false;
 	const double DecalSetupMs = Lap();
 	if (MeshInput.NumVertices == 0 || MeshInput.NumIndices == 0)
@@ -663,7 +651,7 @@ bool ACSRoadNetworkActor::BuildRoads(FString& OutError)
 		DestroyComponents(MarkingDecals);
 	}
 	const double DecalMs = Lap();
-	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads, %u vertices, %u triangles, %d compositions, %d decals (%d lanes, %d instances); prefab data %.0f ms, snapshot %.0f ms, graph and compositions %.0f ms, geometry input %.0f ms, composition meshes %.0f ms, refinement counts %.0f ms, lanes and decal setup %.0f ms, allocation %.0f ms, road GPU build %.0f ms, decals %.0f ms"),
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads, %u vertices, %u triangles, %d compositions, %d decals (%d lanes, %d instances); prefab data %.0f ms, splines %.0f ms, graph and compositions %.0f ms, geometry input %.0f ms, composition meshes %.0f ms, refinement counts %.0f ms, lanes and decal setup %.0f ms, allocation %.0f ms, road GPU build %.0f ms, decals %.0f ms"),
 		*GetName(), Graph.Roads.Num(), MeshInput.NumVertices, MeshInput.NumIndices / 3, Graph.Compositions.Num() - 1, Decals.Items.Num(), Decals.Lanes.Lanes.Num(), NumMarkingInstances,
 		LibraryMs, NetworkMs, GraphMs, InputMs, MeshMs, RefineMs, DecalSetupMs, Targets.AllocationMs, Targets.RoadMs, DecalMs);
 
@@ -844,7 +832,6 @@ bool ACSRoadNetworkActor::BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoa
 		Scope.Lanes = &Lanes;
 		Scope.Keep = &Keep;
 		CSRoad::FGpuDecalInput Decals;
-		Decals.bFitted = true;
 		if (bMarkings && !Decals.Build(Graph, Assets, Graphed->Result, MeshInput, ResolveAssetDirectory(), OutError, &Scope)) return Fail();
 		FCSRoadTile& Tile = EnsureTile(Item.Key);
 		FMeshTargets Targets;
@@ -1370,7 +1357,6 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	auto Sign = [&SignatureHash](const auto& Value) { SignatureHash.Update(&Value, sizeof(Value)); };
 	for (const double Value : { Settings.Frontage, Settings.Gap, Settings.Setback, Settings.MinDepth, Settings.MaxDepth, Settings.MinHeight, Settings.MaxHeight, TileCm }) Sign(Value);
 	Sign(Settings.Seed);
-	Sign(Source);
 	Sign(Surface);
 	const FMatrix Placement = NetworkToWorld.ToMatrixWithScale();
 	Sign(Placement);
@@ -1440,29 +1426,10 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		for (const FVector3d& Control : Input.Curve) Box += FVector2D(NetworkToWorld.TransformPosition(CSRoadNetworkActor_ToUnreal(Control)));
 		Input.Tiles = TilesOf(Box, Kind == EInput::Anchor ? CSCity::AnchorReach(Settings, Half) : CSCity::RoadReach(Settings, Half));
 	};
-	// The roads as built, which the plots keep clear of; building from a snapshot the plots face them
-	// too, their slots named by the road's prefab and curve (and how many such roads came before). A road
-	// is told apart by its content alone: an edge that only moved in the list is the same road.
-	const bool bSplines = Source == ECSRoadNetworkSource::Splines;
-	TMap<uint64, uint64> Repeats;
-	for (int32 I = 0; I < Roads.Num(); I++)
-	{
-		const CSRoad::FRoadSpec& Road = Roads[I];
-		const double Half = HalfWidth(Road.Prefab);
-		const FVector3d A = Point(Road.Curve.a);
-		const FVector3d B = Point(Road.Curve.b);
-		const FVector3d C = Point(Road.Curve.c);
-		const FVector3d D = Point(Road.Curve.d);
-		AddCurve(EInput::Road, 0, Half, A, B, C, D);
-		if (bSplines) continue;
-		FXxHash64Builder Content;
-		Content.Update(*Road.Prefab, Road.Prefab.Len() * sizeof(TCHAR));
-		Content.Update(&Road.Curve, sizeof(Road.Curve));
-		const uint64 RoadId = Content.Finalize().Hash;
-		AddCurve(EInput::Anchor, Combine(RoadId, Repeats.FindOrAdd(RoadId)++), Half, A, B, C, D);
-	}
-	// Building from splines the plots face their segments as drawn, not the edges cut from them: a road
-	// joining the spline, or an edit of another segment, leaves the slots where they were.
+	// The roads as built, which the plots keep clear of.
+	for (const CSRoad::FRoadSpec& Road : Roads) AddCurve(EInput::Road, 0, HalfWidth(Road.Prefab), Point(Road.Curve.a), Point(Road.Curve.b), Point(Road.Curve.c), Point(Road.Curve.d));
+	// The plots face the splines' segments as drawn, not the edges cut from them: a road joining the
+	// spline, or an edit of another segment, leaves the slots where they were.
 	for (const CSRoad::FSplineRoad& Spline : Splines)
 	{
 		const int32 Count = Spline.Points.Num();

@@ -35,7 +35,6 @@ ACTORS = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
 world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
 network = ACTORS.spawn_actor_from_class(unreal.load_class(None, "/Script/CSRoadNet.CSRoadNetworkActor"), unreal.Vector(0, 0, 0))
 network.set_actor_label("CS2 Spline Roads")
-network.set_editor_property("source", unreal.CSRoadNetworkSource.SPLINES, notify_mode=NEVER)
 network.set_editor_property("network_file", unreal.FilePath(NETWORK), notify_mode=NEVER)
 road_class = unreal.load_class(None, "/Script/CSRoadNet.CSRoadSplineActor")
 roads = []

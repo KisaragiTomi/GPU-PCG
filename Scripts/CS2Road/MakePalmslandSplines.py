@@ -54,7 +54,6 @@ def build():
     network = ACTORS.spawn_actor_from_class(unreal.load_class(None, "/Script/CSRoadNet.CSRoadNetworkActor"), unreal.Vector(0.0, 0.0, 0.0))
     network.set_actor_label("Palmsland")
     network.set_editor_property("network_file", unreal.FilePath(NETWORK), notify_mode=NEVER)
-    network.set_editor_property("source", unreal.CSRoadNetworkSource.NETWORK_FILE, notify_mode=NEVER)
     # In tiles before converting: the rebuild that ends the conversion then writes one batch, where the
     # whole network's meshes at once (some 15 million road and 10 million marking vertices) can find too
     # little video memory.
@@ -67,7 +66,7 @@ def build():
     log("first batch " + str(stats))
     roads = [a for a in ACTORS.get_all_level_actors() if a.get_class().get_name() == "CSRoadSplineActor" and a.get_attach_parent_actor() == network]
     log("spline roads under the network: {}".format(len(roads)))
-    if stats["last_error"] or not roads or network.get_editor_property("source") != unreal.CSRoadNetworkSource.SPLINES:
+    if stats["last_error"] or not roads:
         unreal.log_error("CS2PALMSLAND the conversion failed; nothing saved")
         return
     if not LEVELS.save_current_level():

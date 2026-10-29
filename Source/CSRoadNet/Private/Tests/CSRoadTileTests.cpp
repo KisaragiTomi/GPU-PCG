@@ -168,7 +168,6 @@ bool FCSRoadTilesActorTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("editor world"), World)) return false;
 	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>(FVector(40000.0, -20000.0, 0.0), FRotator(0.0, 15.0, 0.0));
 	if (!TestNotNull(TEXT("network actor"), Network)) return false;
-	Network->Source = ECSRoadNetworkSource::Splines;
 	Network->TileSize = 128.0f;
 	// Every tile in one rebuild (Tiles.Batches covers the batches).
 	Network->MaxTilesPerBatch = 0;
@@ -255,7 +254,6 @@ bool FCSRoadTilesSubgraphTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("editor world"), World)) return false;
 	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>(FVector(5000.0, -8000.0, 0.0), FRotator(0.0, 7.0, 0.0));
 	if (!TestNotNull(TEXT("network actor"), Network)) return false;
-	Network->Source = ECSRoadNetworkSource::Splines;
 	Network->TileSize = 96.0f;
 	Network->MaxTilesPerBatch = 0;
 	TArray<ACSRoadSplineActor*> EastWest;
@@ -348,7 +346,6 @@ bool FCSRoadTilesBatchesTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("editor world"), World)) return false;
 	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>(FVector(-30000.0, 12000.0, 0.0), FRotator(0.0, -20.0, 0.0));
 	if (!TestNotNull(TEXT("network actor"), Network)) return false;
-	Network->Source = ECSRoadNetworkSource::Splines;
 	Network->TileSize = 128.0f;
 	Network->MaxTilesPerBatch = 2;
 	const TArray<ACSRoadSplineActor*> Roads = CSRoadTileTests_Grid(World, Network);
@@ -469,7 +466,6 @@ bool FCSRoadTilesNaniteTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("editor world"), World)) return false;
 	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>(FVector(40000.0, -20000.0, 0.0), FRotator(0.0, 15.0, 0.0));
 	if (!TestNotNull(TEXT("network actor"), Network)) return false;
-	Network->Source = ECSRoadNetworkSource::Splines;
 	Network->TileSize = 128.0f;
 	Network->MaxTilesPerBatch = 0;
 	Network->bLocalUpdate = true;

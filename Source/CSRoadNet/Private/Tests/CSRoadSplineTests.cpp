@@ -549,7 +549,6 @@ bool FCSRoadSplinesActorTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("editor world"), World)) return false;
 	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>(FVector(250000.0, -120000.0, 3000.0), FRotator(0.0, 30.0, 0.0));
 	if (!TestNotNull(TEXT("network actor"), Network)) return false;
-	Network->Source = ECSRoadNetworkSource::Splines;
 	// Two 60 m roads crossing at the network's origin.
 	const TArray<FVector> Ends = { FVector(-3000.0, 0.0, 0.0), FVector(3000.0, 0.0, 0.0), FVector(0.0, -3000.0, 0.0), FVector(0.0, 3000.0, 0.0) };
 	TArray<ACSRoadSplineActor*> Roads;

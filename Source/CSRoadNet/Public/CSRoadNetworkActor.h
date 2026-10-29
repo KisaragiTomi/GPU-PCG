@@ -1,9 +1,9 @@
 // A Cities: Skylines II road network built in UE: compositions on the CPU, then the GeometrySystem
 // jobs, the composition parameters, RoadLab's junction seams and node refinement and the mesh
 // deformation on the GPU, straight into a UCSMesh; the lane markings and crosswalks (RoadLab's
-// decals) are instanced mesh decals laid along their curves (CSRoadDecalInstances.h). The roads
-// come from a snapshot file or from spline roads (ACSRoadSplineActor), which a snapshot can also be
-// converted into.
+// decals) are instanced mesh decals laid along their curves (CSRoadDecalInstances.h). The roads are
+// spline roads (ACSRoadSplineActor); a snapshot file lends its terrain, and its roads can be
+// converted into spline roads.
 #pragma once
 
 #include "CoreMinimal.h"
@@ -43,16 +43,6 @@ namespace CSCity
 {
 struct FLotState;
 }
-
-UENUM()
-enum class ECSRoadNetworkSource : uint8
-{
-	/** The roads of NetworkFile. */
-	NetworkFile,
-	/** Spline roads: ACSRoadSplineActors hanging under this actor (or, when it is the level's only network building from
-	 *  splines, every one in the level) and spline components on it. NetworkFile, if set, only lends its terrain. */
-	Splines,
-};
 
 USTRUCT()
 struct FCSRoadSplineSettings
@@ -188,12 +178,10 @@ public:
 	 *  first (C4150 once the blob order changes). Defined in the .cpp next to the destructor. */
 	ACSRoadNetworkActor(FVTableHelper& Helper);
 
-	/** Where the roads come from. */
-	UPROPERTY(EditAnywhere, Category = "CS2 Road")
-	ECSRoadNetworkSource Source = ECSRoadNetworkSource::NetworkFile;
-
 	/** Road snapshot (format cs2-road-network-v1), e.g. CitiesSkylines-Road2-C#
-	 *  Artifacts/public-saves/palmsland-3/network.json. Building from splines, only its terrain is used. */
+	 *  Artifacts/public-saves/palmsland-3/network.json. It lends its terrain; ConvertToSplines turns its roads into
+	 *  spline roads. The roads built are the spline roads: ACSRoadSplineActors hanging under this actor (or, when it is
+	 *  the level's only network, every one in the level) and spline components on it. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (FilePathFilter = "json"))
 	FFilePath NetworkFile;
 
@@ -399,7 +387,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Splines", meta = (GetOptions = "GetRoadPrefabOptions"))
 	FString DefaultSplinePrefab = TEXT("Small Road");
 
-	/** Traffic drives on the left (a snapshot says so itself). */
+	/** Traffic drives on the left (ConvertToSplines takes it from the snapshot). */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Splines")
 	bool bLeftHandTraffic = false;
 
@@ -461,11 +449,11 @@ public:
 
 	// The road prefabs of the network's asset directory (the default one without a network).
 	static TArray<FString> RoadPrefabNames(const ACSRoadNetworkActor* Network);
-	// The level's network building from splines if it has exactly one, which also takes the level's
-	// spline roads that hang under no network.
+	// The level's network if it has exactly one, which also takes the level's spline roads that hang
+	// under no network.
 	static ACSRoadNetworkActor* LevelSplineNetwork(const ULevel* Level);
 	// The network an actor of the layout (a spline road, a building, an alley region) belongs to: the
-	// network it hangs under, else its level's only network building from splines.
+	// network it hangs under, else its level's only network.
 	static ACSRoadNetworkActor* NetworkOf(const AActor* Actor);
 
 	UFUNCTION()
@@ -542,9 +530,8 @@ private:
 	// GpuMeshBudget in bytes; MAX_int64 when it does not apply.
 	int64 GpuMeshBudgetBytes() const;
 
-	// Where one road mesh goes, and what it took. With Decals (a fitted input over the road mesh
-	// input), the same graph finds the heights their connectors and crosswalks lie at: Fit, unless the
-	// decals have none.
+	// Where one road mesh goes, and what it took. With Decals (over the road mesh input), the same
+	// graph finds the heights their connectors and crosswalks lie at: Fit, unless the decals have none.
 	struct FMeshTargets
 	{
 		UCSMeshRenderComponent* Road = nullptr;
@@ -600,8 +587,8 @@ private:
 	TUniquePtr<CSCity::FLotState> LotState;
 
 	// The batch buildings along the roads as built (Roads, the network's space). The plots face the
-	// segments of Splines, or building from a snapshot the roads themselves. Only the tiles within reach
-	// of an input that changed are laid out again; the plots there come out as a full layout's would.
+	// segments of Splines. Only the tiles within reach of an input that changed are laid out again; the
+	// plots there come out as a full layout's would.
 	void BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>& Splines, const TArray<CSRoad::FRoadSpec>& Roads, CSRoad::FAssets& Assets);
 	void ClearBuildingTiles();
 };

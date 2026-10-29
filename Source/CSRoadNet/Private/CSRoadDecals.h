@@ -1,7 +1,9 @@
 // RoadLab's lane and crosswalk decals (App/RoadDecals.cs, Port/Runtime/RoadCrosswalks.cs) as GPU
 // work: the CPU walks the lane graph, the composition lanes and the crosswalks the way RoadDecals.Add
-// and AddConnection do and emits one item per decal mesh; CSRoadDecal.usf generates the vertices and
-// projects them onto the node surfaces (RoadSurfaceProjection), gathered on the GPU from the road mesh.
+// and AddConnection do and emits one item per decal mesh; CSRoadDecal.usf projects the grids of the
+// junction connectors and crosswalks onto the node surfaces (RoadSurfaceProjection), gathered on the
+// GPU from the road mesh. The network actor draws the items as instanced mesh decals
+// (CSRoadDecalInstances.h).
 #pragma once
 
 #include "CSRoadGpuMesh.h"
@@ -27,7 +29,8 @@ enum class EDecalKind : uint32
 	// AddLane onto a node surface (junction connectors): a six-column grid, each vertex projected,
 	// cells with a vertex off the surface dropped.
 	Projected = 1,
-	// AddLane(clipToSurface) (crosswalks): the footprint's two triangles clipped to the surface.
+	// AddLane(clipToSurface) (crosswalks): RoadLab clips the footprint's two triangles to the surface;
+	// here a six-column grid over the footprint, each vertex projected.
 	Clipped = 2,
 };
 
@@ -49,13 +52,13 @@ struct FGpuDecalItem
 	// Vertex colour a (CurveProperties.m_SmoothingDistance).
 	float Smoothing = 0.0f;
 	uint32 Kind = 0;
-	// Strip / Projected: rows of the grid.
+	// Rows of the grid (a crosswalk's made a row per FGpuDecalInput::FitRowLength along it or less).
 	uint32 Rows = 0;
 	// Projected / Clipped: index into FGpuDecalInput::ReceiverNodes.
 	uint32 Receiver = 0;
 	uint32 MaterialSlot = 0;
+	// Projected / Clipped: its grid's first height (of FGpuDecalInput::NumFitHeights).
 	uint32 VertexOffset = 0;
-	uint32 IndexOffset = 0;
 };
 
 // A run of a node's receiver triangles (CSRoadDecal.usf FReceiverSegment): the triangles of one road
@@ -112,33 +115,21 @@ struct FGpuDecalInput
 	TArray<FGpuReceiverSegment> Segments;
 	uint32 NumReceiverSlots = 0;
 	uint32 NumReceiverChunks() const { return FMath::DivideAndRoundUp(NumReceiverSlots, ReceiverChunk); }
-	// Clipped items' sizes are known only after AddDecalReceiverPasses; until ApplyClipCounts they count 0.
-	TArray<uint32> ClippedItems;
-	uint32 NumVertices = 0;
-	uint32 NumIndices = 0;
-	// Tests: every grid and crosswalk takes the way of a candidate list that does not fit
-	// (CSRoadDecal.usf), which must give the same decals.
-	bool bForceFallback = false;
-	// The items alone: no receivers, so the mesh input need not write the instances at the decals'
-	// nodes, and the decal mesh is not laid out.
-	bool bItemsOnly = false;
-	// The receivers and, in place of the decal mesh's layout, the heights the network actor fits its
-	// connector and crosswalk instances to (CSRoadDecalInstances.h, CSRoadDecal.usf DecalFitCS): a
-	// projected or clipped item's VertexOffset is its first of NumFitHeights, its grid Rows + 1 rows
-	// of FitColumns + 1 (a crosswalk's Rows made a row per FitRowLength along it or less).
-	bool bFitted = false;
+	// The heights the network actor fits its connector and crosswalk instances to (CSRoadDecal.usf
+	// DecalFitCS): per projected or clipped item, from its VertexOffset on, Rows + 1 rows of
+	// FitColumns + 1.
 	uint32 NumFitHeights = 0;
+	// Tests: every grid takes the way of a candidate list that does not fit (CSRoadDecal.usf), which
+	// must give the same heights.
+	bool bForceFallback = false;
 
 	// Mesh: the road mesh input after ApplyRefinement (receiver segments index its instances).
 	// AssetDirectory: where RoadDecals.Material looks for a surface's base-colour texture; surfaces
 	// without one are skipped as in RoadLab. Scope (optional) limits the items to some roads.
 	bool Build(const FGraph& Graph, const FAssets& Assets, const FGpuGeometryResult& Geometry, const FGpuRoadMeshInput& Mesh, const FString& AssetDirectory, FString& OutError,
 		const FDecalScope* Scope = nullptr);
-	// Output triangles per clipped item, in ClippedItems order.
-	bool ApplyClipCounts(const TArray<uint32>& Triangles, FString& OutError);
 
 private:
-	bool Layout(FString& OutError);
 	bool FitLayout(FString& OutError);
 };
 }

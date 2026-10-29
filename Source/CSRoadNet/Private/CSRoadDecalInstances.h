@@ -1,7 +1,7 @@
 // RoadLab's decal items drawn as DBuffer mesh decals, each one or more instances of a unit mesh that a
 // material lays along the item's curve from the instance's custom data. A strip (a lane along an
 // edge) is a unit strip (DecalStripRows rows, two columns) that M_RoadDecal lays out as
-// CSRoadDecal.usf lays a strip's vertices. A junction connector and a crosswalk, which RoadLab
+// RoadDecals.AddLane lays a strip's vertices. A junction connector and a crosswalk, which RoadLab
 // projects onto the surface, are a unit grid (DecalStripRows rows) that M_RoadDecalFitted lays on the
 // surface: its points are among those of RoadLab's projected grid (a crosswalk's span its clipped
 // footprint), as few columns as stay on the surface between them, and DecalFitCS's heights, carried
@@ -76,7 +76,7 @@ struct FDecalInstances
 
 // The items (the network's space, Unity metres) as instances in world space; batches in order of
 // first appearance, instances in item order. The projected and clipped items take their heights from
-// FitHeights (a fitted input's, AddDecalFitPasses); without, they are left out.
+// FitHeights (AddDecalFitPasses); without, they are left out.
 void BuildDecalInstances(const FGpuDecalInput& Decals, const FTransform& NetworkToWorld, TArray<FDecalInstances>& Out, const TArray<float>* FitHeights = nullptr);
 
 // The unit meshes, transient in Outer: DecalStripRows rows of Columns + 1 points (a strip's two).

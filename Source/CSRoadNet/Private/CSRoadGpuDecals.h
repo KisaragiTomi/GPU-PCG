@@ -1,7 +1,7 @@
 // Lane and crosswalk decals on the GPU (Shaders/Private/CSRoad/CSRoadDecal.usf). They sit on the road
-// surface, so they come after it: the road mesh's graph also gathers each node's receivers and counts
-// the clipped crosswalks (AddDecalReceiverPasses); once those counts are read back and laid out
-// (FGpuDecalInput::ApplyClipCounts), a second graph writes the decal mesh (AddDecalMeshPasses).
+// surface, so they come after it: the road mesh's graph also gathers each node's receivers
+// (AddDecalReceiverPasses) and finds the heights the junction connectors' and crosswalks' grids land
+// on (AddDecalFitPasses), which the network actor draws its decal instances at.
 #pragma once
 
 #include "CSRoadDecals.h"
@@ -23,10 +23,8 @@ struct FGpuDecalStats
 {
 	// Runs whose area was too wide to pack their candidates, so they walked the node's receivers.
 	uint32 InMemoryRuns = 0;
-	// Projected grids whose candidates did not fit, gathered again per run of vertices.
+	// Grids whose candidates did not fit, gathered again per run of vertices.
 	uint32 PerRunGrids = 0;
-	// Crosswalks whose candidates did not fit, taking the node's receivers a chunk at a time.
-	uint32 PerChunkClips = 0;
 };
 
 struct FGpuDecalReceivers
@@ -36,65 +34,23 @@ struct FGpuDecalReceivers
 	FRDGBufferRef Slots = nullptr;
 	FRDGBufferRef SegmentCounts = nullptr;
 	FRDGBufferRef ChunkBoxes = nullptr;
-	// Per clipped item: its triangles (FGpuDecalInput::ClippedItems order).
-	FRDGBufferRef ClipCounts = nullptr;
-	// FGpuDecalStats, as uint32s.
-	FRDGBufferRef Stats = nullptr;
 };
 
-// Render thread, after the road mesh passes of the same graph. A fitted input (bFitted) counts no clips.
+// Render thread, after the road mesh passes of the same graph.
 FGpuDecalReceivers AddDecalReceiverPasses(FRDGBuilder& GraphBuilder, const FGpuRoadMeshInput& Mesh, const FGpuDecalInput& Decals, const FGpuRoadStreams& Road);
 
-// Render thread, a fitted input (bFitted) after its receivers: the heights its projected and clipped
-// items' grids land on (FGpuDecalInput::NumFitHeights floats, Unity metres; NaN off the surface).
-FRDGBufferRef AddDecalFitPasses(FRDGBuilder& GraphBuilder, const FGpuRoadMeshInput& Mesh, const FGpuDecalInput& Decals, const FGpuRoadStreams& Road, const FGpuDecalReceivers& Receivers);
+// Render thread, after the receivers: the heights the projected and clipped items' grids land on
+// (FGpuDecalInput::NumFitHeights floats, Unity metres; NaN off the surface). OutStats (optional):
+// the FGpuDecalStats buffer, as uint32s.
+FRDGBufferRef AddDecalFitPasses(FRDGBuilder& GraphBuilder, const FGpuRoadMeshInput& Mesh, const FGpuDecalInput& Decals, const FGpuRoadStreams& Road, const FGpuDecalReceivers& Receivers,
+	FRDGBufferRef* OutStats = nullptr);
 
-// The receivers kept from the road mesh's graph for the decal graph.
-struct FPooledDecalReceivers
-{
-	TRefCountPtr<FRDGPooledBuffer> Slots;
-	TRefCountPtr<FRDGPooledBuffer> SegmentCounts;
-	TRefCountPtr<FRDGPooledBuffer> ChunkBoxes;
+// Game thread, tests: the road mesh, then the decals' receivers and heights (AddDecalFitPasses).
+// Mesh must have its refinement.
+bool RunDecalFitBlocking(const FGpuGeometryInput& Geometry, const FGpuRoadMeshInput& Mesh, const FGpuDecalInput& Decals, TArray<float>& OutHeights, FString& OutError,
+	FGpuDecalStats* OutStats = nullptr);
 
-	bool IsValid() const { return Slots.IsValid() && SegmentCounts.IsValid() && ChunkBoxes.IsValid(); }
-	// Render thread: extracted when the graph executes.
-	void Extract(FRDGBuilder& GraphBuilder, const FGpuDecalReceivers& Receivers);
-	// Render thread: the receivers in another graph (without its clip counts and stats).
-	FGpuDecalReceivers Register(FRDGBuilder& GraphBuilder) const;
-};
-
-// Destination of AddDecalMeshPasses: a UCSMesh with four UV sets, or DebugVertices for the tests.
-struct FGpuDecalTarget
-{
-	FRDGBufferRef Positions = nullptr;
-	FRDGBufferRef Tangents = nullptr;
-	FRDGBufferRef TexCoords = nullptr;
-	FRDGBufferRef Colors = nullptr;
-	FRDGBufferRef Indices = nullptr;
-	FRDGBufferRef MaterialIds = nullptr;
-	uint32 VertexCapacity = 0;
-	uint32 IndexCapacity = 0;
-	FMatrix44f LocalToWorld = FMatrix44f::Identity;
-	// When set, Unity-space position, normal, uv, uv2 and colour (14 floats per vertex) go here
-	// instead of the streams; Indices still receives the triangles.
-	FRDGBufferRef DebugVertices = nullptr;
-};
-
-// Render thread. Decals must have had ApplyClipCounts; Receivers come from AddDecalReceiverPasses
-// over the same road mesh (FPooledDecalReceivers::Register when that ran in another graph).
-// Returns the stats buffer (FGpuDecalStats, as uint32s).
-FRDGBufferRef AddDecalMeshPasses(FRDGBuilder& GraphBuilder, const FGpuRoadMeshInput& Mesh, const FGpuDecalInput& Decals, const FGpuRoadStreams& Road,
-	const FGpuDecalReceivers& Receivers, const FGpuDecalTarget& Target);
-
-// Game thread, tests: road mesh, receivers and clip counts (applied to Decals), then the decals into
-// Unity-space vertices (14 floats each) and the decal index buffer. Mesh must have its refinement.
-bool RunDecalsBlocking(const FGpuGeometryInput& Geometry, const FGpuRoadMeshInput& Mesh, FGpuDecalInput& Decals, TArray<float>& OutVertices, TArray<uint32>& OutIndices,
-	FGpuDecalStats& OutStats, FString& OutError);
-
-// Game thread, tests: the road mesh, then a fitted input's receivers and heights (AddDecalFitPasses).
-bool RunDecalFitBlocking(const FGpuGeometryInput& Geometry, const FGpuRoadMeshInput& Mesh, const FGpuDecalInput& Decals, TArray<float>& OutHeights, FString& OutError);
-
-// A fitted input's heights on their way back from the GPU, with the items they are for: the network
+// A decal input's heights on their way back from the GPU, with the items they are for: the network
 // actor draws the connectors and crosswalks once they land, a frame or two after the road.
 class FDecalFitReadback
 {
@@ -102,7 +58,7 @@ public:
 	FDecalFitReadback();
 	~FDecalFitReadback();
 
-	// The fitted input's items and decal surfaces.
+	// The decal input's items and decal surfaces.
 	TArray<FGpuDecalItem> Items;
 	TArray<FString> MaterialSlots;
 

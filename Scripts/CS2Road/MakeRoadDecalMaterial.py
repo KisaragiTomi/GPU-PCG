@@ -1,7 +1,7 @@
 """Makes the network actor's decal materials (CSRoadDecalInstances.h), DBuffer mesh decals:
 
 - /PCGPlugins/CSRoadNet/M_RoadDecal, for a lane decal along an edge: its unit strip laid along the
-  item's curve as CSRoadDecal.usf lays a strip's vertices.
+  item's curve as RoadLab's RoadDecals.AddLane lays a strip's vertices.
 - /PCGPlugins/CSRoadNet/M_RoadDecalFitted, for a junction connector or a crosswalk, which RoadLab
   projects onto the surface: its unit grid laid out across the curve as RoadLab's projected grid (a
   crosswalk's straight between its ends), each point at the height above the curve the instance
@@ -66,7 +66,7 @@ def custom(mat, code, typ, inputs, x, y, description):
 # columns + 1, row-major) millimetres above the curve plus FitHeightZero (FitHeightOff: off the
 # surface), two a float as first + second * 4096.
 # The curve at Local.x of the instance's stretch (a fitted grid's last rows past the end fold onto
-# it), and the frame CSRoadDecal.usf lays a strip in: right = (tangent.z, 0, -tangent.x) in Unity
+# it), and the frame RoadDecals.AddLane lays a strip in: right = (tangent.z, 0, -tangent.x) in Unity
 # space (not normalised), the normal up; a crosswalk is the straight footprint between the ends, its
 # right normalised.
 FRAME = r'''

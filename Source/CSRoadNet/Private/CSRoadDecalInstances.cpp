@@ -96,7 +96,7 @@ void BuildDecalInstances(const FGpuDecalInput& Decals, const FTransform& Network
 			Added.Floats = bFitted ? DecalData::FittedCount(Columns) : DecalData::Count;
 		}
 		FDecalInstances& Into = Out[Batch];
-		// A crosswalk's texture distance grows linearly along it (Distance.w * t, CSRoadDecal.usf ClipCS).
+		// A crosswalk's texture distance grows linearly along it (Distance.w * t, as RoadLab clips it).
 		const float4 Distance = bStraight ? float4(0.0f, Item.Distance.w / 3.0f, Item.Distance.w * 2.0f / 3.0f, Item.Distance.w) : Item.Distance;
 		const float Height = Item.UVArea.w - Item.UVArea.y;
 		const int32 Pieces = FMath::DivideAndRoundUp(Rows, DecalStripRows);

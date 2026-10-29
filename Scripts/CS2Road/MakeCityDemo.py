@@ -70,7 +70,6 @@ def build():
 
     network = ACTORS.spawn_actor_from_class(unreal.load_class(None, "/Script/CSRoadNet.CSRoadNetworkActor"), unreal.Vector(0.0, 0.0, 0.0))
     network.set_actor_label("CS2 City")
-    network.set_editor_property("source", unreal.CSRoadNetworkSource.SPLINES, notify_mode=NEVER)
     network.set_editor_property("local_update", True, notify_mode=NEVER)
     network.set_editor_property("tile_size", 128.0, notify_mode=NEVER)
     network.set_editor_property("batch_buildings", True, notify_mode=NEVER)

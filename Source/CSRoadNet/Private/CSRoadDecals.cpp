@@ -143,7 +143,6 @@ bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGp
 	ReceiverNodes.Reset();
 	ReceiverSegments.Reset();
 	Segments.Reset();
-	ClippedItems.Reset();
 	NumReceiverSlots = 0;
 
 	// Roads touching each node, in road order: the order RoadRenderer fills the node's projection.
@@ -177,7 +176,6 @@ bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGp
 	TMap<int32, uint32> ReceiverOfNode;
 	auto Receiver = [&](int32 Node) -> uint32
 	{
-		if (bItemsOnly) return 0u;
 		if (const uint32* Known = ReceiverOfNode.Find(Node)) return *Known;
 		const uint32 Index = uint32(ReceiverNodes.Add(Node));
 		ReceiverOfNode.Add(Node, Index);
@@ -250,7 +248,6 @@ bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGp
 			Item.Receiver = Node == INDEX_NONE ? 0u : Receiver(Node);
 			Item.MaterialSlot = uint32(Slot);
 			ItemBlocks.Add(Block);
-			if (bClip) ClippedItems.Add(uint32(Items.Num() - 1));
 		}
 	};
 
@@ -305,13 +302,12 @@ bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGp
 		Block++;
 	}
 	NumBlocks = Block;
-	if (bItemsOnly) return true;
 	if (MissingSlot != INDEX_NONE)
 	{
 		OutError = FString::Printf(TEXT("The road mesh input does not write mesh instance %d of road %d, which a decal receiver needs"), MissingSlot % 3, MissingSlot / 3);
 		return false;
 	}
-	return bFitted ? FitLayout(OutError) : Layout(OutError);
+	return FitLayout(OutError);
 }
 
 bool FGpuDecalInput::FitLayout(FString& OutError)
@@ -320,7 +316,6 @@ bool FGpuDecalInput::FitLayout(FString& OutError)
 	for (FGpuDecalItem& Item : Items)
 	{
 		Item.VertexOffset = 0;
-		Item.IndexOffset = 0;
 		if (EDecalKind(Item.Kind) == EDecalKind::Strip) continue;
 		if (EDecalKind(Item.Kind) == EDecalKind::Clipped)
 		{
@@ -336,52 +331,6 @@ bool FGpuDecalInput::FitLayout(FString& OutError)
 		return false;
 	}
 	NumFitHeights = uint32(Heights);
-	return true;
-}
-
-bool FGpuDecalInput::ApplyClipCounts(const TArray<uint32>& Triangles, FString& OutError)
-{
-	if (Triangles.Num() != ClippedItems.Num())
-	{
-		OutError = FString::Printf(TEXT("%d clip counts for %d clipped decals"), Triangles.Num(), ClippedItems.Num());
-		return false;
-	}
-	// Rows of a clipped item hold its output triangle count.
-	for (int32 I = 0; I < ClippedItems.Num(); I++) Items[ClippedItems[I]].Rows = Triangles[I];
-	return Layout(OutError);
-}
-
-bool FGpuDecalInput::Layout(FString& OutError)
-{
-	uint64 VertexCount = 0;
-	uint64 IndexCount = 0;
-	for (FGpuDecalItem& Item : Items)
-	{
-		Item.VertexOffset = uint32(FMath::Min(VertexCount, uint64(MAX_uint32)));
-		Item.IndexOffset = uint32(FMath::Min(IndexCount, uint64(MAX_uint32)));
-		switch (EDecalKind(Item.Kind))
-		{
-		case EDecalKind::Strip:
-			VertexCount += (uint64(Item.Rows) + 1) * 2;
-			IndexCount += uint64(Item.Rows) * 6;
-			break;
-		case EDecalKind::Projected:
-			VertexCount += (uint64(Item.Rows) + 1) * 7;
-			IndexCount += uint64(Item.Rows) * 36;
-			break;
-		case EDecalKind::Clipped:
-			VertexCount += uint64(Item.Rows) * 3;
-			IndexCount += uint64(Item.Rows) * 3;
-			break;
-		}
-	}
-	if (VertexCount > uint64(MAX_int32) || IndexCount > uint64(MAX_int32))
-	{
-		OutError = FString::Printf(TEXT("The decal mesh needs %llu vertices / %llu indices"), VertexCount, IndexCount);
-		return false;
-	}
-	NumVertices = uint32(VertexCount);
-	NumIndices = uint32(IndexCount);
 	return true;
 }
 }

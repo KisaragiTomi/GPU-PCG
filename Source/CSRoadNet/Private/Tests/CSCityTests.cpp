@@ -328,7 +328,6 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("editor world"), World)) return false;
 	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>();
 	if (!TestNotNull(TEXT("network actor"), Network)) return false;
-	Network->Source = ECSRoadNetworkSource::Splines;
 	Network->bLocalUpdate = true;
 	Network->TileSize = 128.0f;
 	Network->bBatchBuildings = true;
@@ -447,7 +446,6 @@ bool FCSCityLocalUpdateTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("editor world"), World)) return false;
 	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>(FVector(2000.0, -1500.0, 0.0), FRotator(0.0, 10.0, 0.0));
 	if (!TestNotNull(TEXT("network actor"), Network)) return false;
-	Network->Source = ECSRoadNetworkSource::Splines;
 	Network->bLocalUpdate = true;
 	Network->TileSize = 64.0f;
 	Network->MaxTilesPerBatch = 0;

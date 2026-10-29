@@ -53,7 +53,6 @@ def setup():
     network = ACTORS.spawn_actor_from_class(unreal.load_class(None, "/Script/CSRoadNet.CSRoadNetworkActor"), unreal.Vector(12000, -7000, 200))
     CREATED.append(network)
     STATE["network"] = network
-    set_property(network, "source", unreal.CSRoadNetworkSource.SPLINES)
     set_property(network, "build_markings", False)
     set_property(network, "show_traffic", False)
     set_property(network, "trace_bridge_ground", False)
