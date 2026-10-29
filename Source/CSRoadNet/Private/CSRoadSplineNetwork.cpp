@@ -620,11 +620,14 @@ bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Drawn, const
 	OutNodes.Reset();
 	OutRoads.Reset();
 	OutStats = FSplineNetworkStats();
-	// Alleys give way to the main roads over them; the splines drawn stay as they are. What follows keeps
-	// the first of equal candidates in places, so the splines go through it in an order of their own
-	// content, not the one they came in.
+	// The cuts and what follows keep the first of equal candidates in places (of two main roads exactly
+	// as near an alley, the first), so the splines go through them in an order of their own content, not
+	// the one they came in. Alleys give way to the main roads over them; the splines drawn stay as they
+	// are, and the parts of a cut alley take their own places in that order.
+	TArray<FSplineRoad> Sorted = Drawn;
+	Sorted.StableSort(CSRoadSplineNetwork_SplineBefore);
 	TArray<FSplineRoad> Splines;
-	if (!CSRoadSplineNetwork_ClipAlleys(Assets, Drawn, Settings, Splines, OutStats)) Splines = Drawn;
+	if (!CSRoadSplineNetwork_ClipAlleys(Assets, Sorted, Settings, Splines, OutStats)) Splines = MoveTemp(Sorted);
 	Splines.StableSort(CSRoadSplineNetwork_SplineBefore);
 	const double Snap = FMath::Max(Settings.SnapDistance, 0.01);
 	static const FSplinePointData NoData;

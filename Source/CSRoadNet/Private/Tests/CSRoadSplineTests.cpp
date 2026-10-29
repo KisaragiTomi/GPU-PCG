@@ -94,6 +94,27 @@ FString CSRoadSplineTests_Key(const Bezier4x3& Curve) { return FString::FromBlob
 bool CSRoadSplineTests_Same(const float2& A, const float2& B) { return A.x == B.x && A.y == B.y; }
 bool CSRoadSplineTests_Same(const CompositionFlags& A, const CompositionFlags& B) { return A.m_General == B.m_General && A.m_Left == B.m_Left && A.m_Right == B.m_Right; }
 
+// The edges and nodes two networks have otherwise, position for position, and how many more one has.
+int32 CSRoadSplineTests_Differences(const FCSRoadSplineTests_Network& Mine, const FCSRoadSplineTests_Network& Theirs)
+{
+	int32 Differ = FMath::Abs(Mine.Roads.Num() - Theirs.Roads.Num()) + FMath::Abs(Mine.Nodes.Num() - Theirs.Nodes.Num());
+	for (int32 R = 0; R < FMath::Min(Mine.Roads.Num(), Theirs.Roads.Num()); R++)
+	{
+		const FRoadSpec& A = Mine.Roads[R];
+		const FRoadSpec& B = Theirs.Roads[R];
+		if (A.Prefab != B.Prefab || CSRoadSplineTests_Key(A.Curve) != CSRoadSplineTests_Key(B.Curve) || A.SourceStart != B.SourceStart || A.SourceEnd != B.SourceEnd || A.Owner != B.Owner
+			|| !CSRoadSplineTests_Same(A.Elevation, B.Elevation) || !CSRoadSplineTests_Same(A.Upgrade, B.Upgrade)) Differ++;
+	}
+	for (int32 N = 0; N < FMath::Min(Mine.Nodes.Num(), Theirs.Nodes.Num()); N++)
+	{
+		const FSavedNode& A = Mine.Nodes[N];
+		const FSavedNode& B = Theirs.Nodes[N];
+		if (!math::all(A.Position == B.Position) || A.Prefab != B.Prefab || !CSRoadSplineTests_Same(A.Elevation, B.Elevation) || !CSRoadSplineTests_Same(A.Upgrade, B.Upgrade) || A.bOutside != B.bOutside
+			|| A.Owner != B.Owner) Differ++;
+	}
+	return Differ;
+}
+
 template<typename T>
 TArray<double> CSRoadSplineTests_Flatten(const T& Value)
 {
@@ -385,22 +406,7 @@ bool FCSRoadSplinesPalmslandTest::RunTest(const FString& Parameters)
 			AddError(Error);
 			return false;
 		}
-		int32 Differ = FMath::Abs(Again.Roads.Num() - Back.Roads.Num()) + FMath::Abs(Again.Nodes.Num() - Back.Nodes.Num());
-		for (int32 R = 0; R < FMath::Min(Again.Roads.Num(), Back.Roads.Num()); R++)
-		{
-			const FRoadSpec& A = Again.Roads[R];
-			const FRoadSpec& B = Back.Roads[R];
-			if (A.Prefab != B.Prefab || CSRoadSplineTests_Key(A.Curve) != CSRoadSplineTests_Key(B.Curve) || A.SourceStart != B.SourceStart || A.SourceEnd != B.SourceEnd || A.Owner != B.Owner
-				|| !CSRoadSplineTests_Same(A.Elevation, B.Elevation) || !CSRoadSplineTests_Same(A.Upgrade, B.Upgrade)) Differ++;
-		}
-		for (int32 N = 0; N < FMath::Min(Again.Nodes.Num(), Back.Nodes.Num()); N++)
-		{
-			const FSavedNode& A = Again.Nodes[N];
-			const FSavedNode& B = Back.Nodes[N];
-			if (!math::all(A.Position == B.Position) || A.Prefab != B.Prefab || !CSRoadSplineTests_Same(A.Elevation, B.Elevation) || !CSRoadSplineTests_Same(A.Upgrade, B.Upgrade) || A.bOutside != B.bOutside
-				|| A.Owner != B.Owner) Differ++;
-		}
-		TestEqual(TEXT("splines shuffled: edges and nodes that differ"), Differ, 0);
+		TestEqual(TEXT("splines shuffled: edges and nodes that differ"), CSRoadSplineTests_Differences(Again, Back), 0);
 	}
 
 	// The GPU geometry against the file's: the same compositions, and values apart only by what the edge order
@@ -423,7 +429,8 @@ bool FCSRoadSplinesPalmslandTest::RunTest(const FString& Parameters)
 // Alleys giving way to main roads: an alley a main road crosses is cut there and both ends meet it in
 // one crossing (also on a slant); one a main road runs along loses the stretch under it and its ends
 // join the road; a main road passing high overhead leaves it whole; and the alley comes back as it
-// was when the main road goes.
+// was when the main road goes. Every order of the splines builds the same network, also where the
+// alley comes into cover exactly as near to two main roads (mirrored about it).
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadSplinesAlleysTest, "PCGPlugins.CSRoadNet.Splines.Alleys",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -473,29 +480,66 @@ bool FCSRoadSplinesAlleysTest::RunTest(const FString& Parameters)
 		}
 		return true;
 	};
+	// The same splines in every other order build the same network, edge for edge and node for node.
+	// Each rotation, forwards and backwards: every order of three splines or fewer.
+	auto EveryOrder = [&](const FString& Case, const TArray<FSplineRoad>& Splines, const FCSRoadSplineTests_Network& First)
+	{
+		int32 Others = 0;
+		for (const bool bBackwards : { false, true })
+		{
+			for (int32 Rotation = 0; Rotation < Splines.Num(); Rotation++)
+			{
+				TArray<FSplineRoad> Ordered;
+				for (int32 I = 0; I < Splines.Num(); I++) Ordered.Add(Splines[(Rotation + (bBackwards ? Splines.Num() - 1 - I : I)) % Splines.Num()]);
+				FCSRoadSplineTests_Network Again;
+				if (!CSRoadSplineTests_Build(*this, Case, Ordered, Settings, Again) || CSRoadSplineTests_Differences(Again, First) > 0) Others++;
+			}
+		}
+		TestEqual(Case + TEXT(": orders that build another network"), Others, 0);
+	};
 
 	{
+		const TArray<FSplineRoad> Splines = { Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) }), Main({ FVector3d(0.0, 0.0, -100.0), FVector3d(0.0, 0.0, 100.0) }) };
 		FCSRoadSplineTests_Network N;
-		if (!CSRoadSplineTests_Build(*this, TEXT("crossing"), { Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) }), Main({ FVector3d(0.0, 0.0, -100.0), FVector3d(0.0, 0.0, 100.0) }) }, Settings, N)) return false;
+		if (!CSRoadSplineTests_Build(*this, TEXT("crossing"), Splines, Settings, N)) return false;
 		TestEqual(TEXT("crossing: one stretch cut"), N.Stats.AlleyCuts, 1);
 		TestEqual(TEXT("crossing: two alley parts"), Count(N, TEXT("Alley")), 2);
 		const int32 Cross = N.NodeAt(FVector3d(0.0, 0.0, 0.0), 0.05);
 		TestTrue(TEXT("crossing: one crossing node"), Cross != INDEX_NONE && N.Degree(Cross) == 4);
 		TestTrue(TEXT("crossing: no alley under the road"), Clear(N, FVector3d(0.0, 0.0, -100.0), FVector3d(0.0, 0.0, 100.0)));
 		TestTrue(TEXT("crossing: edges on their nodes"), N.EdgesOnNodes());
+		EveryOrder(TEXT("crossing"), Splines, N);
 	}
 	{
+		const TArray<FSplineRoad> Splines = { Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) }), Main({ FVector3d(-60.0, 0.0, -100.0), FVector3d(60.0, 0.0, 100.0) }) };
 		FCSRoadSplineTests_Network N;
-		if (!CSRoadSplineTests_Build(*this, TEXT("slant"), { Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) }), Main({ FVector3d(-60.0, 0.0, -100.0), FVector3d(60.0, 0.0, 100.0) }) }, Settings, N)) return false;
+		if (!CSRoadSplineTests_Build(*this, TEXT("slant"), Splines, Settings, N)) return false;
 		TestEqual(TEXT("slant: two alley parts"), Count(N, TEXT("Alley")), 2);
 		int32 Crossings = 0;
 		for (int32 Node = 0; Node < N.Nodes.Num(); Node++) Crossings += N.Degree(Node) == 4 ? 1 : 0;
 		TestEqual(TEXT("slant: one crossing"), Crossings, 1);
 		TestTrue(TEXT("slant: no alley under the road"), Clear(N, FVector3d(-60.0, 0.0, -100.0), FVector3d(60.0, 0.0, 100.0)));
+		EveryOrder(TEXT("slant"), Splines, N);
 	}
 	{
+		// Two main roads mirrored about the alley meet where it ends: where it comes into cover it lies
+		// exactly as near to both, and which one it joins must not hang on which came first.
+		const TArray<FSplineRoad> Splines = { Alley({ FVector3d(100.0, 0.0, 0.0), FVector3d(0.0, 0.0, 0.0) }), Main({ FVector3d(0.0, 0.0, 0.0), FVector3d(100.0, 0.0, 100.0) }),
+			Main({ FVector3d(0.0, 0.0, 0.0), FVector3d(100.0, 0.0, -100.0) }) };
 		FCSRoadSplineTests_Network N;
-		if (!CSRoadSplineTests_Build(*this, TEXT("along"), { Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) }), Main({ FVector3d(-40.0, 0.0, 3.0), FVector3d(40.0, 0.0, 3.0) }) }, Settings, N)) return false;
+		if (!CSRoadSplineTests_Build(*this, TEXT("tie"), Splines, Settings, N)) return false;
+		TestEqual(TEXT("tie: one stretch cut"), N.Stats.AlleyCuts, 1);
+		TestEqual(TEXT("tie: one alley part"), Count(N, TEXT("Alley")), 1);
+		int32 Tees = 0;
+		for (int32 Node = 0; Node < N.Nodes.Num(); Node++) Tees += N.Degree(Node) == 3 ? 1 : 0;
+		TestEqual(TEXT("tie: the alley joins one of the main roads"), Tees, 1);
+		EveryOrder(TEXT("tie"), Splines, N);
+	}
+	{
+		const TArray<FSplineRoad> Splines = { Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) }), Main({ FVector3d(-40.0, 0.0, 3.0), FVector3d(40.0, 0.0, 3.0) }) };
+		FCSRoadSplineTests_Network N;
+		if (!CSRoadSplineTests_Build(*this, TEXT("along"), Splines, Settings, N)) return false;
+		EveryOrder(TEXT("along"), Splines, N);
 		TestEqual(TEXT("along: one stretch cut"), N.Stats.AlleyCuts, 1);
 		TestEqual(TEXT("along: two alley parts"), Count(N, TEXT("Alley")), 2);
 		TestTrue(TEXT("along: no alley under the road"), Clear(N, FVector3d(-40.0, 0.0, 3.0), FVector3d(40.0, 0.0, 3.0)));
@@ -521,7 +565,9 @@ bool FCSRoadSplinesAlleysTest::RunTest(const FString& Parameters)
 		FCSRoadSplineTests_Network Over;
 		const FSplineRoad Lane = Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) });
 		if (!CSRoadSplineTests_Build(*this, TEXT("alone"), { Lane }, Settings, Alone)) return false;
-		if (!CSRoadSplineTests_Build(*this, TEXT("overpass"), { Lane, Main({ FVector3d(0.0, 10.0, -100.0), FVector3d(0.0, 10.0, 100.0) }) }, Settings, Over)) return false;
+		const TArray<FSplineRoad> Splines = { Lane, Main({ FVector3d(0.0, 10.0, -100.0), FVector3d(0.0, 10.0, 100.0) }) };
+		if (!CSRoadSplineTests_Build(*this, TEXT("overpass"), Splines, Settings, Over)) return false;
+		EveryOrder(TEXT("overpass"), Splines, Over);
 		TestEqual(TEXT("overpass: nothing cut"), Over.Stats.AlleyCuts, 0);
 		TestEqual(TEXT("overpass: the alley whole"), Count(Over, TEXT("Alley")), 1);
 		bool bSame = Count(Alone, TEXT("Alley")) == 1;
