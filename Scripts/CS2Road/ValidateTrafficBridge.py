@@ -82,7 +82,7 @@ def setup():
     check(not network.get_editor_property("last_error"), "road build succeeds without markings")
     check(network.get_editor_property("num_traffic_lanes") > 0, "lane graph exists while traffic and markings are hidden")
     check(network.get_editor_property("num_bridge_piers") > 0, "elevated road generates piers")
-    piers = network.get_editor_property("bridge_piers")
+    piers = network.get_content().get_editor_property("bridge_piers")
     check(piers.get_instance_count() == network.get_editor_property("num_bridge_piers") * 3, "each pier has column, cap and footing")
     network.set_editor_property("show_traffic", True)
     bodies = network.get_editor_property("traffic_bodies")
@@ -129,7 +129,7 @@ def tick(delta):
             check(network.get_editor_property("num_traffic_vehicles") > 0, "traffic recovers after road rebuild")
             set_property(network, "trace_bridge_ground", True)
             network.rebuild()
-            piers = network.get_editor_property("bridge_piers")
+            piers = network.get_content().get_editor_property("bridge_piers")
             check(piers.get_instance_count() > 0, "ground traces retain elevated supports")
             for index in range(2, piers.get_instance_count(), 3):
                 # The 1.5 m ground cube is centered 1 m below the actor: top = -0.25 m.

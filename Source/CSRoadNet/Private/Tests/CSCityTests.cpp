@@ -55,8 +55,7 @@ bool CSCityTests_SameLots(const TArray<CSCity::FLot>& A, const TArray<CSCity::FL
 TArray<FVector3f> CSCityTests_BuildingVertices(ACSRoadNetworkActor* Network)
 {
 	TArray<FVector3f> Out;
-	TArray<UCSMeshRenderComponent*> Components;
-	Network->GetComponents<UCSMeshRenderComponent>(Components);
+	TArray<UCSMeshRenderComponent*> Components = CSRoadTest::Built<UCSMeshRenderComponent>(Network);
 	for (const UCSMeshRenderComponent* Component : Components)
 	{
 		FCSGpuMeshCPUData Data;
@@ -69,8 +68,7 @@ TArray<FVector3f> CSCityTests_BuildingVertices(ACSRoadNetworkActor* Network)
 TMap<FString, uint32> CSCityTests_BuildingGenerations(ACSRoadNetworkActor* Network)
 {
 	TMap<FString, uint32> Out;
-	TArray<UCSMeshRenderComponent*> Components;
-	Network->GetComponents<UCSMeshRenderComponent>(Components);
+	TArray<UCSMeshRenderComponent*> Components = CSRoadTest::Built<UCSMeshRenderComponent>(Network);
 	for (const UCSMeshRenderComponent* Component : Components) if (Component->GetName().StartsWith(TEXT("BuildingTile")) && Component->GetGpuMesh()) Out.Add(Component->GetName(), Component->GetGpuMesh()->GetGeneration());
 	return Out;
 }
@@ -172,6 +170,104 @@ bool FCSCityAlleyJunctionsTest::RunTest(const FString& Parameters)
 	}
 	AddInfo(FString::Printf(TEXT("%d alleys: %d nodes, %d edges, %d junctions joined"), Alleys.Num(), Nodes.Num(), Roads.Num(), Stats.Junctions));
 	TestEqual(TEXT("dead ends"), DeadEnds, 0);
+	return true;
+}
+
+// Alleys cut back to a road along x (8 m wide, reach 5 m: covered within 9 m of its centre line) and one
+// on a bridge 10 m up: one crossing straight over meets it at one point from both sides; one along it
+// within reach is gone, one out of reach is kept; one ending past it ends on it; one crossing at 15
+// degrees stops where the cover starts; the bridge cuts nothing; a piece shorter than 15 m is dropped.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityAlleyCutsTest, "PCGPlugins.CSRoadNet.City.AlleyCuts",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSCityAlleyCutsTest::RunTest(const FString& Parameters)
+{
+	CSCity::FRoadLine Road;
+	Road.HalfWidth = 400.0;
+	Road.Points = { FVector(-10000.0, 0.0, 0.0), FVector(0.0, 0.0, 0.0), FVector(10000.0, 0.0, 0.0) };
+	CSCity::FRoadLine Bridge;
+	Bridge.HalfWidth = 400.0;
+	Bridge.Points = { FVector(6000.0, -10000.0, 1000.0), FVector(6000.0, 10000.0, 1000.0) };
+	auto Cut = [&](const FVector2D& A, const FVector2D& B) { return CSCity::CutAlleys({ { A, B } }, { Road, Bridge }, 500.0, 0.0, 200.0, 1500.0); };
+	auto Near = [](const FVector2D& P, const FVector2D& Q) { return FVector2D::Distance(P, Q) < 1.0; };
+
+	const TArray<CSCity::FAlley> Crossing = Cut(FVector2D(0.0, -5000.0), FVector2D(0.0, 5000.0));
+	TestTrue(TEXT("crossing straight over: two pieces meeting on the centre line"), Crossing.Num() == 2 && Near(Crossing[0].B, FVector2D::ZeroVector) && Near(Crossing[1].A, FVector2D::ZeroVector));
+	TestEqual(TEXT("along it within reach: pieces"), Cut(FVector2D(-5000.0, 600.0), FVector2D(5000.0, 600.0)).Num(), 0);
+	const TArray<CSCity::FAlley> Clear = Cut(FVector2D(-5000.0, 2000.0), FVector2D(5000.0, 2000.0));
+	TestTrue(TEXT("along it out of reach: kept as it is"), Clear.Num() == 1 && Near(Clear[0].A, FVector2D(-5000.0, 2000.0)) && Near(Clear[0].B, FVector2D(5000.0, 2000.0)));
+	const TArray<CSCity::FAlley> Past = Cut(FVector2D(3000.0, -5000.0), FVector2D(3000.0, 300.0));
+	TestTrue(TEXT("ending past it: ends on the centre line"), Past.Num() == 1 && Near(Past[0].B, FVector2D(3000.0, 0.0)));
+	const double C = FMath::Cos(FMath::DegreesToRadians(15.0)) * 6000.0;
+	const double S = FMath::Sin(FMath::DegreesToRadians(15.0)) * 6000.0;
+	const TArray<CSCity::FAlley> Flat = Cut(FVector2D(-2000.0 - C, -S), FVector2D(-2000.0 + C, S));
+	TestTrue(TEXT("crossing at 15 degrees: two pieces stopping at the cover"), Flat.Num() == 2 && FMath::Abs(Flat[0].B.Y + 900.0) < 1.0 && FMath::Abs(Flat[1].A.Y - 900.0) < 1.0);
+	TestEqual(TEXT("under the bridge: pieces"), Cut(FVector2D(4000.0, 3000.0), FVector2D(8000.0, 3000.0)).Num(), 1);
+	const TArray<CSCity::FAlley> Short = Cut(FVector2D(-9000.0, 1300.0), FVector2D(-9000.0, -5000.0));
+	TestTrue(TEXT("a short piece dropped"), Short.Num() == 1 && Near(Short[0].A, FVector2D(-9000.0, 0.0)) && Near(Short[0].B, FVector2D(-9000.0, -5000.0)));
+	return true;
+}
+
+// A region laid out over a small road already there: no alley runs under the road (within both half widths
+// and the clearance of its centre line) but where its end joins it on the centre line, and some do. The
+// road a main road instead, the alleys are laid out over it: the network cuts them while it lies there.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityRegionCutTest, "PCGPlugins.CSRoadNet.City.RegionCut",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSCityRegionCutTest::RunTest(const FString& Parameters)
+{
+	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
+	if (!Lib.bLoaded)
+	{
+		AddWarning(Lib.Error + TEXT(" (skipped)"));
+		return true;
+	}
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("editor world"), World)) return false;
+	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>();
+	ACSRoadSplineActor* Small = World->SpawnActor<ACSRoadSplineActor>();
+	ACSCityAlleyRegion* Region = World->SpawnActor<ACSCityAlleyRegion>();
+	if (!TestNotNull(TEXT("network actor"), Network) || !TestNotNull(TEXT("small road"), Small) || !TestNotNull(TEXT("alley region"), Region)) return false;
+	Small->AttachToActor(Network, FAttachmentTransformRules::KeepRelativeTransform);
+	Small->Spline->Prefab = TEXT("Alley");
+	Small->Spline->Tier = ECSRoadTier::Alley;
+	const FVector2D From(-3000.0, -12000.0);
+	const FVector2D To(-2000.0, 12000.0);
+	Small->Spline->SetSplinePoints({ FVector(From, 0.0), FVector(To, 0.0) }, ESplineCoordinateSpace::Local);
+	Region->Bounds->SetBoxExtent(FVector(12000.0, 8000.0, 500.0));
+	const double Limit = ACSRoadNetworkActor::RoadWidth(Network, TEXT("Alley")) + double(Network->SplineSettings.AlleyClearance) * 100.0;
+	if (!TestTrue(TEXT("alley width"), Limit > 100.0)) return false;
+
+	// Alley samples under the road away from an end joining it, and the alleys joining it.
+	auto Count = [&](int32& OutJoined)
+	{
+		int32 Under = 0;
+		OutJoined = 0;
+		for (const ACSRoadSplineActor* Alley : Region->Generated)
+		{
+			if (!Alley) continue;
+			const FVector2D A(Alley->Spline->GetLocationAtSplinePoint(0, ESplineCoordinateSpace::World));
+			const FVector2D B(Alley->Spline->GetLocationAtSplinePoint(1, ESplineCoordinateSpace::World));
+			TArray<FVector2D> Joined;
+			for (const FVector2D& End : { A, B }) if (FVector2D::Distance(End, FMath::ClosestPointOnSegment2D(End, From, To)) < 1.0) Joined.Add(End);
+			OutJoined += Joined.Num() > 0 ? 1 : 0;
+			for (int32 K = 0; K <= 100; K++)
+			{
+				const FVector2D P = FMath::Lerp(A, B, K / 100.0);
+				if (FVector2D::Distance(P, FMath::ClosestPointOnSegment2D(P, From, To)) > Limit - 1.0) continue;
+				Under += Joined.ContainsByPredicate([&](const FVector2D& End) { return FVector2D::Distance(P, End) < Limit * 2.0 + 100.0; }) ? 0 : 1;
+			}
+		}
+		return Under;
+	};
+	Region->Generate();
+	int32 Joined = 0;
+	TestEqual(TEXT("small road: alley samples under it"), Count(Joined), 0);
+	TestTrue(TEXT("small road: alleys joining it"), Joined >= 2);
+	AddInfo(FString::Printf(TEXT("small road: %d alleys, %d joining it"), Region->Generated.Num(), Joined));
+	Small->Spline->Tier = ECSRoadTier::Main;
+	Region->Generate();
+	TestTrue(TEXT("main road: alleys laid out under it"), Count(Joined) > 0);
 	return true;
 }
 
@@ -380,7 +476,7 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	Main->Spline->Prefab = TEXT("Medium Road");
 	Main->Spline->SetSplinePoints({ FVector(-16000.0, 3000.0, 0.0), FVector(-3000.0, 11000.0, 0.0) }, ESplineCoordinateSpace::Local);
 	const int32 BuildingsBefore = Network->NumBuildings;
-	Network->Tick(0.0f);
+	CSRoadTest::TickBuild(Network);
 	TestEqual(TEXT("main road: error"), Network->LastError, FString());
 	TestTrue(TEXT("main road: some building tiles rebuilt"), Network->BuildingTilesRebuilt > 0);
 	const TMap<FString, uint32> After = CSCityTests_BuildingGenerations(Network);
@@ -392,7 +488,7 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	// The special building moved east: the batch buildings make way.
 	Special->SetActorLocation(FVector(6000.0, -3000.0, 0.0));
 	Special->Rebuild();
-	Network->Tick(0.0f);
+	CSRoadTest::TickBuild(Network);
 	TestEqual(TEXT("moved: error"), Network->LastError, FString());
 	TestTrue(TEXT("moved: some building tiles rebuilt"), Network->BuildingTilesRebuilt > 0);
 	TestEqual(TEXT("moved: batch buildings in the special building's plot"), InPlot(), 0);
@@ -409,7 +505,7 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	Network->Lots.Seed = 7;
 	Network->Rebuild();
 	TestTrue(TEXT("batched: building tiles left pending"), Network->PendingTiles > 0);
-	for (int32 Tick = 0; Tick < 50 && Network->PendingTiles > 0; Tick++) Network->Tick(0.0f);
+	for (int32 Tick = 0; Tick < 50 && Network->PendingTiles > 0; Tick++) CSRoadTest::TickBuild(Network);
 	TestEqual(TEXT("batched: tiles left pending"), Network->PendingTiles, 0);
 	const TArray<FVector3f> Batched = Sorted();
 	Network->MaxTilesPerBatch = 0;
@@ -477,7 +573,7 @@ bool FCSCityLocalUpdateTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("built: batch buildings"), Current.Num() > 0);
 	auto Check = [&](const FString& Case)
 	{
-		Network->Tick(0.0f);
+		CSRoadTest::TickBuild(Network);
 		TestEqual(Case + TEXT(": error"), Network->LastError, FString());
 		const int32 LaidOut = Network->BuildingTilesLaidOut;
 		const int32 Tiles = CSCityTests_BuildingGenerations(Network).Num();

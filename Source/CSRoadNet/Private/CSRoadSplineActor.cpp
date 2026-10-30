@@ -12,7 +12,6 @@ void UCSRoadSplineMetadata::InsertPoint(int32 Index, float t, bool bClosedLoop)
 	{
 		Point.bSegmentElevation = Points[Previous].bSegmentElevation;
 		Point.SegmentElevation = Points[Previous].SegmentElevation;
-		Point.bSegmentOwned = Points[Previous].bSegmentOwned;
 	}
 	Points.Insert(Point, FMath::Clamp(Index, 0, Points.Num()));
 }
@@ -124,6 +123,7 @@ ACSRoadNetworkActor* UCSRoadSplineComponent::FindNetwork() const
 
 void UCSRoadSplineComponent::NotifyNetwork() const
 {
+	Revision++;
 	if (ACSRoadNetworkActor* Network = FindNetwork()) Network->RequestRebuild();
 }
 

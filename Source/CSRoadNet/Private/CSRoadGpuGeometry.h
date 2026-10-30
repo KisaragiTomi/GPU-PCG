@@ -33,7 +33,6 @@ struct FGpuGeometryInput
 	TArray<Edge> EdgeData;
 	TArray<Curve> CurveData;
 	TArray<Elevation> ElevationData;
-	TArray<Owner> OwnerData;
 	TArray<Composition> CompositionData;
 	TArray<NodeGeometry> InitialNodeGeometry;
 	TArray<FGpuRange> ConnectedEdgeRange;

@@ -1,0 +1,72 @@
+// The road network's edit layer of the landscape (CSRoadTerrainLayer.cpp): during the heightmap merge, the ground
+// under the ground roads goes to their surface (plus an offset), and a shoulder blends it into the terrain around.
+// A texel under a road (within a piece's flat half width) takes the lowest surface of the pieces over it, so that
+// where roads overlap (a junction's pieces, a median's nose) the ground stays below all of them; one in a shoulder
+// takes the piece covering it most (the nearer at a tie), falling off to nothing a shoulder past its flat part.
+
+#include "/Engine/Public/Platform.ush"
+
+// The merge so far: the height a uint16 in RG (R the high byte, G the low), BA left as they are.
+Texture2D<float4> Input;
+RWTexture2D<float4> Output;
+// Per road piece: its ends in the ground plane (world cm), their heights (world cm) and its flat half width (cm).
+StructuredBuffer<float4> Ends;
+StructuredBuffer<float4> Heights;
+// The pieces near each square of the ground plane: those of square S from CellStart[S] to CellStart[S + 1].
+StructuredBuffer<uint> CellStart;
+StructuredBuffer<uint> CellPieces;
+
+// A texel's world position: Origin + AxisX * x + AxisY * y (the render area's bottom-left vertex and its quads).
+float3 Origin;
+float3 AxisX;
+float3 AxisY;
+float2 GridOrigin;
+float CellSize;
+int2 GridSize;
+int2 Size;
+// uint16 = (WorldZ - LandscapeZOffset) / LandscapeZScale * 128 + 32768
+float LandscapeZScale;
+float LandscapeZOffset;
+float Influence;
+float HeightOffset;
+float Shoulder;
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 Id : SV_DispatchThreadID)
+{
+	if (any(int2(Id.xy) >= Size)) return;
+	const float4 Combined = Input.Load(int3(Id.xy, 0));
+	const float2 World = (Origin + AxisX * Id.x + AxisY * Id.y).xy;
+	const int2 Cell = int2(floor((World - GridOrigin) / CellSize));
+	float Coverage = 0.0;
+	float Distance = 1e30;
+	float Height = 0.0;
+	float Lowest = 1e30;
+	if (all(Cell >= 0) && all(Cell < GridSize))
+	{
+		const uint Square = uint(Cell.y * GridSize.x + Cell.x);
+		for (uint I = CellStart[Square]; I < CellStart[Square + 1]; I++)
+		{
+			const uint Piece = CellPieces[I];
+			const float4 AB = Ends[Piece];
+			const float4 H = Heights[Piece];
+			const float2 Along = AB.zw - AB.xy;
+			const float T = saturate(dot(World - AB.xy, Along) / max(dot(Along, Along), 1e-6));
+			const float D = length(World - (AB.xy + Along * T));
+			const float C = 1.0 - smoothstep(H.z, H.z + max(Shoulder, 1e-3), D);
+			const float Surface = lerp(H.x, H.y, T);
+			if (D <= H.z) Lowest = min(Lowest, Surface);
+			if (C > Coverage || (C > 0.0 && C == Coverage && D < Distance))
+			{
+				Coverage = C;
+				Distance = D;
+				Height = Surface;
+			}
+		}
+	}
+	if (Lowest < 1e29) Height = Lowest;
+	const float Current = float(((int)round(Combined.r * 255.0) << 8) | (int)round(Combined.g * 255.0));
+	const float Target = (Height + HeightOffset - LandscapeZOffset) / max(LandscapeZScale, 1e-4) * 128.0 + 32768.0;
+	const int Final = clamp((int)round(lerp(Current, Target, Coverage * Influence)), 0, 65535);
+	Output[Id.xy] = float4(float((Final >> 8) & 0xFF) / 255.0, float(Final & 0xFF) / 255.0, Combined.b, Combined.a);
+}

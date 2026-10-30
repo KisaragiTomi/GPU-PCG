@@ -54,7 +54,7 @@ def setup():
     network = ACTORS.spawn_actor_from_class(unreal.load_class(None, "/Script/CSRoadNet.CSRoadNetworkActor"), unreal.Vector(0.0, 0.0, 0.0))
     network.set_actor_tick_enabled(False)
     network.set_editor_property("network_file", unreal.FilePath(NETWORK), notify_mode=NEVER)
-    network.convert_to_splines()
+    unreal.CSRoadNetTools.convert_to_splines(network)
     results["splines"] = network.get_editor_property("num_splines")
     results["roads"] = network.get_editor_property("num_roads")
     timed("whole (warming up)")

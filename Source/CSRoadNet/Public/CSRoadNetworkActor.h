@@ -3,7 +3,10 @@
 // deformation on the GPU, straight into a UCSMesh; the lane markings and crosswalks (RoadLab's
 // decals) are instanced mesh decals laid along their curves (CSRoadDecalInstances.h). The roads are
 // spline roads (ACSRoadSplineActor); a snapshot file lends its terrain, and its roads can be
-// converted into spline roads.
+// converted into spline roads (UCSRoadNetTools).
+//
+// The actor is the network's manager: its settings, operations and stats. What it builds goes into an
+// ACSRoadNetworkContent of its own, so selecting it stays quick however big the network is.
 #pragma once
 
 #include "CoreMinimal.h"
@@ -11,6 +14,8 @@
 #include "GameFramework/Actor.h"
 #include "CSRoadNetworkActor.generated.h"
 
+class ACSRoadNetworkContent;
+class UCSRoadTerrainRenderer;
 class ULevel;
 class UCSMesh;
 class UCSMeshRenderComponent;
@@ -20,6 +25,8 @@ class UInstancedStaticMeshComponent;
 class UStaticMesh;
 class UStaticMeshComponent;
 struct FCSRoadNetworkPreview;
+struct FCSRoadNetworkActor_SplineCache;
+struct FCSRoadNetworkActor_TileJob;
 namespace CSRoad
 {
 class FAssets;
@@ -38,6 +45,7 @@ class FTileState;
 struct FGpuGeometryInput;
 struct FGpuGeometryResult;
 struct FSavedTerrain;
+struct FTerrainFootprint;
 }
 namespace CSCity
 {
@@ -179,9 +187,9 @@ public:
 	ACSRoadNetworkActor(FVTableHelper& Helper);
 
 	/** Road snapshot (format cs2-road-network-v1), e.g. CitiesSkylines-Road2-C#
-	 *  Artifacts/public-saves/palmsland-3/network.json. It lends its terrain; ConvertToSplines turns its roads into
-	 *  spline roads. The roads built are the spline roads: ACSRoadSplineActors hanging under this actor (or, when it is
-	 *  the level's only network, every one in the level) and spline components on it. */
+	 *  Artifacts/public-saves/palmsland-3/network.json. It lends its terrain; UCSRoadNetTools turns its roads into
+	 *  spline roads and its terrain into a Landscape. The roads built are the spline roads: ACSRoadSplineActors hanging
+	 *  under this actor (or, when it is the level's only network, every one in the level) and spline components on it. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (FilePathFilter = "json"))
 	FFilePath NetworkFile;
 
@@ -245,6 +253,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Local Update", meta = (ClampMin = "0", DisplayName = "GPU Mesh Budget (MiB)", EditCondition = "bLocalUpdate && bBakeNanite"))
 	int32 GpuMeshBudget = 200;
 
+	/** After an edit, convert only the splines around the ones that changed into the network, taking the rest as the last
+	 *  conversion left it; the network comes out as converting every spline makes it. Other prefab data, settings or
+	 *  terrain, splines without an id of their own, or a change reaching half the splines convert them all. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Local Update")
+	bool bIncrementalSplines = true;
+
+	/** Convert every spline as well after each conversion around a change, and compare: a difference is logged with the
+	 *  first value that differs, and the whole conversion used. Slow; for checking. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Local Update", meta = (EditCondition = "bIncrementalSplines"))
+	bool bVerifyIncremental = false;
+
 	/** Tiles with roads. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumTiles = 0;
@@ -261,6 +280,11 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 TilesRebuilt = 0;
 
+	/** Of the tiles the last rebuild wrote or removed, those edits dirtied (the others were left by earlier batches). A
+	 *  rebuild an edit made writes only those. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 EditedTilesRebuilt = 0;
+
 	/** Road and building tiles left for the next batches. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 PendingTiles = 0;
@@ -275,9 +299,11 @@ public:
 	int32 RoadsGraphed = 0;
 
 	/** Fill the plots along the roads with buildings (convex hulls pushed up), clear of the roads, of each other and
-	 *  of the plots ACSCityBuildingActors reserve. A plot belongs to the spline it faces (its segment, side and place
-	 *  along it), so editing one road leaves the buildings along the others as they were. Drawn in tiles of
-	 *  TileSize; a rebuild rewrites only the tiles whose buildings changed. */
+	 *  of the plots ACSCityBuildingActors reserve. Only roads CS2 zones along have plots (not highways or bridges);
+	 *  on the snapshot's terrain the buildings stand on the ground, and none front a road 3 m above or below it. A
+	 *  plot belongs to the spline it faces (its segment, side and place along it), so editing one road leaves the
+	 *  buildings along the others as they were. Drawn in tiles of TileSize; a rebuild rewrites only the tiles whose
+	 *  buildings changed. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Buildings")
 	bool bBatchBuildings = false;
 
@@ -350,15 +376,29 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Bridge")
 	TObjectPtr<UMaterialInterface> BridgePierMaterial;
 
-	UPROPERTY(VisibleAnywhere, Category = "CS2 Road|Traffic")
-	TObjectPtr<UInstancedStaticMeshComponent> TrafficBodies;
+	/** Shape the level's Landscape to the ground roads (bridges, viaducts and tunnels apart) through an edit layer of
+	 *  its own, "CS2 Roads": the ground under a road goes to its surface, stays flat TerrainMargin past its edge, then
+	 *  blends back into the terrain over TerrainShoulder. The layer is made when the network next builds its whole
+	 *  preview (its first build, then whenever edits settle) and follows the roads from then on. Off, the layer goes
+	 *  and the terrain is as it was. Editor only. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Terrain")
+	bool bShapeTerrain = false;
 
-	UPROPERTY(VisibleAnywhere, Category = "CS2 Road|Traffic")
-	TObjectPtr<UInstancedStaticMeshComponent> TrafficCabins;
+	/** How far the ground under the roads goes to them: 0 not at all, 1 all the way. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Terrain", meta = (ClampMin = "0", ClampMax = "1", EditCondition = "bShapeTerrain"))
+	float TerrainInfluence = 1.0f;
 
-	/** Columns, caps and footings, generated as one instanced component. */
-	UPROPERTY(VisibleAnywhere, Category = "CS2 Road|Bridge")
-	TObjectPtr<UInstancedStaticMeshComponent> BridgePiers;
+	/** The ground under a road this far from its centre line's height (below it when negative). */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Terrain", meta = (Units = "cm", EditCondition = "bShapeTerrain"))
+	float TerrainHeightOffset = -30.0f;
+
+	/** How far past a road's edge (its sidewalks included) the ground stays flat. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Terrain", meta = (ClampMin = "0", Units = "cm", EditCondition = "bShapeTerrain"))
+	float TerrainMargin = 100.0f;
+
+	/** Over how far beyond the flat part the ground blends back into the terrain. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Terrain", meta = (ClampMin = "0", Units = "cm", EditCondition = "bShapeTerrain"))
+	float TerrainShoulder = 800.0f;
 
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumTrafficVehicles = 0;
@@ -377,6 +417,10 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 SkippedBridgePiers = 0;
 
+	/** Road pieces (about 4 m each) the terrain layer holds the ground to. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 TerrainPieces = 0;
+
 	UFUNCTION(BlueprintCallable, BlueprintSetter, Category = "CS2 Road|Traffic")
 	void SetShowTraffic(bool bShow);
 
@@ -387,19 +431,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Splines", meta = (GetOptions = "GetRoadPrefabOptions"))
 	FString DefaultSplinePrefab = TEXT("Small Road");
 
-	/** Traffic drives on the left (ConvertToSplines takes it from the snapshot). */
+	/** Traffic drives on the left (UCSRoadNetTools::ConvertToSplines takes it from the snapshot). */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Splines")
 	bool bLeftHandTraffic = false;
 
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Splines")
 	FCSRoadSplineSettings SplineSettings;
-
-	UPROPERTY(VisibleAnywhere, Category = "CS2 Road")
-	TObjectPtr<UCSMeshRenderComponent> RoadMesh;
-
-	/** The decals of a whole build, one component per material slot and priority (tiles have their own). */
-	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road")
-	TArray<TObjectPtr<UInstancedStaticMeshComponent>> MarkingDecals;
 
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumRoads = 0;
@@ -436,19 +473,31 @@ public:
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "CS2 Road")
 	void Rebuild();
 
-	/** NetworkFile's roads as ACSRoadSplineActors under this actor, one per run of edges where the road goes on, with
-	 *  every node's and edge's data, so they build into the same roads; then builds from them. Undoable. */
-	UFUNCTION(CallInEditor, BlueprintCallable, Category = "CS2 Road|Splines")
-	void ConvertToSplines();
+	// UCSRoadNetTools' conversions (there, the details panel stays free of them), editor only: false or null with
+	// LastError set.
+	bool ConvertToSplines();
+	AActor* ConvertTerrainToLandscape(UMaterialInterface* Material);
 
 	// Rebuilds on the next tick: spline roads call it as they change, many times a frame.
 	void RequestRebuild();
 
-	// Tests: waits for the GPU until every decal fit has landed, and draws them.
-	void FinishDecalFits();
+	/** What the network has built, in an actor of its own (null before its first build). */
+	UFUNCTION(BlueprintPure, Category = "CS2 Road")
+	ACSRoadNetworkContent* GetContent() const { return Content; }
+
+	// The renderer of the landscape edit layer LayerGuid, when the network shapes the terrain through it.
+	UCSRoadTerrainRenderer* TerrainRendererOf(const FGuid& LayerGuid) const;
+
+	// Tests: waits until every tile mesh edit on its way has run and every decal fit has landed, and
+	// draws them.
+	void FinishWrites();
+	// Tests: whether a build in tiles waits for the GPU between ticks (Tick ends it).
+	bool IsBuilding() const;
 
 	// The road prefabs of the network's asset directory (the default one without a network).
 	static TArray<FString> RoadPrefabNames(const ACSRoadNetworkActor* Network);
+	// A road prefab's width there (cm), 0 for none of that name.
+	static double RoadWidth(const ACSRoadNetworkActor* Network, const FString& Prefab);
 	// The level's network if it has exactly one, which also takes the level's spline roads that hang
 	// under no network.
 	static ACSRoadNetworkActor* LevelSplineNetwork(const ULevel* Level);
@@ -462,12 +511,37 @@ public:
 	virtual void Tick(float DeltaSeconds) override;
 	virtual bool ShouldTickIfViewportsOnly() const override { return true; }
 	virtual void PostRegisterAllComponents() override;
+	virtual void Destroyed() override;
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual void PostEditMove(bool bFinished) override;
 #endif
 
 private:
+	// Everything built, in an actor of its own (ACSRoadNetworkContent). Kept out of undo and copies: it is
+	// rebuilt rather than restored.
+	UPROPERTY(Transient, DuplicateTransient, NonTransactional)
+	TObjectPtr<ACSRoadNetworkContent> Content;
+	// The content, spawned when first asked for (null on a template or without a world).
+	ACSRoadNetworkContent* EnsureContent();
+	// The content gone, and with it everything the network remembers of what it built: the next build makes it
+	// all again.
+	void DestroyContent();
+	// The content shown or hidden as the network is.
+	void SyncContentVisibility();
+
+	// The landscape edit layer the network shapes the terrain through (bShapeTerrain); a copy makes its own.
+	UPROPERTY(DuplicateTransient)
+	FGuid TerrainLayerGuid;
+
+	UPROPERTY(Transient, DuplicateTransient, NonTransactional)
+	TObjectPtr<UCSRoadTerrainRenderer> TerrainRenderer;
+
+	// The terrain layer as the settings ask (editor worlds): made, or found, on the level's Landscape to draw Footprint,
+	// the landscape merged again when what it draws changed; gone when bShapeTerrain is off.
+	void UpdateTerrain(const TSharedPtr<const CSRoad::FTerrainFootprint>& Footprint);
+	void RemoveTerrainLayer();
+
 	UPROPERTY(Transient)
 	TObjectPtr<UCSMesh> Mesh;
 
@@ -537,18 +611,31 @@ private:
 		UCSMeshRenderComponent* Road = nullptr;
 		TObjectPtr<UCSMesh>* RoadMesh = nullptr;
 		const CSRoad::FGpuDecalInput* Decals = nullptr;
+		// The mesh input and Decals held for an edit that does not wait for the render thread
+		// (EditMeshAsync), which keeps them until it has run. Unset: the edit waits (EditMeshSync).
+		TSharedPtr<const CSRoad::FGpuRoadMeshInput> SharedMesh;
+		TSharedPtr<const CSRoad::FGpuDecalInput> SharedDecals;
 		TSharedPtr<CSRoad::FDecalFitReadback> Fit;
 		double AllocationMs = 0.0;
 		double RoadMs = 0.0;
 	};
 
 	FString ResolveAssetDirectory() const;
-	// The spline roads this network builds, in its space (Unity metres).
-	TArray<CSRoad::FSplineRoad> GatherSplines() const;
-	bool BuildRoads(FString& OutError);
-	// BuildRoads in tiles, from sub-graphs of the roads near what changed (CSRoadTiles.h).
-	bool BuildTiles(CSRoad::FAssets& Assets, const TArray<CSRoad::FRoadSpec>& Specs, const TArray<CSRoad::FSavedNode>& Nodes, bool bLeftHand,
-		const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FSavedTerrain* Terrain, bool bMarkings, FString& OutError);
+	// The spline roads this network builds, in its space (Unity metres). A road spline that has not
+	// changed since the last time (SplineCache) is taken as read then.
+	TArray<CSRoad::FSplineRoad> GatherSplines();
+	TUniquePtr<FCSRoadNetworkActor_SplineCache> SplineCache;
+	// Rebuild's work. bWait: every GPU round trip waited for. Else (Tick) a build in tiles waits for the
+	// GPU a tick at a time (TileJob) and writes the tiles without waiting for the render thread.
+	void RunBuild(bool bWait);
+	// What a build that ended leaves: its error, the stats, the next build its pending tiles ask for.
+	void EndBuild(bool bBuilt, const FString& Error, double Milliseconds);
+	bool BuildRoads(bool bWait, FString& OutError);
+	// BuildRoads in tiles, from sub-graphs of the roads near what changed (CSRoadTiles.h): Job's stages
+	// run until it ends (false on error) or, not waiting, until it waits for the GPU.
+	bool AdvanceTiles(FCSRoadNetworkActor_TileJob& Job, FString& OutError);
+	// The build in tiles waiting for the GPU between ticks.
+	TUniquePtr<FCSRoadNetworkActor_TileJob> TileJob;
 	// Allocates the target and records the road mesh into it, on the build's geometry when
 	// SharedGeometry holds it (else the graph runs it again).
 	bool WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry, const CSRoad::FPooledGeometry& SharedGeometry, const CSRoad::FGpuRoadMeshInput& MeshInput,
@@ -562,6 +649,9 @@ private:
 	// Draws whichever queued decals have landed; the latest of them wins. Returns whether any did.
 	bool TickDecalFits(TArray<TSharedPtr<CSRoad::FDecalFitReadback>>& Fits, TArray<TObjectPtr<UInstancedStaticMeshComponent>>& Components, const FString& Name, int32& OutInstances);
 	void TickAllDecalFits();
+	// Runs the tiles' mesh edits still on their way to the end (their game-thread ends included).
+	void LandTileEdits();
+	bool AnyTileEditInFlight() const;
 	// DecalMaterial and FittedDecalMaterial with the albedo and tint of each of the decals' surfaces'
 	// M_CS2 materials, made now for when the decals draw (MissingMarkingSurfaces: those without).
 	void ResolveDecalMaterials(const CSRoad::FGpuDecalInput& Decals, const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FAssets& Assets);
@@ -575,6 +665,10 @@ private:
 	void ClearTiles();
 	// What the tiles' meshes depend on besides the roads.
 	uint64 TileSignature(bool bLeftHand) const;
+	// Where the camera is, in tiles of the network's ground plane (fractional): the editor's perspective
+	// viewport on this world, else the first player's camera. The tiles waiting to be written go nearest
+	// it first. False: no camera.
+	bool TileFocus(FVector2D& OutFocus) const;
 
 	// As Tiles, by the same (column, row).
 	UPROPERTY(Transient, NonTransactional)
@@ -589,6 +683,6 @@ private:
 	// The batch buildings along the roads as built (Roads, the network's space). The plots face the
 	// segments of Splines. Only the tiles within reach of an input that changed are laid out again; the
 	// plots there come out as a full layout's would.
-	void BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>& Splines, const TArray<CSRoad::FRoadSpec>& Roads, CSRoad::FAssets& Assets);
+	void BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>& Splines, const TArray<CSRoad::FRoadSpec>& Roads, CSRoad::FAssets& Assets, const CSRoad::FSavedTerrain* Terrain);
 	void ClearBuildingTiles();
 };

@@ -33,6 +33,8 @@ public class CSRoadNet : ModuleRules
 				"AssetRegistry",
 				"MeshDescription",
 				"StaticMeshDescription",
+				// The terrain edit layer (CSRoadTerrainLayer) and ConvertTerrainToLandscape.
+				"Landscape",
 			}
 			);
 

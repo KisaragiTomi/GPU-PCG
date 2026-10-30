@@ -2,15 +2,29 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "CSRoadNetworkActor.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformMisc.h"
+#include "HAL/PlatformProcess.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "RenderingThread.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
 namespace CSRoadTest
 {
+void TickBuild(ACSRoadNetworkActor* Network)
+{
+	Network->Tick(0.0f);
+	for (int32 Frame = 0; Frame < 5000 && Network->IsBuilding(); Frame++)
+	{
+		FlushRenderingCommands();
+		FPlatformProcess::Sleep(0.001f);
+		Network->Tick(0.0f);
+	}
+}
+
 FString LabRoot()
 {
 	const FString Env = FPlatformMisc::GetEnvironmentVariable(TEXT("CS2ROADLAB"));

@@ -250,7 +250,7 @@ struct FCompositionSelect
 			|| ((Layers & (Layer_Road | Layer_TrainTrack | Layer_Pathway | Layer_TramTrack | Layer_SubwayTrack | Layer_MarkerPathway | Layer_PublicTransportRoad)) != Layer_None && (Layers & Layer_Waterway) != Layer_None);
 	}
 
-	CompositionFlags GetNodeFlags(int32 EdgeEntity, int32 NodeEntity, int32 OwnerEntity, int32 Prefab, const NetData& PrefabNetData, const NetGeometryData& PrefabGeometryData,
+	CompositionFlags GetNodeFlags(int32 EdgeEntity, int32 NodeEntity, int32 Prefab, const NetData& PrefabNetData, const NetGeometryData& PrefabGeometryData,
 		CompositionFlags EdgeFlags, Curve EdgeCurve, bool bIsStart, CompositionFlags& ObsoleteNodeFlags, CompositionFlags& ObsoleteEdgeFlags) const
 	{
 		const CompositionFlags OriginalEdgeFlags = EdgeFlags;
@@ -268,25 +268,6 @@ struct FCompositionSelect
 		}
 		Handedness |= GetSubObjectFlags(NodeEntity, PrefabNetData);
 		Handedness |= EdgeFlags;
-		if (G.Has(OwnerEntity, Component_Edge))
-		{
-			const Edge& OwnerEdge = G.EdgeData[OwnerEntity];
-			const Curve& Curve2 = G.CurveData[OwnerEntity];
-			const NetData& PrefabNetData2 = G.PrefabNet[G.PrefabRef[OwnerEntity]];
-			const NetGeometryData& OwnerGeometry = PrefabGeometry(OwnerEntity);
-			const float3 X = bIsStart ? EdgeCurve.m_Bezier.a : EdgeCurve.m_Bezier.d;
-			const float Num = math::distancesq(X, Curve2.m_Bezier.a);
-			const float Num2 = math::distancesq(X, Curve2.m_Bezier.d);
-			const int32 OwnerNode = Num <= Num2 ? OwnerEdge.m_Start : OwnerEdge.m_End;
-			Handedness |= GetSubObjectFlags(OwnerNode, PrefabNetData2) & MakeFlags(CompositionFlags_General_FixedNodeSize, 0, 0);
-			FEdgeIterator Iterator(G, OwnerNode);
-			FEdgeIteratorValue Value;
-			while (Iterator.GetNext(Value))
-			{
-				const NetGeometryData& Geometry2 = PrefabGeometry(Value.m_Edge);
-				if ((Geometry2.m_MergeLayers & OwnerGeometry.m_MergeLayers) == 0 && LevelCrossingLayers(Geometry2.m_MergeLayers | OwnerGeometry.m_MergeLayers)) Handedness.m_General |= CompositionFlags_General_LevelCrossing;
-			}
-		}
 		if ((PrefabGeometryData.m_Flags & GeometryFlags_SupportRoundabout) == 0) Handedness.m_General &= ~CompositionFlags_General_Roundabout;
 		int32 Num3 = 0;
 		int3 Lanes = 0;
@@ -537,20 +518,11 @@ int32 FGraph::NewEntity()
 	CurveData.AddDefaulted();
 	ElevationData.AddDefaulted();
 	UpgradedData.AddDefaulted();
-	OwnerData.AddDefaulted();
 	CompositionData.AddDefaulted();
 	PrefabRef.Add(0);
 	InitialNodeGeometry.AddDefaulted();
 	ConnectedEdges.AddDefaulted();
 	return Id;
-}
-
-int32 FGraph::OwnerEntity(int32 Owner)
-{
-	if (const int32* Existing = OwnerEntities.Find(Owner)) return *Existing;
-	const int32 Entity = NewEntity();
-	OwnerEntities.Add(Owner, Entity);
-	return Entity;
 }
 
 int32 FGraph::Prefab(FAssets& Assets, const FString& Name)
@@ -610,12 +582,6 @@ int32 FGraph::SavedNode(FAssets& Assets, const TArray<FSavedNode>& SavedNodes, i
 		UpgradedData[Id].m_Flags = Source.Upgrade;
 	}
 	if (Source.bOutside) Mask[Id] |= Component_OutsideConnection;
-	if (Source.Owner != 0)
-	{
-		const int32 Owner = OwnerEntity(Source.Owner);
-		Mask[Id] |= Component_Owner;
-		OwnerData[Id].m_Owner = Owner;
-	}
 	PrefabRef[Id] = PrefabIndex;
 	return Id;
 }
@@ -697,12 +663,6 @@ bool FGraph::Build(FAssets& Assets, const TArray<FRoadSpec>& Specs, const TArray
 			Mask[Id] |= Component_Upgraded;
 			UpgradedData[Id].m_Flags = Spec.Upgrade;
 		}
-		if (Spec.bHasSource && Spec.Owner != 0)
-		{
-			const int32 Owner = OwnerEntity(Spec.Owner);
-			Mask[Id] |= Component_Owner;
-			OwnerData[Id].m_Owner = Owner;
-		}
 		ConnectedEdges[Start].Add(Id);
 		ConnectedEdges[End].Add(Id);
 		Pending.Add({ Id, SpecIndex, Start, End });
@@ -717,7 +677,6 @@ bool FGraph::Build(FAssets& Assets, const TArray<FRoadSpec>& Specs, const TArray
 		const NetGeometryData& Geometry = PrefabGeometry[PrefabIndex];
 		const NetData& Net = PrefabNet[PrefabIndex];
 		const Curve& EdgeCurve = CurveData[Item.Id];
-		const int32 OwnerEntity = Has(Item.Id, Component_Owner) ? OwnerData[Item.Id].m_Owner : Entity_Null;
 		const CompositionFlags SubObjectFlags = Selector.GetSubObjectFlags(Item.Id, EdgeCurve, Geometry);
 		const CompositionFlags ElevationFlags = Selector.GetElevationFlags(Item.Id, Item.Start, Item.End, Geometry);
 		const CompositionFlags UpgradeFlags = Has(Item.Id, Component_Upgraded) ? UpgradedData[Item.Id].m_Flags : CompositionFlags{};
@@ -725,8 +684,8 @@ bool FGraph::Build(FAssets& Assets, const TArray<FRoadSpec>& Specs, const TArray
 		CompositionFlags ObsoleteStart;
 		CompositionFlags ObsoleteEnd;
 		CompositionFlags EdgeFlags = Selector.GetEdgeFlags(Item.Id, PrefabIndex, Geometry, UpgradeFlags, SubObjectFlags, ElevationFlags, ObsoleteEdge);
-		const CompositionFlags StartFlags = Selector.GetNodeFlags(Item.Id, Item.Start, OwnerEntity, PrefabIndex, Net, Geometry, EdgeFlags, EdgeCurve, true, ObsoleteStart, ObsoleteEdge);
-		const CompositionFlags EndFlags = Selector.GetNodeFlags(Item.Id, Item.End, OwnerEntity, PrefabIndex, Net, Geometry, EdgeFlags, EdgeCurve, false, ObsoleteEnd, ObsoleteEdge);
+		const CompositionFlags StartFlags = Selector.GetNodeFlags(Item.Id, Item.Start, PrefabIndex, Net, Geometry, EdgeFlags, EdgeCurve, true, ObsoleteStart, ObsoleteEdge);
+		const CompositionFlags EndFlags = Selector.GetNodeFlags(Item.Id, Item.End, PrefabIndex, Net, Geometry, EdgeFlags, EdgeCurve, false, ObsoleteEnd, ObsoleteEdge);
 		// Original Execute: FixedNodeSize from either node also applies to the edge composition.
 		EdgeFlags.m_General |= (StartFlags.m_General | EndFlags.m_General) & CompositionFlags_General_FixedNodeSize;
 		const FComposition& EdgeComposition = Assets.Compose(Spec.Prefab, EdgeFlags, false);

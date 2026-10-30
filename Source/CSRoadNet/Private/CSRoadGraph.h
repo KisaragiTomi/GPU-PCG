@@ -13,7 +13,6 @@ static const uint32 Component_Edge = 1u << 1;
 static const uint32 Component_Curve = 1u << 2;
 static const uint32 Component_Elevation = 1u << 3;
 static const uint32 Component_Upgraded = 1u << 4;
-static const uint32 Component_Owner = 1u << 5;
 static const uint32 Component_OutsideConnection = 1u << 6;
 static const uint32 Component_Composition = 1u << 7;
 
@@ -27,8 +26,6 @@ struct FSavedNode
 	float2 Elevation;
 	CompositionFlags Upgrade{};
 	bool bOutside = false;
-	// What owns the node (a snapshot's building): only which nodes and edges share one counts. 0: none.
-	int32 Owner = 0;
 };
 
 // A road edge to build. With a saved source it ends on the saved nodes SourceStart and SourceEnd (indices
@@ -43,8 +40,6 @@ struct FRoadSpec
 	int32 SourceEnd = INDEX_NONE;
 	bool bHasElevation = false;
 	float2 Elevation;
-	// As FSavedNode::Owner.
-	int32 Owner = 0;
 };
 
 struct FRoadInstance
@@ -70,7 +65,6 @@ public:
 	TArray<Curve> CurveData;
 	TArray<Elevation> ElevationData;
 	TArray<Upgraded> UpgradedData;
-	TArray<Owner> OwnerData;
 	TArray<Composition> CompositionData;
 	TArray<int32> PrefabRef;
 	TArray<NodeGeometry> InitialNodeGeometry;
@@ -97,12 +91,10 @@ private:
 	TMap<FIntVector, int32> PositionNodes;
 	// Per saved node, its entity once a spec reached it (0: not yet).
 	TArray<int32> SavedNodeEntities;
-	TMap<int32, int32> OwnerEntities;
 	TMap<FString, int32> PrefabIndices;
 	TMap<const FComposition*, int32> CompositionIndices;
 
 	int32 NewEntity();
-	int32 OwnerEntity(int32 Owner);
 	int32 Prefab(FAssets& Assets, const FString& Name);
 	int32 PositionNode(float3 Position, int32 Prefab);
 	int32 SavedNode(FAssets& Assets, const TArray<FSavedNode>& SavedNodes, int32 Index);

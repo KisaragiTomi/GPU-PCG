@@ -1,8 +1,9 @@
 // Where a city's alleys are laid out beforehand: Generate splits the region (its box, seen from above)
-// into blocks by straight alleys, keeping out of the plots ACSCityBuildingActors reserve there, and
-// leaves them as ordinary spline roads of tier Alley under the road network. From then on they are
-// drawn roads like any other; main roads drawn over them later cut them back (CSRoadSplineNetwork).
-// Generating again replaces the alleys the region made before.
+// into blocks by straight alleys, keeping out of the plots ACSCityBuildingActors reserve there, cuts
+// them back to the small roads (tier Alley) already there, joining those, and leaves them as ordinary
+// spline roads of tier Alley under the road network. From then on they are drawn roads like any other;
+// main roads over them cut them back while they lie there (CSRoadSplineNetwork). Generating again
+// replaces the alleys the region made before.
 #pragma once
 
 #include "CoreMinimal.h"

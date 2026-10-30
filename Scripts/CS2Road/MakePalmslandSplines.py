@@ -5,7 +5,7 @@
 
 ConvertToSplines turns the snapshot's edges into ACSRoadSplineActors hanging under one
 ACSRoadNetworkActor, with every node's and edge's data on the spline points (node offsets and
-prefabs, elevations, upgrades, outside connections, whether something owns them). The level keeps
+prefabs, elevations, upgrades, outside connections; owners are not kept). The level keeps
 those splines and the network builds from them (Source = Splines); the snapshot stays as NetworkFile
 for its terrain alone, which the road vertices follow and new roads measure their elevation from.
 The network updates in 256 m tiles (bLocalUpdate), so an edit rewrites only the tiles around it, and
@@ -60,7 +60,7 @@ def build():
     network.set_editor_property("local_update", True, notify_mode=NEVER)
     network.set_editor_property("tile_size", 256.0, notify_mode=NEVER)
     network.set_editor_property("max_tiles_per_batch", 16, notify_mode=NEVER)
-    network.convert_to_splines()
+    unreal.CSRoadNetTools.convert_to_splines(network)
     stats = {k: network.get_editor_property(k) for k in STATS}
     stats["pending_tiles"] = network.get_editor_property("pending_tiles")
     log("first batch " + str(stats))

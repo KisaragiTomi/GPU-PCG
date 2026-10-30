@@ -85,17 +85,15 @@ struct FCSRoadTileTests_Output
 // What the network draws: its whole-build mesh and decals, or every tile's, once their heights landed.
 FCSRoadTileTests_Output CSRoadTileTests_Read(ACSRoadNetworkActor* Network)
 {
-	Network->FinishDecalFits();
+	Network->FinishWrites();
 	FCSRoadTileTests_Output Out;
-	TArray<UCSMeshRenderComponent*> Components;
-	Network->GetComponents<UCSMeshRenderComponent>(Components);
+	TArray<UCSMeshRenderComponent*> Components = CSRoadTest::Built<UCSMeshRenderComponent>(Network);
 	for (const UCSMeshRenderComponent* Component : Components)
 	{
 		if (!Component->IsVisible() || !Component->GetGpuMesh() || Component->GetName().StartsWith(TEXT("BuildingTile"))) continue;
 		CSRoadTileTests_Triangles(Component->GetGpuMesh(), Out.Roads, Out.RoadTriangles, &Out.RoadBounds, &Out.RoadDegenerate);
 	}
-	TArray<UInstancedStaticMeshComponent*> Decals;
-	Network->GetComponents<UInstancedStaticMeshComponent>(Decals);
+	TArray<UInstancedStaticMeshComponent*> Decals = CSRoadTest::Built<UInstancedStaticMeshComponent>(Network);
 	for (const UInstancedStaticMeshComponent* Component : Decals) if (Component->GetName().StartsWith(TEXT("Marking"))) CSRoadTileTests_Decals(Component, Out.Markings, Out.MarkingInstances);
 	return Out;
 }
@@ -181,11 +179,12 @@ bool FCSRoadTilesActorTest::RunTest(const FString& Parameters)
 		return CSRoadTileTests_Read(Network);
 	};
 	auto Compare = [this](const FString& Case, const FCSRoadTileTests_Output& Tiled, const FCSRoadTileTests_Output& Whole) { CSRoadTileTests_Compare(*this, Case, Tiled, Whole); };
+	// The tiles' mesh generations, once the edits a tick sent on their way have run.
 	auto Generations = [&]()
 	{
+		Network->FinishWrites();
 		TMap<FString, uint32> Out;
-		TArray<UCSMeshRenderComponent*> Components;
-		Network->GetComponents<UCSMeshRenderComponent>(Components);
+		TArray<UCSMeshRenderComponent*> Components = CSRoadTest::Built<UCSMeshRenderComponent>(Network);
 		for (const UCSMeshRenderComponent* Component : Components) if (Component->GetName().StartsWith(TEXT("RoadTile")) && Component->GetGpuMesh()) Out.Add(Component->GetName(), Component->GetGpuMesh()->GetGeneration());
 		return Out;
 	};
@@ -208,7 +207,7 @@ bool FCSRoadTilesActorTest::RunTest(const FString& Parameters)
 	// The north end of the easternmost street moves: the tiles around it rebuild, the others keep their meshes.
 	ACSRoadSplineActor* East = Roads.Last();
 	East->Spline->SetLocationAtSplinePoint(2, FVector(18000.0 + 4000.0, 15000.0, 0.0), ESplineCoordinateSpace::Local);
-	Network->Tick(0.0f);
+	CSRoadTest::TickBuild(Network);
 	TestEqual(TEXT("edited: error"), Network->LastError, FString());
 	const int32 Rebuilt = Network->TilesRebuilt;
 	TestTrue(TEXT("edited: some tiles rebuilt"), Rebuilt > 0);
@@ -225,7 +224,7 @@ bool FCSRoadTilesActorTest::RunTest(const FString& Parameters)
 	// A street removed: its tiles lose its triangles, what is left equals a whole build without it.
 	Build(true);
 	Roads[0]->Destroy();
-	Network->Tick(0.0f);
+	CSRoadTest::TickBuild(Network);
 	TestEqual(TEXT("removed: error"), Network->LastError, FString());
 	TestTrue(TEXT("removed: not every tile rebuilt"), Network->TilesRebuilt < Network->NumTiles);
 	const FCSRoadTileTests_Output Removed = CSRoadTileTests_Read(Network);
@@ -234,9 +233,9 @@ bool FCSRoadTilesActorTest::RunTest(const FString& Parameters)
 }
 
 // A network far wider than a sub-graph's reach: ten streets east to west crossed by ten north to
-// south, one a medium road, the easternmost owned. Edits drawn in tiles from sub-graphs come out as a
-// whole build draws them: a short spur added at the north-west corner (sub-graphs well short of the
-// network, and the owned street's tiles keep their meshes), the westernmost street's north end moved
+// south, one a medium road. Edits drawn in tiles from sub-graphs come out as a whole build draws them:
+// a short spur added at the north-west corner (sub-graphs well short of the network, and the tiles of a
+// street far east keep their meshes), the westernmost street's north end moved
 // (the whole street tilts), a street removed, a diagonal road added. Once edits settle, the traffic
 // preview is made again for the whole network.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadTilesSubgraphTest, "PCGPlugins.CSRoadNet.Tiles.Subgraph",
@@ -268,8 +267,7 @@ bool FCSRoadTilesSubgraphTest::RunTest(const FString& Parameters)
 		const double X = -27000.0 + I * 6000.0;
 		NorthSouth.Add(CSRoadTileTests_Road(World, Network, { FVector(X, -30000.0, 0.0), FVector(X, 30000.0, 0.0) }, TEXT("Small Road")));
 	}
-	// At x = 270 m, the column of tiles x = 2: an edit elsewhere must leave an owned road's key alone.
-	NorthSouth[9]->Spline->RoadMetadata->Points[0].bSegmentOwned = true;
+	// The street at x = 270 m is the column of tiles x = 2, far from the north-west corner.
 
 	auto Build = [&](bool bTiles)
 	{
@@ -278,12 +276,12 @@ bool FCSRoadTilesSubgraphTest::RunTest(const FString& Parameters)
 		TestEqual(FString::Printf(TEXT("%s build: error"), bTiles ? TEXT("tiled") : TEXT("whole")), Network->LastError, FString());
 		return CSRoadTileTests_Read(Network);
 	};
-	// The mesh generations of a column of road tiles.
+	// The mesh generations of a column of road tiles, once the edits a tick sent on their way have run.
 	auto Column = [&](int32 X)
 	{
+		Network->FinishWrites();
 		TMap<FString, uint32> Out;
-		TArray<UCSMeshRenderComponent*> Components;
-		Network->GetComponents<UCSMeshRenderComponent>(Components);
+		TArray<UCSMeshRenderComponent*> Components = CSRoadTest::Built<UCSMeshRenderComponent>(Network);
 		const FString Prefix = FString::Printf(TEXT("RoadTile_%d_"), X);
 		for (const UCSMeshRenderComponent* Component : Components) if (Component->GetName().StartsWith(Prefix) && Component->GetGpuMesh()) Out.Add(Component->GetName(), Component->GetGpuMesh()->GetGeneration());
 		return Out;
@@ -298,9 +296,9 @@ bool FCSRoadTilesSubgraphTest::RunTest(const FString& Parameters)
 	// bSmall: the edit keeps to the north-west corner.
 	auto Edit = [&](const FString& Case, TFunctionRef<void()> Change, bool bSmall)
 	{
-		const TMap<FString, uint32> Owned = Column(2);
+		const TMap<FString, uint32> Far = Column(2);
 		Change();
-		Network->Tick(0.0f);
+		CSRoadTest::TickBuild(Network);
 		TestEqual(Case + TEXT(": error"), Network->LastError, FString());
 		const int32 Graphed = Network->RoadsGraphed;
 		const int32 Roads = Network->NumRoads;
@@ -308,8 +306,8 @@ bool FCSRoadTilesSubgraphTest::RunTest(const FString& Parameters)
 		if (bSmall)
 		{
 			TestTrue(Case + TEXT(": sub-graphs together short of the network"), Graphed < Roads);
-			TestTrue(Case + TEXT(": the owned street's tiles"), Owned.Num() > 0);
-			TestTrue(Case + TEXT(": the owned street's tiles keep their meshes"), Column(2).OrderIndependentCompareEqual(Owned));
+			TestTrue(Case + TEXT(": the far street's tiles"), Far.Num() > 0);
+			TestTrue(Case + TEXT(": the far street's tiles keep their meshes"), Column(2).OrderIndependentCompareEqual(Far));
 		}
 		AddInfo(FString::Printf(TEXT("%s: %d of %d tiles rebuilt, %d roads graphed of %d"), *Case, Network->TilesRebuilt, Network->NumTiles, Graphed, Roads));
 		const FCSRoadTileTests_Output Edited = CSRoadTileTests_Read(Network);
@@ -330,7 +328,8 @@ bool FCSRoadTilesSubgraphTest::RunTest(const FString& Parameters)
 
 // The same network two tiles a batch: a rebuild writes two tiles and leaves the rest pending, the
 // next ticks write them, and then the tiles draw what a whole build draws. A new tile size dirties
-// every tile; a road moved one batch into that backlog still comes out as a whole build draws it.
+// every tile; a road moved one batch into that backlog is written by its build alone, before the
+// backlog, and still comes out as a whole build draws it.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadTilesBatchesTest, "PCGPlugins.CSRoadNet.Tiles.Batches",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
 
@@ -364,7 +363,7 @@ bool FCSRoadTilesBatchesTest::RunTest(const FString& Parameters)
 		int32 Largest = Network->TilesRebuilt;
 		for (; Network->PendingTiles > 0 && Batches < 100; Batches++)
 		{
-			Network->Tick(0.0f);
+			CSRoadTest::TickBuild(Network);
 			Largest = FMath::Max(Largest, Network->TilesRebuilt);
 		}
 		TestEqual(Case + TEXT(": error"), Network->LastError, FString());
@@ -388,7 +387,12 @@ bool FCSRoadTilesBatchesTest::RunTest(const FString& Parameters)
 	Network->TileSize = 96.0f;
 	Network->Rebuild();
 	TestTrue(TEXT("resized: tiles left pending"), Network->PendingTiles > 0);
+	Network->FinishWrites();
 	Roads.Last()->Spline->SetLocationAtSplinePoint(2, FVector(18000.0 + 4000.0, 15000.0, 0.0), ESplineCoordinateSpace::Local);
+	// The edit's build writes only tiles the edit dirtied; the backlog waits for the builds after it.
+	CSRoadTest::TickBuild(Network);
+	TestTrue(TEXT("edited in the backlog: the edit's build writes only its tiles"), Network->TilesRebuilt > 0 && Network->EditedTilesRebuilt == Network->TilesRebuilt);
+	AddInfo(FString::Printf(TEXT("edited in the backlog: %d tiles written, %d pending"), Network->TilesRebuilt, Network->PendingTiles));
 	Finish(TEXT("resized and edited"));
 	const FCSRoadTileTests_Output Edited = CSRoadTileTests_Read(Network);
 	CSRoadTileTests_Compare(*this, TEXT("resized and edited"), Edited, Whole());
@@ -416,8 +420,7 @@ bool CSRoadTileTests_Drive(ACSRoadNetworkActor* Network, double Seconds, TFuncti
 // Road tiles drawn from a GPU mesh.
 int32 CSRoadTileTests_GpuTiles(ACSRoadNetworkActor* Network)
 {
-	TArray<UCSMeshRenderComponent*> Components;
-	Network->GetComponents<UCSMeshRenderComponent>(Components);
+	TArray<UCSMeshRenderComponent*> Components = CSRoadTest::Built<UCSMeshRenderComponent>(Network);
 	int32 Count = 0;
 	for (const UCSMeshRenderComponent* Component : Components) Count += Component->GetName().StartsWith(TEXT("RoadTile")) && Component->GetGpuMesh() ? 1 : 0;
 	return Count;
@@ -431,8 +434,7 @@ int32 CSRoadTileTests_Baked(ACSRoadNetworkActor* Network, int32& OutTriangles, F
 	OutTriangles = 0;
 	OutInvalid = 0;
 	OutBounds = FBox(ForceInit);
-	TArray<UStaticMeshComponent*> Components;
-	Network->GetComponents<UStaticMeshComponent>(Components);
+	TArray<UStaticMeshComponent*> Components = CSRoadTest::Built<UStaticMeshComponent>(Network);
 	for (const UStaticMeshComponent* Component : Components)
 	{
 		if (!Component->GetName().StartsWith(TEXT("NaniteTile")) || !Component->GetStaticMesh()) continue;
@@ -499,7 +501,7 @@ bool FCSRoadTilesNaniteTest::RunTest(const FString& Parameters)
 
 	// An edit: the tiles it rewrites draw GPU meshes again, the others keep their bakes.
 	Roads.Last()->Spline->SetLocationAtSplinePoint(2, FVector(18000.0 + 4000.0, 15000.0, 0.0), ESplineCoordinateSpace::Local);
-	Network->Tick(0.0f);
+	CSRoadTest::TickBuild(Network);
 	TestEqual(TEXT("edited: error"), Network->LastError, FString());
 	const int32 Rebuilt = Network->TilesRebuilt;
 	TestTrue(TEXT("edited: some tiles rebuilt"), Rebuilt > 0 && Rebuilt < NumTiles);

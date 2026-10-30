@@ -63,10 +63,33 @@ void ACSCityAlleyRegion::Generate()
 	Settings.Clearance = double(Clearance) * 100.0;
 	Settings.bBoundary = bBoundaryAlleys;
 	Settings.Seed = Seed;
-	const TArray<CSCity::FAlley> Alleys = CSCity::LayoutAlleys(Region, Reserved, Settings);
+
+	// The small roads already there: an alley laid out under one is cut back to it for good and joins it,
+	// both being small roads laid out once. Main roads cut the alleys only while they lie over them
+	// (CSRoadSplineNetwork), so that moving one away gives the alleys back.
+	const double Height = GetActorLocation().Z;
+	const double Reach = ACSRoadNetworkActor::RoadWidth(Network, AlleyPrefab) * 0.5 + double(Network->SplineSettings.AlleyClearance) * 100.0;
+	FBox2D Area(ForceInit);
+	for (const FVector2D& Corner : Region) Area += Corner;
+	Area = Area.ExpandBy(10000.0);
+	TArray<CSCity::FRoadLine> SmallRoads;
+	for (const ACSRoadSplineActor* Road : TActorRange<ACSRoadSplineActor>(World))
+	{
+		const UCSRoadSplineComponent* Spline = Road->Spline;
+		if (!Spline || Spline->Tier != ECSRoadTier::Alley || Road->GetLevel() != GetLevel()) continue;
+		FBox2D Box(ForceInit);
+		for (int32 Point = 0; Point < Spline->GetNumberOfSplinePoints(); Point++) Box += FVector2D(Spline->GetLocationAtSplinePoint(Point, ESplineCoordinateSpace::World));
+		const double Width = ACSRoadNetworkActor::RoadWidth(Network, Spline->Prefab);
+		if (!Box.bIsValid || !Box.Intersect(Area) || Width <= 0.0 || ACSRoadNetworkActor::NetworkOf(Road) != Network) continue;
+		CSCity::FRoadLine& Line = SmallRoads.AddDefaulted_GetRef();
+		Line.HalfWidth = Width * 0.5;
+		const double Length = Spline->GetSplineLength();
+		const int32 Steps = FMath::Clamp(FMath::CeilToInt32(Length / 200.0), 1, 4096);
+		for (int32 Step = 0; Step <= Steps; Step++) Line.Points.Add(Spline->GetLocationAtDistanceAlongSpline(Length * Step / Steps, ESplineCoordinateSpace::World));
+	}
+	const TArray<CSCity::FAlley> Alleys = CSCity::CutAlleys(CSCity::LayoutAlleys(Region, Reserved, Settings), SmallRoads, Reach, Height, double(Network->SplineSettings.JunctionHeight) * 100.0, Settings.MinBlockSize * 0.25);
 
 	// Each alley a straight spline road under the network, at the region's height.
-	const double Height = GetActorLocation().Z;
 	FActorSpawnParameters Parameters;
 	Parameters.OverrideLevel = GetLevel();
 	for (int32 I = 0; I < Alleys.Num(); I++)

@@ -123,7 +123,6 @@ bool FGpuGeometryInput::Build(const FGraph& Graph, const FAssets& Assets, const 
 	EdgeData = Graph.EdgeData;
 	CurveData = Graph.CurveData;
 	ElevationData = Graph.ElevationData;
-	OwnerData = Graph.OwnerData;
 	CompositionData = Graph.CompositionData;
 	InitialNodeGeometry = Graph.InitialNodeGeometry;
 
@@ -219,7 +218,6 @@ FGpuGeometryOutput AddGeometryPasses(FRDGBuilder& GraphBuilder, const FGpuGeomet
 	Common.EdgeData = GpuDetail::UploadSRV(GraphBuilder, In.EdgeData, TEXT("CSRoad.EdgeData"));
 	Common.CurveData = GpuDetail::UploadSRV(GraphBuilder, In.CurveData, TEXT("CSRoad.CurveData"));
 	Common.ElevationData = GpuDetail::UploadSRV(GraphBuilder, In.ElevationData, TEXT("CSRoad.ElevationData"));
-	Common.OwnerData = GpuDetail::UploadSRV(GraphBuilder, In.OwnerData, TEXT("CSRoad.OwnerData"));
 	Common.CompositionData = GpuDetail::UploadSRV(GraphBuilder, In.CompositionData, TEXT("CSRoad.CompositionData"));
 	Common.ConnectedEdgeRange = GpuDetail::UploadSRV(GraphBuilder, In.ConnectedEdgeRange, TEXT("CSRoad.ConnectedEdgeRange"));
 	Common.ConnectedEdgeList = GpuDetail::UploadSRV(GraphBuilder, In.ConnectedEdgeList, TEXT("CSRoad.ConnectedEdgeList"));

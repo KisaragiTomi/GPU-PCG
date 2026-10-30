@@ -102,15 +102,14 @@ int32 CSRoadSplineTests_Differences(const FCSRoadSplineTests_Network& Mine, cons
 	{
 		const FRoadSpec& A = Mine.Roads[R];
 		const FRoadSpec& B = Theirs.Roads[R];
-		if (A.Prefab != B.Prefab || CSRoadSplineTests_Key(A.Curve) != CSRoadSplineTests_Key(B.Curve) || A.SourceStart != B.SourceStart || A.SourceEnd != B.SourceEnd || A.Owner != B.Owner
+		if (A.Prefab != B.Prefab || CSRoadSplineTests_Key(A.Curve) != CSRoadSplineTests_Key(B.Curve) || A.SourceStart != B.SourceStart || A.SourceEnd != B.SourceEnd
 			|| !CSRoadSplineTests_Same(A.Elevation, B.Elevation) || !CSRoadSplineTests_Same(A.Upgrade, B.Upgrade)) Differ++;
 	}
 	for (int32 N = 0; N < FMath::Min(Mine.Nodes.Num(), Theirs.Nodes.Num()); N++)
 	{
 		const FSavedNode& A = Mine.Nodes[N];
 		const FSavedNode& B = Theirs.Nodes[N];
-		if (!math::all(A.Position == B.Position) || A.Prefab != B.Prefab || !CSRoadSplineTests_Same(A.Elevation, B.Elevation) || !CSRoadSplineTests_Same(A.Upgrade, B.Upgrade) || A.bOutside != B.bOutside
-			|| A.Owner != B.Owner) Differ++;
+		if (!math::all(A.Position == B.Position) || A.Prefab != B.Prefab || !CSRoadSplineTests_Same(A.Elevation, B.Elevation) || !CSRoadSplineTests_Same(A.Upgrade, B.Upgrade) || A.bOutside != B.bOutside) Differ++;
 	}
 	return Differ;
 }
@@ -192,6 +191,74 @@ void CSRoadSplineTests_Report(FAutomationTestBase& Test, const FString& Name, FC
 			Road.Curve.a.x, Road.Curve.a.y, Road.Curve.a.z, Degree(Road.SourceStart), Road.Curve.d.x, Road.Curve.d.y, Road.Curve.d.z, Degree(Road.SourceEnd)));
 	}
 	for (const FString& Label : S.OutlierLabels) Test.AddInfo(TEXT("  outlier ") + Label);
+}
+
+FString CSRoadSplineTests_Blob(const void* Data, int32 Size) { return FString::FromBlob(static_cast<const uint8*>(Data), Size); }
+
+// Everything a node holds, as text.
+FString CSRoadSplineTests_NodeText(const FSavedNode& Node)
+{
+	return Node.Prefab + TEXT("|") + CSRoadSplineTests_Blob(&Node.Position, sizeof(Node.Position)) + CSRoadSplineTests_Blob(&Node.Rotation, sizeof(Node.Rotation))
+		+ CSRoadSplineTests_Blob(&Node.Elevation, sizeof(Node.Elevation)) + CSRoadSplineTests_Blob(&Node.Upgrade, sizeof(Node.Upgrade)) + (Node.bHasElevation ? TEXT("e") : TEXT("-"))
+		+ (Node.bOutside ? TEXT("o") : TEXT("-"));
+}
+
+// Everything an edge holds, its nodes' data in place of their indices, as text.
+FString CSRoadSplineTests_RoadText(const TArray<FSavedNode>& Nodes, const FRoadSpec& Road)
+{
+	return Road.Prefab + TEXT("|") + CSRoadSplineTests_Blob(&Road.Curve, sizeof(Road.Curve)) + CSRoadSplineTests_Blob(&Road.Upgrade, sizeof(Road.Upgrade))
+		+ CSRoadSplineTests_Blob(&Road.Elevation, sizeof(Road.Elevation)) + (Road.bHasElevation ? TEXT("e") : TEXT("-")) + (Road.bHasSource ? TEXT("s") : TEXT("-")) + TEXT("|")
+		+ CSRoadSplineTests_NodeText(Nodes[Road.SourceStart]) + TEXT("|") + CSRoadSplineTests_NodeText(Nodes[Road.SourceEnd]);
+}
+
+// The positions where two networks hold anything else (node indices too), and how many more one holds.
+int32 CSRoadSplineTests_Mismatches(const FCSRoadSplineTests_Network& A, const FCSRoadSplineTests_Network& B)
+{
+	int32 Count = FMath::Abs(A.Roads.Num() - B.Roads.Num()) + FMath::Abs(A.Nodes.Num() - B.Nodes.Num());
+	for (int32 R = 0; R < FMath::Min(A.Roads.Num(), B.Roads.Num()); R++)
+	{
+		const FRoadSpec& X = A.Roads[R];
+		const FRoadSpec& Y = B.Roads[R];
+		if (X.SourceStart != Y.SourceStart || X.SourceEnd != Y.SourceEnd || CSRoadSplineTests_RoadText(A.Nodes, X) != CSRoadSplineTests_RoadText(B.Nodes, Y)) Count++;
+	}
+	for (int32 N = 0; N < FMath::Min(A.Nodes.Num(), B.Nodes.Num()); N++) if (CSRoadSplineTests_NodeText(A.Nodes[N]) != CSRoadSplineTests_NodeText(B.Nodes[N])) Count++;
+	return Count;
+}
+
+// The diff takes the last network to this one: the last one less what went is this one less what came,
+// edge for edge in order, and node for node as sets.
+bool CSRoadSplineTests_DiffHolds(const FCSRoadSplineTests_Network& Last, const FCSRoadSplineTests_Network& Now, const FSplineNetworkDiff& Diff)
+{
+	auto Valid = [](const TArray<int32>& Indices, int32 Count)
+	{
+		for (int32 I = 0; I < Indices.Num(); I++) if (Indices[I] < 0 || Indices[I] >= Count || (I > 0 && Indices[I] <= Indices[I - 1])) return false;
+		return true;
+	};
+	if (!Diff.bValid || !Valid(Diff.RemovedRoads, Last.Roads.Num()) || !Valid(Diff.AddedRoads, Now.Roads.Num()) || !Valid(Diff.RemovedNodes, Last.Nodes.Num()) || !Valid(Diff.AddedNodes, Now.Nodes.Num())) return false;
+	auto Rest = [](const FCSRoadSplineTests_Network& Network, const TArray<int32>& Left)
+	{
+		TArray<FString> Out;
+		for (int32 R = 0, K = 0; R < Network.Roads.Num(); R++)
+		{
+			if (K < Left.Num() && Left[K] == R)
+			{
+				K++;
+				continue;
+			}
+			Out.Add(CSRoadSplineTests_RoadText(Network.Nodes, Network.Roads[R]));
+		}
+		return Out;
+	};
+	if (Rest(Last, Diff.RemovedRoads) != Rest(Now, Diff.AddedRoads)) return false;
+	TSet<int32> Removed;
+	TSet<int32> Added;
+	Removed.Append(Diff.RemovedNodes);
+	Added.Append(Diff.AddedNodes);
+	TMap<FString, int32> Nodes;
+	for (int32 N = 0; N < Last.Nodes.Num(); N++) if (!Removed.Contains(N)) Nodes.FindOrAdd(CSRoadSplineTests_NodeText(Last.Nodes[N]))++;
+	for (int32 N = 0; N < Now.Nodes.Num(); N++) if (!Added.Contains(N)) Nodes.FindOrAdd(CSRoadSplineTests_NodeText(Now.Nodes[N]))--;
+	for (const TPair<FString, int32>& Pair : Nodes) if (Pair.Value != 0) return false;
+	return true;
 }
 }
 
@@ -326,7 +393,7 @@ bool FCSRoadSplinesBasicsTest::RunTest(const FString& Parameters)
 }
 
 // Palmsland as splines (ChainNetwork) and back (BuildSplineNetwork): the same edges and nodes with
-// their data (owners aside), the edges in their content order rather than the file's; the GPU geometry
+// their data, the edges in their content order rather than the file's; the GPU geometry
 // then differs only where the geometry jobs break ties or sum in edge order.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadSplinesPalmslandTest, "PCGPlugins.CSRoadNet.Splines.Palmsland",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -380,14 +447,13 @@ bool FCSRoadSplinesPalmslandTest::RunTest(const FString& Parameters)
 		}
 		Match[R] = *Found;
 		const FRoadSpec& Theirs = Network.Roads[*Found];
-		if (Mine.Prefab != Theirs.Prefab || !CSRoadSplineTests_Same(Mine.Upgrade, Theirs.Upgrade) || !CSRoadSplineTests_Same(Mine.Elevation, Theirs.bHasElevation ? Theirs.Elevation : Zero)
-			|| (Mine.Owner != 0) != (Theirs.Owner != 0)) EdgeMismatches++;
+		if (Mine.Prefab != Theirs.Prefab || !CSRoadSplineTests_Same(Mine.Upgrade, Theirs.Upgrade) || !CSRoadSplineTests_Same(Mine.Elevation, Theirs.bHasElevation ? Theirs.Elevation : Zero)) EdgeMismatches++;
 		for (const bool bStart : { true, false })
 		{
 			const FSavedNode& A = Back.Nodes[bStart ? Mine.SourceStart : Mine.SourceEnd];
 			const FSavedNode& B = Network.Nodes[bStart ? Theirs.SourceStart : Theirs.SourceEnd];
 			if (!math::all(A.Position == B.Position) || A.Prefab != B.Prefab || !CSRoadSplineTests_Same(A.Elevation, B.bHasElevation ? B.Elevation : Zero) || !CSRoadSplineTests_Same(A.Upgrade, B.Upgrade)
-				|| A.bOutside != B.bOutside || (A.Owner != 0) != (B.Owner != 0)) NodeMismatches++;
+				|| A.bOutside != B.bOutside) NodeMismatches++;
 		}
 	}
 	TestEqual(TEXT("edges without an original"), Missing, 0);
@@ -522,9 +588,10 @@ bool FCSRoadSplinesAlleysTest::RunTest(const FString& Parameters)
 		EveryOrder(TEXT("slant"), Splines, N);
 	}
 	{
-		// Two main roads mirrored about the alley meet where it ends: where it comes into cover it lies
-		// exactly as near to both, and which one it joins must not hang on which came first.
-		const TArray<FSplineRoad> Splines = { Alley({ FVector3d(100.0, 0.0, 0.0), FVector3d(0.0, 0.0, 0.0) }), Main({ FVector3d(0.0, 0.0, 0.0), FVector3d(100.0, 0.0, 100.0) }),
+		// Two main roads mirrored about the alley meet near where it ends (3 m on: ending on their point, it would
+		// keep that junction as drawn): where it comes into cover it lies exactly as near to both, and which one
+		// it joins must not hang on which came first.
+		const TArray<FSplineRoad> Splines = { Alley({ FVector3d(100.0, 0.0, 0.0), FVector3d(3.0, 0.0, 0.0) }), Main({ FVector3d(0.0, 0.0, 0.0), FVector3d(100.0, 0.0, 100.0) }),
 			Main({ FVector3d(0.0, 0.0, 0.0), FVector3d(100.0, 0.0, -100.0) }) };
 		FCSRoadSplineTests_Network N;
 		if (!CSRoadSplineTests_Build(*this, TEXT("tie"), Splines, Settings, N)) return false;
@@ -561,6 +628,37 @@ bool FCSRoadSplinesAlleysTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("along: both parts join the main road"), Joined, 2);
 	}
 	{
+		// An alley bowing along a main road, in its reach at both ends and out of it between (its middle 20 m
+		// off): the part left joins the road from nearly along it, and turns to meet it square instead of in
+		// a sliver of a junction (which hung the GPU).
+		const TArray<FSplineRoad> Splines = { Alley({ FVector3d(-150.0, 0.0, 8.0), FVector3d(0.0, 0.0, 20.0), FVector3d(150.0, 0.0, 8.0) }), Main({ FVector3d(-200.0, 0.0, 0.0), FVector3d(200.0, 0.0, 0.0) }) };
+		FCSRoadSplineTests_Network N;
+		if (!CSRoadSplineTests_Build(*this, TEXT("nearly along"), Splines, Settings, N)) return false;
+		TestEqual(TEXT("nearly along: two stretches cut"), N.Stats.AlleyCuts, 2);
+		// At each node the alley shares with the main road, the alley leaves it 30 degrees or more off the road.
+		double Flattest = 180.0;
+		int32 Joins = 0;
+		for (int32 Node = 0; Node < N.Nodes.Num(); Node++)
+		{
+			TArray<FVector2d> Alleys;
+			TArray<FVector2d> Mains;
+			for (const FRoadSpec& Road : N.Roads)
+			{
+				for (const bool bStart : { true, false })
+				{
+					if ((bStart ? Road.SourceStart : Road.SourceEnd) != Node) continue;
+					const FVector2d Out = bStart ? FVector2d(Road.Curve.b.x - Road.Curve.a.x, Road.Curve.b.z - Road.Curve.a.z) : FVector2d(Road.Curve.c.x - Road.Curve.d.x, Road.Curve.c.z - Road.Curve.d.z);
+					(Road.Prefab == TEXT("Alley") ? Alleys : Mains).Add(Out.GetSafeNormal());
+				}
+			}
+			if (Alleys.Num() > 0 && Mains.Num() > 0) Joins++;
+			for (const FVector2d& A : Alleys) for (const FVector2d& M : Mains) Flattest = FMath::Min(Flattest, FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(A.Dot(M), -1.0, 1.0))));
+		}
+		TestEqual(TEXT("nearly along: the part joins the road at both ends"), Joins, 2);
+		TestTrue(FString::Printf(TEXT("nearly along: the alley meets the road at 30 degrees or more (%.1f)"), Flattest), Flattest >= 29.0);
+		EveryOrder(TEXT("nearly along"), Splines, N);
+	}
+	{
 		FCSRoadSplineTests_Network Alone;
 		FCSRoadSplineTests_Network Over;
 		const FSplineRoad Lane = Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) });
@@ -574,6 +672,301 @@ bool FCSRoadSplinesAlleysTest::RunTest(const FString& Parameters)
 		for (const FRoadSpec& Road : Over.Roads) if (Road.Prefab == TEXT("Alley")) bSame &= CSRoadSplineTests_Key(Road.Curve) == CSRoadSplineTests_Key(Alone.Roads[0].Curve);
 		TestTrue(TEXT("overpass: the alley as drawn"), bSame);
 	}
+	{
+		// Junctions drawn with the main road (a point of the alley on one of the road's, as a converted snapshot
+		// has them) stay as drawn: an alley ending on the road, and one crossing it there.
+		const FSplineRoad Road = Main({ FVector3d(0.0, 0.0, -100.0), FVector3d(0.0, 0.0, 0.0), FVector3d(0.0, 0.0, 100.0) });
+		for (const bool bCrossing : { false, true })
+		{
+			const FString Case = bCrossing ? TEXT("drawn crossing") : TEXT("drawn tee");
+			FSplineRoad Lane = Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(0.0, 0.0, 0.0) });
+			if (bCrossing) Lane = Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(0.0, 0.0, 0.0), FVector3d(100.0, 0.0, 0.0) });
+			const TArray<FSplineRoad> Splines = { Lane, Road };
+			FCSRoadSplineTests_Network N;
+			if (!CSRoadSplineTests_Build(*this, Case, Splines, Settings, N)) return false;
+			TestEqual(Case + TEXT(": nothing cut"), N.Stats.AlleyCuts, 0);
+			TestEqual(Case + TEXT(": the alley as drawn"), Count(N, TEXT("Alley")), bCrossing ? 2 : 1);
+			const int32 Junction = N.NodeAt(FVector3d(0.0, 0.0, 0.0), 0.05);
+			TestTrue(Case + TEXT(": the junction where it was drawn"), Junction != INDEX_NONE && N.Degree(Junction) == (bCrossing ? 4 : 3));
+			EveryOrder(Case, Splines, N);
+		}
+		// The road moved 6 m off that point still covers the alley's end: it is cut back and joins the road there,
+		// between two of the road's points. Fixed (converted) splines too: the fixed road is split where the cut
+		// end joins it, the rest of both stays as drawn.
+		for (const bool bFixed : { false, true })
+		{
+			const FString Case = bFixed ? TEXT("moved fixed road") : TEXT("moved road");
+			FSplineRoad Lane = Alley({ FVector3d(-100.0, 0.0, 0.0), FVector3d(0.0, 0.0, 0.0) });
+			FSplineRoad Moved = Main({ FVector3d(6.0, 0.0, -100.0), FVector3d(6.0, 0.0, 100.0) });
+			Lane.bAdjust = !bFixed;
+			Moved.bAdjust = !bFixed;
+			const TArray<FSplineRoad> Splines = { Lane, Moved };
+			FCSRoadSplineTests_Network N;
+			if (!CSRoadSplineTests_Build(*this, Case, Splines, Settings, N)) return false;
+			TestEqual(Case + TEXT(": one stretch cut"), N.Stats.AlleyCuts, 1);
+			TestEqual(Case + TEXT(": one alley part"), Count(N, TEXT("Alley")), 1);
+			int32 Tees = 0;
+			for (int32 Node = 0; Node < N.Nodes.Num(); Node++) Tees += N.Degree(Node) == 3 ? 1 : 0;
+			TestEqual(Case + TEXT(": the alley joins the road"), Tees, 1);
+			TestTrue(Case + TEXT(": no alley under the road"), Clear(N, FVector3d(6.0, 0.0, -100.0), FVector3d(6.0, 0.0, 100.0)));
+			EveryOrder(Case, Splines, N);
+		}
+	}
+	return true;
+}
+
+// Converting only around the splines an edit changed (BuildSplineNetwork with a cache) makes the network
+// converting every spline makes, edge for edge and node for node, through runs of random edits (points
+// moved, also onto other splines' points, splines added and removed, other prefabs, point data, fixed or
+// adjusted): on a drawn town of adjusted splines (a main grid, streets ending on it, alleys across and
+// along main roads, a closed ring, three roads crossing at one point, a fixed spline, an overpass) and on
+// Palmsland as fixed splines. The diff takes each network to the next.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadSplinesIncrementalTest, "PCGPlugins.CSRoadNet.Splines.Incremental",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSRoadSplinesIncrementalTest::RunTest(const FString& Parameters)
+{
+	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
+	if (!Lib.bLoaded)
+	{
+		AddWarning(Lib.Error + TEXT(" (skipped)"));
+		return true;
+	}
+	// A run of edits, each converted with the cache and without, and how they went.
+	struct FRun
+	{
+		FString Name;
+		FSplineNetworkCache Cache;
+		FCSRoadSplineTests_Network Last;
+		bool bLast = false;
+		int32 Builds = 0;
+		int32 Around = 0;
+		int32 Converted = 0;
+		int32 Of = 0;
+		int32 MaxRounds = 0;
+		double AroundMs = 0.0;
+		double WholeMs = 0.0;
+	};
+	auto Step = [this, &Lib](FRun& Run, const FString& Case, const TArray<FSplineRoad>& Splines, const FSplineNetworkSettings& Settings, bool bVerify)
+	{
+		FCSRoadSplineTests_Network Mine;
+		FCSRoadSplineTests_Network Whole;
+		FString MineError;
+		FString WholeError;
+		double Start = FPlatformTime::Seconds();
+		const bool bMine = BuildSplineNetwork(Lib.Assets, Splines, Settings, nullptr, Mine.Nodes, Mine.Roads, Mine.Stats, MineError, &Run.Cache, bVerify);
+		const double MineMs = (FPlatformTime::Seconds() - Start) * 1000.0;
+		Start = FPlatformTime::Seconds();
+		const bool bWhole = BuildSplineNetwork(Lib.Assets, Splines, Settings, nullptr, Whole.Nodes, Whole.Roads, Whole.Stats, WholeError);
+		const double WholeMs = (FPlatformTime::Seconds() - Start) * 1000.0;
+		const FString Where = Run.Name + TEXT(", ") + Case;
+		if (bMine != bWhole)
+		{
+			AddError(FString::Printf(TEXT("%s: only one conversion fails (%s%s)"), *Where, *MineError, *WholeError));
+			return false;
+		}
+		if (!bWhole)
+		{
+			Run.bLast = false;
+			return true;
+		}
+		const int32 Mismatches = CSRoadSplineTests_Mismatches(Mine, Whole);
+		if (Mismatches > 0) AddError(FString::Printf(TEXT("%s: %d values differ from converting every spline (%s: %d of %d converted around %d changed in %d rounds)"), *Where, Mismatches,
+			Mine.Stats.bWhole ? TEXT("all converted") : TEXT("around the change"), Mine.Stats.Converted, Splines.Num(), Mine.Stats.Changed, Mine.Stats.Rounds));
+		if (bVerify) TestEqual(Where + TEXT(": values the verification finds apart"), Mine.Stats.Mismatches, 0);
+		if (!Mine.Stats.bWhole && !Run.Cache.Diff.bValid) AddError(Where + TEXT(": converted around the change without a diff"));
+		if (Run.bLast && Run.Cache.Diff.bValid && !CSRoadSplineTests_DiffHolds(Run.Last, Mine, Run.Cache.Diff)) AddError(Where + TEXT(": the diff does not take the last network to this one"));
+		if (Run.bLast)
+		{
+			Run.Builds++;
+			Run.MaxRounds = FMath::Max(Run.MaxRounds, Mine.Stats.Rounds);
+			Run.AroundMs += MineMs;
+			Run.WholeMs += WholeMs;
+			if (!Mine.Stats.bWhole)
+			{
+				Run.Around++;
+				Run.Converted += Mine.Stats.Converted;
+				Run.Of += Splines.Num();
+			}
+		}
+		Run.Last = MoveTemp(Mine);
+		Run.bLast = true;
+		return Mismatches == 0;
+	};
+	auto Report = [this](const FRun& Run)
+	{
+		AddInfo(FString::Printf(TEXT("%s: %d builds, %d converted around the change (%.1f%% of the splines on average, at most %d rounds); %.2f ms a build, %.2f ms converting every spline"),
+			*Run.Name, Run.Builds, Run.Around, Run.Of > 0 ? 100.0 * Run.Converted / Run.Of : 0.0, Run.MaxRounds, Run.AroundMs / FMath::Max(Run.Builds, 1), Run.WholeMs / FMath::Max(Run.Builds, 1)));
+	};
+	// A random edit: a point moved (by up to Move, or onto a point of some spline), a road added across a
+	// point of some spline or a spline removed, another prefab, a point's data, or the other adjustment.
+	auto Edit = [](TArray<FSplineRoad>& Splines, FRandomStream& Random, uint64& NextId, double Move, const TArray<FString>& Prefabs) -> FString
+	{
+		const int32 Pick = Random.RandRange(0, Splines.Num() - 1);
+		FSplineRoad& Road = Splines[Pick];
+		const int32 Point = Random.RandRange(0, Road.Points.Num() - 1);
+		switch (Random.RandRange(0, 9))
+		{
+		case 0:
+		case 1:
+		case 2:
+			Road.Points[Point] += FVector3d(Random.FRandRange(-Move, Move), Random.FRand() < 0.2f ? Random.FRandRange(-3.0, 3.0) : 0.0, Random.FRandRange(-Move, Move));
+			return FString::Printf(TEXT("point %d of %s moved"), Point, *Road.Name);
+		case 3:
+		{
+			const FSplineRoad& Other = Splines[Random.RandRange(0, Splines.Num() - 1)];
+			Road.Points[Point] = Other.Points[Random.RandRange(0, Other.Points.Num() - 1)];
+			return FString::Printf(TEXT("point %d of %s onto %s"), Point, *Road.Name, *Other.Name);
+		}
+		case 4:
+		{
+			const FVector3d Centre = Road.Points[Point];
+			const double Angle = Random.FRandRange(0.0, UE_DOUBLE_TWO_PI);
+			const FVector3d Along(FMath::Cos(Angle) * 60.0, 0.0, FMath::Sin(Angle) * 60.0);
+			FSplineRoad Added = CSRoadSplineTests_Road({ Centre - Along + FVector3d(Random.FRandRange(-20.0, 20.0), 0.0, Random.FRandRange(-20.0, 20.0)), Centre + Along });
+			Added.Id = NextId++;
+			Added.Prefab = Prefabs[Random.RandRange(0, Prefabs.Num() - 1)];
+			Added.bAlley = Added.Prefab == TEXT("Alley");
+			Added.Name = FString::Printf(TEXT("added %llu"), Added.Id);
+			Splines.Add(MoveTemp(Added));
+			return Splines.Last().Name + TEXT(" added");
+		}
+		case 5:
+		{
+			const FString Name = Road.Name;
+			Splines.RemoveAt(Pick);
+			return Name + TEXT(" removed");
+		}
+		case 6:
+			Road.Prefab = Prefabs[Random.RandRange(0, Prefabs.Num() - 1)];
+			Road.bAlley = Road.Prefab == TEXT("Alley");
+			return FString::Printf(TEXT("%s now %s"), *Road.Name, *Road.Prefab);
+		case 7:
+		{
+			Road.Data.SetNum(Road.Points.Num());
+			FSplinePointData& Data = Road.Data[Point];
+			Data.bSegmentElevation = !Data.bSegmentElevation;
+			Data.SegmentElevation = float2(static_cast<float>(Random.FRandRange(0.0, 2.0)));
+			return FString::Printf(TEXT("segment %d of %s with another elevation"), Point, *Road.Name);
+		}
+		case 8:
+		{
+			Road.Data.SetNum(Road.Points.Num());
+			FSplinePointData& Data = Road.Data[Point];
+			Data.NodePrefab = Data.NodePrefab.IsEmpty() ? Prefabs[0] : FString();
+			return FString::Printf(TEXT("node %d of %s with another prefab"), Point, *Road.Name);
+		}
+		default:
+			Road.bAdjust = !Road.bAdjust;
+			return FString::Printf(TEXT("%s %s"), *Road.Name, Road.bAdjust ? TEXT("adjusted") : TEXT("fixed"));
+		}
+	};
+	const FSplineNetworkSettings Settings;
+	const TArray<FString> Prefabs = { TEXT("Small Road"), TEXT("Medium Road"), TEXT("Alley") };
+
+	{
+		TArray<FSplineRoad> Town;
+		uint64 NextId = 1;
+		auto Add = [&Town, &NextId](const TCHAR* Prefab, const TArray<FVector3d>& Points, bool bAdjust = true) -> FSplineRoad&
+		{
+			FSplineRoad& Road = Town.Add_GetRef(CSRoadSplineTests_Road(Points, bAdjust));
+			Road.Id = NextId++;
+			Road.Prefab = Prefab;
+			Road.bAlley = Road.Prefab == TEXT("Alley");
+			Road.Name = FString::Printf(TEXT("%s %llu"), Prefab, Road.Id);
+			return Road;
+		};
+		FRandomStream Random(23);
+		// The main grid, six roads each way 180 m apart, each in two splines meeting off the crossings; a street
+		// from the middle of each block ending on the main road south of it.
+		for (int32 I = 0; I < 6; I++)
+		{
+			const double Line = I * 180.0 - 450.0;
+			Add(TEXT("Medium Road"), { FVector3d(-500.0, 0.0, Line), FVector3d(-250.0, 0.0, Line), FVector3d(0.0, 0.0, Line) });
+			Add(TEXT("Medium Road"), { FVector3d(0.0, 0.0, Line), FVector3d(250.0, 0.0, Line), FVector3d(500.0, 0.0, Line) });
+			Add(TEXT("Medium Road"), { FVector3d(Line, 0.0, -500.0), FVector3d(Line, 0.0, -250.0), FVector3d(Line, 0.0, 0.0) });
+			Add(TEXT("Medium Road"), { FVector3d(Line, 0.0, 0.0), FVector3d(Line, 0.0, 250.0), FVector3d(Line, 0.0, 500.0) });
+		}
+		for (int32 I = 0; I < 5; I++)
+		{
+			for (int32 J = 0; J < 5; J++)
+			{
+				const double X = I * 180.0 - 360.0;
+				const double Z = J * 180.0 - 360.0;
+				Add(TEXT("Small Road"), { FVector3d(X + Random.FRandRange(-30.0, 30.0), 0.0, Z), FVector3d(X + Random.FRandRange(-40.0, 40.0), 0.0, Z - 90.0) });
+			}
+		}
+		// Alleys across a main road, along one (3 m off its line) and inside a block.
+		Add(TEXT("Alley"), { FVector3d(-320.0, 0.0, -300.0), FVector3d(-220.0, 0.0, -310.0) });
+		Add(TEXT("Alley"), { FVector3d(-60.0, 0.0, -267.0), FVector3d(60.0, 0.0, -267.0) });
+		Add(TEXT("Alley"), { FVector3d(100.0, 0.0, 100.0), FVector3d(160.0, 0.0, 130.0) });
+		// A closed ring, three roads crossing at one point, a fixed spline across a main road, an overpass.
+		{
+			TArray<FVector3d> Ring;
+			for (int32 K = 0; K < 8; K++) Ring.Add(FVector3d(180.0 + 40.0 * FMath::Cos(K * UE_DOUBLE_PI / 4.0), 0.0, 180.0 + 40.0 * FMath::Sin(K * UE_DOUBLE_PI / 4.0)));
+			Add(TEXT("Small Road"), Ring).bClosed = true;
+		}
+		for (int32 K = 0; K < 3; K++)
+		{
+			const double Angle = K * UE_DOUBLE_PI / 3.0 + 0.1;
+			const FVector3d Along(FMath::Cos(Angle) * 50.0, 0.0, FMath::Sin(Angle) * 50.0);
+			Add(TEXT("Small Road"), { FVector3d(-180.0, 0.0, 200.0) - Along, FVector3d(-180.0, 0.0, 200.0) + Along });
+		}
+		Add(TEXT("Small Road"), { FVector3d(240.0, 0.0, -400.0), FVector3d(300.0, 0.0, -380.0) }, false);
+		Add(TEXT("Medium Road"), { FVector3d(-400.0, 10.0, 400.0), FVector3d(-100.0, 10.0, 420.0) });
+
+		FRun Run;
+		Run.Name = TEXT("town");
+		if (!Step(Run, TEXT("first build"), Town, Settings, false)) return false;
+		{
+			// Nothing changed, in another order: taken as it was.
+			TArray<FSplineRoad> Shuffled = Town;
+			for (int32 I = Shuffled.Num() - 1; I > 0; I--) Shuffled.Swap(I, Random.RandRange(0, I));
+			Step(Run, TEXT("splines shuffled"), Shuffled, Settings, false);
+			TestTrue(TEXT("town, splines shuffled: nothing converted, nothing in the diff"), !Run.Last.Stats.bWhole && Run.Last.Stats.Changed == 0 && Run.Cache.Diff.bValid
+				&& Run.Cache.Diff.AddedRoads.Num() + Run.Cache.Diff.RemovedRoads.Num() + Run.Cache.Diff.AddedNodes.Num() + Run.Cache.Diff.RemovedNodes.Num() == 0);
+		}
+		for (int32 E = 0; E < 60; E++)
+		{
+			const FString Case = Edit(Town, Random, NextId, 30.0, Prefabs);
+			Step(Run, FString::Printf(TEXT("edit %d (%s)"), E, *Case), Town, Settings, E % 20 == 5);
+		}
+		FSplineNetworkSettings Other = Settings;
+		Other.SnapDistance = 1.5;
+		Step(Run, TEXT("other settings"), Town, Other, false);
+		TestTrue(TEXT("town, other settings: every spline converted"), Run.Last.Stats.bWhole);
+		Report(Run);
+		TestTrue(TEXT("town: most edits converted around the change"), Run.Around * 2 > Run.Builds);
+	}
+
+	const FString Path = FPaths::Combine(CSRoadTest::LabRoot(), TEXT("Artifacts/public-saves/palmsland-3/network.json"));
+	if (!FPaths::FileExists(Path))
+	{
+		AddWarning(TEXT("Palmsland network missing (its run skipped)"));
+		return true;
+	}
+	FSavedNetwork Network;
+	FString Error;
+	if (!Network.Load(Path, &Lib.Assets, false, Error))
+	{
+		AddError(Error);
+		return false;
+	}
+	TArray<FSplineRoad> Splines;
+	ChainNetwork(Network.Nodes, Network.Roads, Splines);
+	for (int32 S = 0; S < Splines.Num(); S++) Splines[S].Id = uint64(S) + 1;
+	FRun Run;
+	Run.Name = TEXT("palmsland");
+	if (!Step(Run, TEXT("first build"), Splines, Settings, false)) return false;
+	FRandomStream Random(5);
+	uint64 NextId = uint64(Splines.Num()) + 1;
+	for (int32 E = 0; E < 25; E++)
+	{
+		const FString Case = Edit(Splines, Random, NextId, 15.0, Prefabs);
+		Step(Run, FString::Printf(TEXT("edit %d (%s)"), E, *Case), Splines, Settings, E == 10);
+	}
+	Report(Run);
+	TestTrue(TEXT("palmsland: most edits converted around the change"), Run.Around * 2 > Run.Builds);
 	return true;
 }
 
@@ -609,14 +1002,14 @@ bool FCSRoadSplinesActorTest::RunTest(const FString& Parameters)
 		const FString Case = bMoved ? TEXT("moved") : TEXT("placed");
 		if (bMoved) Network->SetActorLocation(Network->GetActorLocation() + FVector(10000.0, 5000.0, 0.0));
 		Network->Rebuild();
-		Network->FinishDecalFits();
+		Network->FinishWrites();
 		TestEqual(Case + TEXT(": error"), Network->LastError, FString());
 		TestEqual(Case + TEXT(": splines"), Network->NumSplines, 2);
 		TestEqual(Case + TEXT(": roads"), Network->NumRoads, 4);
-		TestTrue(Case + TEXT(": markings"), Network->NumMarkingInstances > 0 && Network->MarkingDecals.Num() > 0);
-		TestTrue(Case + TEXT(": road mesh at identity"), Network->RoadMesh->GetComponentTransform().Equals(FTransform::Identity));
-		for (const UInstancedStaticMeshComponent* Decals : Network->MarkingDecals) TestTrue(Case + TEXT(": decals at identity"), Decals && Decals->GetComponentTransform().Equals(FTransform::Identity));
-		const FBox Bounds = Network->RoadMesh->Bounds.GetBox();
+		TestTrue(Case + TEXT(": markings"), Network->NumMarkingInstances > 0 && Network->GetContent()->MarkingDecals.Num() > 0);
+		TestTrue(Case + TEXT(": road mesh at identity"), Network->GetContent()->RoadMesh->GetComponentTransform().Equals(FTransform::Identity));
+		for (const UInstancedStaticMeshComponent* Decals : Network->GetContent()->MarkingDecals) TestTrue(Case + TEXT(": decals at identity"), Decals && Decals->GetComponentTransform().Equals(FTransform::Identity));
+		const FBox Bounds = Network->GetContent()->RoadMesh->Bounds.GetBox();
 		for (const FVector& End : Ends) TestTrue(Case + TEXT(": bounds hold the road ends"), Bounds.IsInside(Network->GetActorTransform().TransformPosition(End)));
 		TestTrue(Case + TEXT(": bounds centred on the crossing"), FVector::Dist2D(Bounds.GetCenter(), Network->GetActorLocation()) < 500.0);
 	}
@@ -626,7 +1019,7 @@ bool FCSRoadSplinesActorTest::RunTest(const FString& Parameters)
 	Roads[0]->Spline->SetLocationAtSplinePoint(1, Moved, ESplineCoordinateSpace::Local);
 	Network->Tick(0.0f);
 	TestEqual(TEXT("edited: error"), Network->LastError, FString());
-	TestTrue(TEXT("edited: bounds hold the moved end"), Network->RoadMesh->Bounds.GetBox().IsInside(Network->GetActorTransform().TransformPosition(Moved)));
+	TestTrue(TEXT("edited: bounds hold the moved end"), Network->GetContent()->RoadMesh->Bounds.GetBox().IsInside(Network->GetActorTransform().TransformPosition(Moved)));
 	return true;
 }
 

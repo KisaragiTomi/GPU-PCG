@@ -25,17 +25,13 @@ struct FSplinePointData
 	CompositionFlags NodeUpgrade{};
 	// The node is an outside connection: its road runs off the map, with no end there.
 	bool bOutside = false;
-	// Something owns the node, and the segment's edge (a converted snapshot's building): the geometry jobs
-	// do not flatten what is owned. Which owner does not count.
-	bool bNodeOwned = false;
-	bool bSegmentOwned = false;
 	bool bSegmentElevation = false;
 	float2 SegmentElevation;
 	// An alley end cut under a main road: its node joins the road it lies on, however many roads end
 	// there (two, where an alley crossing straight over meets it).
 	bool bJoin = false;
 
-	bool HasNodeOverrides() const { return !NodeOffset.IsZero() || !NodePrefab.IsEmpty() || bNodeElevation || !IsDefault(NodeUpgrade) || bOutside || bNodeOwned; }
+	bool HasNodeOverrides() const { return !NodeOffset.IsZero() || !NodePrefab.IsEmpty() || bNodeElevation || !IsDefault(NodeUpgrade) || bOutside; }
 };
 
 // One spline in the network's space (Unity metres, y up). Point i's segment runs to point i + 1;
@@ -95,19 +91,77 @@ struct FSplineNetworkStats
 	int32 Dropped = 0;
 	// Stretches of alley cut away under main roads.
 	int32 AlleyCuts = 0;
+	// Milliseconds: ordering the splines, alleys giving way, points to nodes, roads ending on roads,
+	// crossings, merging and splitting, and the snapshot form.
+	double SortMs = 0.0;
+	double AlleyMs = 0.0;
+	double NodeMs = 0.0;
+	double JoinMs = 0.0;
+	double CrossMs = 0.0;
+	double ShapeMs = 0.0;
+	double OutputMs = 0.0;
+	// With a cache (BuildSplineNetwork): whether every spline was converted (else only those around the
+	// ones that changed, and the counts above are theirs), how many splines changed, how many were
+	// converted and in how many rounds; milliseconds finding what changed (with every spline converted
+	// after all, trying not to) and putting the edges made again among the others.
+	bool bWhole = true;
+	int32 Changed = 0;
+	int32 Converted = 0;
+	int32 Rounds = 0;
+	double DiffMs = 0.0;
+	double MergeMs = 0.0;
+	// With bVerify: values that differ from converting every spline, which is then used instead.
+	int32 Mismatches = 0;
+};
+
+// What a build changed against the one before it, by content: an edge or node that moved or changed is
+// one removed and one added. Indices into this build's output (added) and the last one's (removed), in
+// order.
+struct FSplineNetworkDiff
+{
+	// Against the build before; otherwise everything is new.
+	bool bValid = false;
+	TArray<int32> AddedRoads;
+	TArray<int32> RemovedRoads;
+	TArray<int32> AddedNodes;
+	TArray<int32> RemovedNodes;
+};
+
+// What a build leaves for the next one (BuildSplineNetwork with a cache): the splines, told apart by
+// FSplineRoad::Id, and the network they made, so that the next build converts only around the splines
+// that changed.
+class FSplineNetworkCache
+{
+public:
+	FSplineNetworkCache();
+	~FSplineNetworkCache();
+	void Reset();
+
+	// What the last build changed against the one before it.
+	FSplineNetworkDiff Diff;
+
+	struct FState;
+	TUniquePtr<FState> State;
 };
 
 // Terrain (optional) is the ground elevations are measured from; without it, the plane y = 0.
 // Alleys give way first: the stretches a main road covers (at most JunctionHeight apart in height)
 // are cut away, and the cut ends are pulled onto the main road, where they join it like any road
 // ending on another one; an alley crossing straight over meets it in one crossing.
+//
+// Cache (optional) holds the last build. When that was of the same prefab data, settings and terrain, and
+// every spline has an id of its own, only the splines around those that changed are converted again: the
+// edges near the change are made again from them, the others are taken as the last build made them, and
+// the network comes out as converting every spline makes it (bVerify converts every spline as well and
+// compares; on a difference it logs it and keeps that conversion). The cache then holds this build, and
+// its Diff what this build changed.
 bool BuildSplineNetwork(FAssets& Assets, const TArray<FSplineRoad>& Splines, const FSplineNetworkSettings& Settings, const FSavedTerrain* Terrain,
-	TArray<FSavedNode>& OutNodes, TArray<FRoadSpec>& OutRoads, FSplineNetworkStats& OutStats, FString& OutError);
+	TArray<FSavedNode>& OutNodes, TArray<FRoadSpec>& OutRoads, FSplineNetworkStats& OutStats, FString& OutError, FSplineNetworkCache* Cache = nullptr,
+	bool bVerify = false);
 
 // A snapshot (nodes and the source edges referencing them) as fixed splines. Edges are chained
 // where the road goes on: same prefab and upgrades, the next edge starting where the last one
-// ended, and at a junction only straight on. Every node's and edge's data is kept (of the owners only
-// whether there is one), so the splines build back into the same edges, in their content order rather
-// than the snapshot's.
+// ended, and at a junction only straight on. Every node's and edge's data is kept, so the splines build
+// back into the same edges, in their content order rather than the snapshot's.
 void ChainNetwork(const TArray<FSavedNode>& Nodes, const TArray<FRoadSpec>& Roads, TArray<FSplineRoad>& OutSplines);
 }

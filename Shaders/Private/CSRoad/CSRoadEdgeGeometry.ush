@@ -31,18 +31,6 @@ struct FEdgeOffsets
 	NetGeometryData edgePrefabGeometryData;
 };
 
-int CEG_GetTopOwner(int entity)
-{
-	int result = Entity_Null;
-	Owner componentData;
-	for (int guard = 0; guard < 32 && TryGetOwner(entity, componentData); guard++)
-	{
-		entity = componentData.m_Owner;
-		result = entity;
-	}
-	return result;
-}
-
 void CEG_CutCurve(Edge edge, inout Curve curve, bool useStartNodeHeight, bool useEndNodeHeight)
 {
 	Node node = NodeData[edge.m_Start];
@@ -479,17 +467,6 @@ float2 CEG_CalculateCornerOffset(int edge, int node, float slopeSteepness, bool2
 			netCompositionData = GetComposition(composition.m_StartNode);
 			prefabCompositionCrosswalks = CompositionCrosswalks(composition.m_StartNode);
 		}
-		Owner componentData;
-		if (TryGetOwner(value4.m_Edge, componentData))
-		{
-			Composition componentData2;
-			if (TryGetCompositionComponent(componentData.m_Owner, componentData2))
-			{
-				NetCompositionData netCompositionData2 = GetComposition(componentData2.m_Edge);
-				edgeCompositionData2.m_WidthOffset = U_max(edgeCompositionData2.m_WidthOffset, netCompositionData2.m_WidthOffset);
-				netCompositionData.m_WidthOffset = U_max(netCompositionData.m_WidthOffset, netCompositionData2.m_WidthOffset);
-			}
-		}
 		CEG_CutCurve(edge2, curve, true, true);
 		float t = NetUtils_FindMiddleTangentPos(Bezier_xz(curve.m_Bezier), float2(0.0f, 1.0f));
 		Bezier4x3 output, output2;
@@ -527,7 +504,8 @@ float2 CEG_CalculateCornerOffset(int edge, int node, float slopeSteepness, bool2
 				&& (states & (CompositionState_HasForwardRoadLanes | CompositionState_HasBackwardRoadLanes)) == 0u
 				&& (nodeCompositionData.m_Flags.m_General & CompositionFlags_General_Intersection) == 0u)
 			{
-				dontCrossTracks = CEG_GetTopOwner(edge) == CEG_GetTopOwner(value4.m_Edge);
+				// The original compares the edges' top owners; no edge has one, so they match.
+				dontCrossTracks = true;
 			}
 			float4 f8 = (1.0f - nodeCompositionData.m_SyncVertexOffsetsLeft) * (nodeCompositionData.m_Width * 0.5f + nodeCompositionData.m_MiddleOffset);
 			float4 f9 = nodeCompositionData.m_SyncVertexOffsetsRight * (nodeCompositionData.m_Width * 0.5f - nodeCompositionData.m_MiddleOffset);
@@ -756,16 +734,6 @@ FEdgeOffsets CEG_CalculateOffsets(int entity)
 	FBufferRange nodeCompositionLanes = CompositionLanes(composition.m_Edge);
 	FBufferRange nodeCompositionCrosswalks = CompositionCrosswalks(composition.m_StartNode);
 	FBufferRange nodeCompositionCrosswalks2 = CompositionCrosswalks(composition.m_EndNode);
-	Owner componentData;
-	if (TryGetOwner(entity, componentData))
-	{
-		Composition componentData2;
-		if (TryGetCompositionComponent(componentData.m_Owner, componentData2))
-		{
-			NetCompositionData netCompositionData = GetComposition(componentData2.m_Edge);
-			o.edgeCompositionData.m_NodeOffset = U_max(o.edgeCompositionData.m_NodeOffset, netCompositionData.m_NodeOffset);
-		}
-	}
 	float roundaboutSize = 0.0f;
 	float roundaboutSize2 = 0.0f;
 	o.startMiddleRadius = 0.0f;
@@ -931,12 +899,6 @@ float2 CEG_CalculateFixedOffsets(int edge, int node, bool isStart, NetGeometryDa
 	Bezier4x3 leftEndCurve, Bezier4x3 rightEndCurve, out float3 leftSnapPos, out float3 rightSnapPos)
 {
 	float num = CEG_GetFixedNodeOffset(node, prefabGeometryData);
-	Owner componentData;
-	if (TryGetOwner(edge, componentData))
-	{
-		Edge componentData2;
-		if (TryGetEdge(componentData.m_Owner, componentData2)) num = U_max(num, CEG_GetFixedNodeOffset(isStart ? componentData2.m_Start : componentData2.m_End, prefabGeometryData));
-	}
 	startTangent *= num;
 	leftSnapPos = leftStartCurve.a;
 	rightSnapPos = rightStartCurve.a;
@@ -961,39 +923,8 @@ float2 CEG_CalculateFixedOffsets(int edge, int node, bool isStart, NetGeometryDa
 
 void CalculateEdgeGeometry(int entity)
 {
-	int entity2 = entity;
-	Owner componentData;
-	if (TryGetOwner(entity, componentData) && HasComponent(componentData.m_Owner, COMPONENT_EDGE)) entity2 = componentData.m_Owner;
-	PlaceableNetData componentData2 = PrefabPlaceableData[GetPrefab(entity2)];
-	// LinkAuxOffsets also takes the owner edge's offsets. Both CalculateOffsets calls share one loop
-	// (one inlined copy); SubNet buffers (auxiliary nets) are not generated, so their offsets never apply.
-	bool bLinkOwner = (componentData2.m_PlacementFlags & PlacementFlags_LinkAuxOffsets) != 0u && entity2 != entity;
-	FEdgeOffsets o = (FEdgeOffsets)0;
-	float2 startOffsets2 = 0.0f;
-	float2 endOffsets2 = 0.0f;
-	float2 ownerDirection = 0.0f;
-	int numPasses = bLinkOwner ? 2 : 1;
-	[loop]
-	for (int pass = 0; pass < numPasses; pass++)
-	{
-		FEdgeOffsets offsets = CEG_CalculateOffsets(pass == 0 ? entity : entity2);
-		if (pass == 0)
-		{
-			o = offsets;
-		}
-		else
-		{
-			startOffsets2 = offsets.startOffsets;
-			endOffsets2 = offsets.endOffsets;
-			ownerDirection = offsets.curve.m_Bezier.d.xz - offsets.curve.m_Bezier.a.xz;
-		}
-	}
-	if (bLinkOwner)
-	{
-		if (dot(o.curve.m_Bezier.d.xz - o.curve.m_Bezier.a.xz, ownerDirection) < 0.0f) CS_Swap(startOffsets2, endOffsets2);
-		o.startOffsets = U_max(o.startOffsets, startOffsets2);
-		o.endOffsets = U_max(o.endOffsets, endOffsets2);
-	}
+	// The original also takes the offsets of the edge that owns this one (LinkAuxOffsets); no edge has an owner.
+	FEdgeOffsets o = CEG_CalculateOffsets(entity);
 	// precise on the outputs makes DXC keep the C# operation order (no reassociation or fused
 	// multiply-add) for everything they depend on, which the decompiled float code relies on.
 	precise EdgeGeometry value = (EdgeGeometry)0;

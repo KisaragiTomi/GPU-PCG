@@ -75,6 +75,13 @@ struct FRoadLine
 	double HalfWidth = 0.0;
 };
 
+// The alleys with the stretches under the roads taken out: where an alley comes within a road's half
+// width plus Reach of its centre line, the road at most HeightTolerance off Height there. A cut end goes
+// onto the centre line of the road that cut it (both ends of a stretch crossing a road straight over at
+// one point), unless that would meet the road flatter than 30 degrees: then it stops where the cover
+// starts. Pieces shorter than MinLength are dropped.
+TArray<FAlley> CutAlleys(const TArray<FAlley>& Alleys, const TArray<FRoadLine>& Roads, double Reach, double Height, double HeightTolerance, double MinLength);
+
 struct FLot
 {
 	uint64 Id = 0;
@@ -90,7 +97,10 @@ struct FLot
 // clear of every road (Roads: as built, alleys already cut back under main roads; by half the setback
 // from its edge) and every reserved plot, and no clear plot it overlaps comes first (a priority drawn from its id). A plot's id, size
 // and place depend only on its anchor line, side and slot, so an edit elsewhere leaves it as it was.
-TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine>& Roads, const TArray<FPolygon>& Reserved, const FLotSettings& Settings);
+// Place decides whether a plot can stand where it lies (and may set its base): one that cannot is no
+// candidate at all.
+TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine>& Roads, const TArray<FPolygon>& Reserved, const FLotSettings& Settings,
+	TFunctionRef<bool(FLot&)> Place = [](FLot&) { return true; });
 
 // How far past an input's bounds the centres of the plots it can change lie (cm). A plot depends on its
 // anchor line, on the roads and reserved plots near it or near a plot it overlaps (a rival), and on
@@ -104,13 +114,14 @@ double ReservedReach(const FLotSettings& Settings);
 
 // The batch buildings between two layouts, so that the second lays out only the tiles near what
 // changed: what every input could change last time (tiles, inclusive, by the input's fingerprint),
-// and the tiles laid out but not written yet.
+// and the tiles laid out but not written yet, of them those an edit dirtied (they go first).
 struct FLotState
 {
 	uint64 Signature = 0;
 	bool bValid = false;
 	TMap<uint64, FIntRect> Reach;
 	TSet<FIntPoint> Pending;
+	TSet<FIntPoint> Edited;
 
 	void Reset()
 	{
@@ -118,6 +129,7 @@ struct FLotState
 		bValid = false;
 		Reach.Reset();
 		Pending.Reset();
+		Edited.Reset();
 	}
 };
 

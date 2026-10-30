@@ -307,7 +307,151 @@ TArray<FAlley> LayoutAlleys(const FPolygon& Region, const TArray<FPolygon>& Rese
 	return Out;
 }
 
-TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine>& Roads, const TArray<FPolygon>& Reserved, const FLotSettings& Settings)
+TArray<FAlley> CutAlleys(const TArray<FAlley>& Alleys, const TArray<FRoadLine>& Roads, double Reach, double Height, double HeightTolerance, double MinLength)
+{
+	// The roads' segments at about the alleys' height, by the 10 m cells within their reach (and a metre
+	// more, for the ends found just outside it).
+	struct FRoadSegment
+	{
+		FVector2D A;
+		FVector2D B;
+		double Limit = 0.0;
+	};
+	constexpr double Cell = 1000.0;
+	TArray<FRoadSegment> Segments;
+	TMap<FIntPoint, TArray<int32>> Grid;
+	auto CellOf = [](const FVector2D& P) { return FIntPoint(FMath::FloorToInt32(P.X / Cell), FMath::FloorToInt32(P.Y / Cell)); };
+	for (const FRoadLine& Road : Roads)
+	{
+		for (int32 I = 0; I + 1 < Road.Points.Num(); I++)
+		{
+			if (FMath::Abs(Road.Points[I].Z - Height) > HeightTolerance || FMath::Abs(Road.Points[I + 1].Z - Height) > HeightTolerance) continue;
+			const FRoadSegment Segment{ FVector2D(Road.Points[I]), FVector2D(Road.Points[I + 1]), Road.HalfWidth + Reach };
+			const FVector2D Margin(Segment.Limit + 100.0);
+			const FIntPoint Min = CellOf(FVector2D::Min(Segment.A, Segment.B) - Margin);
+			const FIntPoint Max = CellOf(FVector2D::Max(Segment.A, Segment.B) + Margin);
+			for (int32 Y = Min.Y; Y <= Max.Y; Y++) for (int32 X = Min.X; X <= Max.X; X++) Grid.FindOrAdd(FIntPoint(X, Y)).Add(Segments.Num());
+			Segments.Add(Segment);
+		}
+	}
+	// The segment nearest to P relative to its limit: that ratio, the nearest point of its centre line, its
+	// direction and the side P lies on.
+	struct FOnRoad
+	{
+		double Ratio = TNumericLimits<double>::Max();
+		FVector2D Point = FVector2D::ZeroVector;
+		FVector2D Direction = FVector2D::ZeroVector;
+		double Side = 0.0;
+	};
+	auto Nearest = [&Segments, &Grid, &CellOf](const FVector2D& P)
+	{
+		FOnRoad Best;
+		const TArray<int32>* Near = Grid.Find(CellOf(P));
+		if (!Near) return Best;
+		for (const int32 Index : *Near)
+		{
+			const FRoadSegment& Segment = Segments[Index];
+			const FVector2D On = FMath::ClosestPointOnSegment2D(P, Segment.A, Segment.B);
+			const double Ratio = FVector2D::Distance(P, On) / Segment.Limit;
+			if (Ratio >= Best.Ratio) continue;
+			Best.Ratio = Ratio;
+			Best.Point = On;
+			Best.Direction = (Segment.B - Segment.A).GetSafeNormal();
+			Best.Side = CSCityLayout_Cross(Segment.B - Segment.A, P - Segment.A) >= 0.0 ? 1.0 : -1.0;
+		}
+		return Best;
+	};
+
+	TArray<FAlley> Out;
+	const double Flat = FMath::Cos(FMath::DegreesToRadians(30.0));
+	for (const FAlley& Alley : Alleys)
+	{
+		auto At = [&Alley](double T) { return FMath::Lerp(Alley.A, Alley.B, T); };
+		auto Covered = [&](double T) { return Nearest(At(T)).Ratio <= 1.0; };
+		// Samples about every half metre; where the cover starts and ends, to a few millimetres.
+		const int32 Count = FMath::Clamp(FMath::CeilToInt32(FVector2D::Distance(Alley.A, Alley.B) / 50.0), 1, 1 << 16);
+		TArray<bool> Inside;
+		for (int32 K = 0; K <= Count; K++) Inside.Add(Covered(double(K) / Count));
+		if (!Inside.Contains(true))
+		{
+			Out.Add(Alley);
+			continue;
+		}
+		auto Edge = [&Covered](double Outside, double In)
+		{
+			for (int32 Step = 0; Step < 20; Step++)
+			{
+				const double Middle = (Outside + In) * 0.5;
+				if (Covered(Middle)) In = Middle;
+				else Outside = Middle;
+			}
+			return Outside;
+		};
+		// The pieces between the covered stretches: their ends (T) and where those go.
+		struct FEnd
+		{
+			double T = 0.0;
+			FVector2D Point = FVector2D::ZeroVector;
+			FOnRoad Road;
+			bool bCut = false;
+		};
+		TArray<TPair<FEnd, FEnd>> Pieces;
+		FEnd From{ 0.0, Alley.A };
+		bool bOpen = !Inside[0];
+		for (int32 K = 1; K <= Count; K++)
+		{
+			if (Inside[K] == Inside[K - 1]) continue;
+			const double T0 = double(K - 1) / Count;
+			const double T1 = double(K) / Count;
+			if (Inside[K])
+			{
+				// Cover starts: the piece so far ends here.
+				const double T = Edge(T0, T1);
+				Pieces.Add({ From, FEnd{ T, At(T), Nearest(At(T)), true } });
+				bOpen = false;
+				continue;
+			}
+			const double T = Edge(T1, T0);
+			From = FEnd{ T, At(T), Nearest(At(T)), true };
+			bOpen = true;
+		}
+		if (bOpen) Pieces.Add({ From, FEnd{ 1.0, Alley.B } });
+		// A stretch crossing a road straight over: both pieces beside it meet the road at its closest point.
+		for (int32 P = 0; P + 1 < Pieces.Num(); P++)
+		{
+			FEnd& Before = Pieces[P].Value;
+			FEnd& After = Pieces[P + 1].Key;
+			if (Before.Road.Side * After.Road.Side >= 0.0) continue;
+			FOnRoad Closest;
+			double Distance = TNumericLimits<double>::Max();
+			for (int32 Step = 0; Step <= 64; Step++)
+			{
+				const FVector2D Q = At(FMath::Lerp(Before.T, After.T, Step / 64.0));
+				const FOnRoad On = Nearest(Q);
+				if (On.Ratio <= 1.0 && FVector2D::Distance(Q, On.Point) < Distance)
+				{
+					Distance = FVector2D::Distance(Q, On.Point);
+					Closest = On;
+				}
+			}
+			if (Distance == TNumericLimits<double>::Max()) continue;
+			Before.Road = Closest;
+			After.Road = Closest;
+		}
+		// Cut ends onto the road's centre line, unless the piece would meet it flatter than 30 degrees.
+		for (TPair<FEnd, FEnd>& Piece : Pieces)
+		{
+			FVector2D Start = Piece.Key.Point;
+			FVector2D End = Piece.Value.Point;
+			if (Piece.Key.bCut && FMath::Abs((End - Piece.Key.Road.Point).GetSafeNormal().Dot(Piece.Key.Road.Direction)) < Flat) Start = Piece.Key.Road.Point;
+			if (Piece.Value.bCut && FMath::Abs((Piece.Value.Road.Point - Start).GetSafeNormal().Dot(Piece.Value.Road.Direction)) < Flat) End = Piece.Value.Road.Point;
+			if (FVector2D::Distance(Start, End) >= MinLength) Out.Add({ Start, End });
+		}
+	}
+	return Out;
+}
+
+TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine>& Roads, const TArray<FPolygon>& Reserved, const FLotSettings& Settings, TFunctionRef<bool(FLot&)> Place)
 {
 	TArray<FLot> Out;
 	if (Settings.Frontage <= Settings.Gap) return Out;
@@ -385,6 +529,11 @@ TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine
 				const FLinearColor Tone = Tones[CSCityLayout_Mix(Lot.Id ^ Seed ^ 3) % UE_ARRAY_COUNT(Tones)];
 				Lot.Color = Tone * float(0.9 + 0.2 * CSCityLayout_Unit(Lot.Id ^ Seed ^ 4));
 				Lot.Color.A = 1.0f;
+				if (!Place(Lot))
+				{
+					Candidates.Pop(EAllowShrinking::No);
+					continue;
+				}
 				Candidate.Box = CSCityLayout_Box(Lot.Corners);
 				Candidate.Priority = CSCityLayout_Mix(Lot.Id ^ Seed ^ 5);
 			}

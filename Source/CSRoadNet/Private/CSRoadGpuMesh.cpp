@@ -7,6 +7,8 @@
 #include "RenderGraphUtils.h"
 #include "RenderingThread.h"
 
+#include <atomic>
+
 static_assert(sizeof(CSRoad::FCompositionVertex) == 10 * sizeof(uint32), "FCompositionVertex must match the HLSL layout");
 static_assert(sizeof(CSRoad::CompositionParameters) == 156 * sizeof(float), "CompositionParameters must match the HLSL layout");
 static_assert(sizeof(CSRoad::FGpuMeshRange) == 6 * sizeof(uint32) && sizeof(CSRoad::FGpuMeshInstance) == 9 * sizeof(uint32), "FMeshRange / FMeshInstance must match the HLSL layout");
@@ -281,6 +283,8 @@ bool FGpuRoadMeshInput::BuildInstances(const FGraph& Graph, FAssets& Assets, con
 	bRefinementApplied = false;
 	NumMidpoints = 0;
 	NumUnconverged = 0;
+	MostUnconvergedInstance = INDEX_NONE;
+	MostUnconverged = 0;
 	Meshes.SetNumZeroed(Graph.Compositions.Num());
 	auto CompositionOf = [&Graph](const FGpuInstanceRef& Ref)
 	{
@@ -423,6 +427,8 @@ bool FGpuRoadMeshInput::ApplyRefinement(const TArray<FUintVector4>& Totals, FStr
 	}
 	uint64 Midpoints = 0;
 	NumUnconverged = 0;
+	MostUnconvergedInstance = INDEX_NONE;
+	MostUnconverged = 0;
 	for (int32 I = 0; I < Totals.Num(); I++)
 	{
 		FGpuMeshInstance& Instance = Instances[RefineInstances[I]];
@@ -431,6 +437,9 @@ bool FGpuRoadMeshInput::ApplyRefinement(const TArray<FUintVector4>& Totals, FStr
 		Instance.RefinedVertexOffset = uint32(Midpoints);
 		Midpoints += Totals[I].Y;
 		NumUnconverged += Totals[I].Z;
+		if (Totals[I].Z <= MostUnconverged) continue;
+		MostUnconverged = Totals[I].Z;
+		MostUnconvergedInstance = int32(RefineInstances[I]);
 	}
 	if (Midpoints > uint64(MAX_int32))
 	{
@@ -543,6 +552,139 @@ bool RunRefineCountsBlocking(const FGpuGeometryInput& Geometry, FGpuRoadMeshInpu
 		return false;
 	}
 	return !bCounts || Mesh.ApplyRefinement(Totals, OutError);
+}
+
+struct FRefineCountsReadback::FShared
+{
+	FGpuGeometryInput Geometry;
+	FGpuRoadMeshInput Mesh;
+	TSharedPtr<const void> KeepAlive;
+	bool bCounts = false;
+	TArray<FUintVector4> Totals;
+	FGpuGeometryResult Result;
+	FPooledGeometry Kept;
+	// Where each copy lands and its bytes, as RunGraphBlocking's Targets; their readbacks.
+	TArray<TPair<void*, uint32>> Targets;
+	TArray<FRHIGPUBufferReadback*> Readbacks;
+	// 0: on its way, 1: landed, 2: could not be read.
+	std::atomic<int32> State { 0 };
+	std::atomic<bool> bLooking { false };
+
+	~FShared()
+	{
+		if (Readbacks.Num() == 0) return;
+		// On the render thread, after any command that still reads them.
+		ENQUEUE_RENDER_COMMAND(CSRoadRefineCountsRelease)([Readbacks = MoveTemp(Readbacks)](FRHICommandListImmediate&) { for (FRHIGPUBufferReadback* Readback : Readbacks) delete Readback; });
+	}
+};
+
+FRefineCountsReadback::FRefineCountsReadback(FGpuGeometryInput&& Geometry, FGpuRoadMeshInput&& Mesh, TSharedPtr<const void> KeepAlive)
+	: Shared(MakeShared<FShared, ESPMode::ThreadSafe>())
+{
+	FShared& Out = *Shared;
+	Out.Geometry = MoveTemp(Geometry);
+	Out.Mesh = MoveTemp(Mesh);
+	Out.KeepAlive = MoveTemp(KeepAlive);
+	// As RunRefineCountsBlocking: the counts, then the edge and node tables.
+	Out.bCounts = Out.Mesh.NeedsRefinementCounts();
+	if (Out.bCounts)
+	{
+		Out.Totals.SetNumZeroed(Out.Mesh.RefineInstances.Num());
+		Out.Targets.Add({ Out.Totals.GetData(), uint32(Out.Totals.Num() * sizeof(FUintVector4)) });
+	}
+	const uint32 NumEntities = Out.Geometry.NumEntities;
+	Out.Result.Edges.SetNumZeroed(NumEntities);
+	Out.Result.StartNodes.SetNumZeroed(NumEntities);
+	Out.Result.EndNodes.SetNumZeroed(NumEntities);
+	Out.Targets.Add({ Out.Result.Edges.GetData(), NumEntities * uint32(sizeof(EdgeGeometry)) });
+	Out.Targets.Add({ Out.Result.StartNodes.GetData(), NumEntities * uint32(sizeof(EdgeNodeGeometry)) });
+	Out.Targets.Add({ Out.Result.EndNodes.GetData(), NumEntities * uint32(sizeof(EdgeNodeGeometry)) });
+	ENQUEUE_RENDER_COMMAND(CSRoadRefineCountsAsync)([Shared = Shared](FRHICommandListImmediate& RHICmdList)
+	{
+		FShared& State = *Shared;
+		{
+			FRDGBuilder GraphBuilder(RHICmdList, RDG_EVENT_NAME("CSRoadRefineCountsAsync"));
+			const FGpuGeometryOutput GeometryOut = AddGeometryPasses(GraphBuilder, State.Geometry);
+			State.Kept.Extract(GraphBuilder, GeometryOut);
+			TArray<FRDGBufferRef> Buffers;
+			if (State.bCounts) Buffers.Add(CSRoadGpuMesh_AddPasses(GraphBuilder, GeometryOut, State.Mesh, FGpuRoadMeshTarget(), ECSRoadGpuMeshStage::Counts).RefineTotals);
+			Buffers.Append({ GeometryOut.EdgeGeometry, GeometryOut.StartNodeGeometry, GeometryOut.EndNodeGeometry });
+			check(Buffers.Num() == State.Targets.Num());
+			for (int32 I = 0; I < Buffers.Num(); I++)
+			{
+				State.Readbacks.Add(new FRHIGPUBufferReadback(TEXT("CSRoad.RefineCountsReadback")));
+				if (State.Targets[I].Value > 0) AddEnqueueCopyPass(GraphBuilder, State.Readbacks.Last(), Buffers[I], State.Targets[I].Value);
+			}
+			GraphBuilder.Execute();
+		}
+		// The graph has its own copy of the inputs now.
+		State.KeepAlive.Reset();
+	});
+}
+
+FRefineCountsReadback::~FRefineCountsReadback() = default;
+
+bool FRefineCountsReadback::Poll()
+{
+	if (Shared->State.load(std::memory_order_acquire) != 0) return true;
+	if (Shared->bLooking.exchange(true)) return false;
+	ENQUEUE_RENDER_COMMAND(CSRoadRefineCountsPoll)([Shared = Shared](FRHICommandListImmediate&)
+	{
+		FShared& State = *Shared;
+		State.bLooking.store(false);
+		if (State.State.load(std::memory_order_relaxed) != 0) return;
+		for (int32 I = 0; I < State.Readbacks.Num(); I++) if (State.Targets[I].Value > 0 && !State.Readbacks[I]->IsReady()) return;
+		for (int32 I = 0; I < State.Readbacks.Num(); I++)
+		{
+			if (State.Targets[I].Value == 0) continue;
+			const void* Data = State.Readbacks[I]->Lock(State.Targets[I].Value);
+			if (!Data)
+			{
+				State.State.store(2, std::memory_order_release);
+				return;
+			}
+			FMemory::Memcpy(State.Targets[I].Key, Data, State.Targets[I].Value);
+			State.Readbacks[I]->Unlock();
+		}
+		State.State.store(1, std::memory_order_release);
+	});
+	return false;
+}
+
+void FRefineCountsReadback::Wait()
+{
+	// Each round: the GPU done with everything queued, then a look.
+	for (int32 Round = 0; Round < 100 && Shared->State.load(std::memory_order_acquire) == 0; Round++)
+	{
+		ENQUEUE_RENDER_COMMAND(CSRoadRefineCountsWait)([](FRHICommandListImmediate& RHICmdList) { RHICmdList.SubmitAndBlockUntilGPUIdle(); });
+		Poll();
+		FlushRenderingCommands();
+	}
+}
+
+bool FRefineCountsReadback::Finish(FGpuGeometryInput& OutGeometry, FGpuRoadMeshInput& OutMesh, FGpuGeometryResult& OutResult, FPooledGeometry& OutShared, FString& OutError)
+{
+	FShared& State = *Shared;
+	const int32 Landed = State.State.load(std::memory_order_acquire);
+	// On its way, the render thread may still be reading the inputs: they stay where they are.
+	if (Landed == 0)
+	{
+		OutError = TEXT("The GPU refinement counts were taken before they landed");
+		return false;
+	}
+	OutGeometry = MoveTemp(State.Geometry);
+	OutMesh = MoveTemp(State.Mesh);
+	OutShared = State.Kept;
+	if (Landed != 1)
+	{
+		OutError = TEXT("The GPU refinement count readback did not complete");
+		return false;
+	}
+	OutResult.Nodes.Reset();
+	OutResult.Edges = MoveTemp(State.Result.Edges);
+	OutResult.StartNodes = MoveTemp(State.Result.StartNodes);
+	OutResult.EndNodes = MoveTemp(State.Result.EndNodes);
+	return !State.bCounts || OutMesh.ApplyRefinement(State.Totals, OutError);
 }
 
 bool RunDeformBlocking(const FGpuGeometryInput& Geometry, const FGpuRoadMeshInput& Mesh, TArray<float>& OutVertices, TArray<uint32>* OutPartners,

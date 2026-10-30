@@ -53,7 +53,6 @@ void InitializeNodeGeometry(int node)
 			uint sideMask = CompositionFlags_Side_Raised | CompositionFlags_Side_Lowered;
 			flag6 = (netCompositionData2.m_Flags.m_General & (CompositionFlags_General_Elevated | CompositionFlags_General_Tunnel)) == 0u;
 			flag6 = flag6 && ((netCompositionData2.m_Flags.m_Left & sideMask) == 0u || (netCompositionData2.m_Flags.m_Right & sideMask) == 0u);
-			flag6 = flag6 && !HasComponent(value2.m_Edge, COMPONENT_OWNER);
 			if (!flag6) continue;
 		}
 		Curve curve = CurveData[value2.m_Edge];
@@ -298,7 +297,6 @@ void FinishEdgeGeometry(int entity)
 		uint sideMask = CompositionFlags_Side_Raised | CompositionFlags_Side_Lowered;
 		bool bFlat = (netCompositionData.m_Flags.m_General & (CompositionFlags_General_Elevated | CompositionFlags_General_Tunnel)) == 0u;
 		bFlat = bFlat && ((netCompositionData.m_Flags.m_Left & sideMask) == 0u || (netCompositionData.m_Flags.m_Right & sideMask) == 0u);
-		bFlat = bFlat && !HasComponent(entity, COMPONENT_OWNER);
 		bStraighten = !bFlat;
 	}
 	if (bStraighten)

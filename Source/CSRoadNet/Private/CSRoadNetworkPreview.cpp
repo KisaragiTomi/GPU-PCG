@@ -2,8 +2,11 @@
 
 #include "CSRoadBridgePlacement.h"
 #include "CSRoadCurves.h"
+#include "CSRoadNet.h"
+#include "CSRoadNetworkContent.h"
 #include "CSRoadNetworkFile.h"
 #include "CSRoadNetworkPreview.h"
+#include "CSRoadTerrainLayer.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -31,12 +34,15 @@ void ACSRoadNetworkActor::ClearPreview()
 	Preview.Reset();
 	NumTrafficVehicles = NumTrafficLanes = UnsupportedTrafficRoundabouts = 0;
 	NumBridgePiers = SkippedBridgePiers = 0;
-	for (UInstancedStaticMeshComponent* Component : {TrafficBodies.Get(), TrafficCabins.Get(), BridgePiers.Get()}) if (Component) Component->ClearInstances();
+	if (!Content) return;
+	for (UInstancedStaticMeshComponent* Component : {Content->TrafficBodies.Get(), Content->TrafficCabins.Get(), Content->BridgePiers.Get()}) if (Component) Component->ClearInstances();
 }
 
 void ACSRoadNetworkActor::SetShowTraffic(bool bShow)
 {
 	bShowTraffic = bShow;
+	UInstancedStaticMeshComponent* TrafficBodies = Content ? Content->TrafficBodies.Get() : nullptr;
+	UInstancedStaticMeshComponent* TrafficCabins = Content ? Content->TrafficCabins.Get() : nullptr;
 	if (TrafficBodies) TrafficBodies->SetVisibility(bShow);
 	if (TrafficCabins) TrafficCabins->SetVisibility(bShow && !TrafficVehicleMesh);
 	if (bShow && Preview && Preview->Count == INDEX_NONE) ResetTraffic();
@@ -53,6 +59,8 @@ void ACSRoadNetworkActor::ResetTraffic()
 	Preview->Simulation.Gap = TrafficGap;
 	Preview->Simulation.bSignals = bTrafficSignals;
 	Preview->Simulation.Reset(TrafficVehicleCount, static_cast<uint32>(TrafficSeed));
+	UInstancedStaticMeshComponent* TrafficBodies = Content ? Content->TrafficBodies.Get() : nullptr;
+	UInstancedStaticMeshComponent* TrafficCabins = Content ? Content->TrafficCabins.Get() : nullptr;
 	if (TrafficBodies)
 	{
 		TrafficBodies->SetStaticMesh(TrafficVehicleMesh ? TrafficVehicleMesh.Get() : LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
@@ -66,6 +74,7 @@ void ACSRoadNetworkActor::ResetTraffic()
 void ACSRoadNetworkActor::TickPreview(float DeltaSeconds)
 {
 	// Also honor direct Blueprint/C++ property writes, which do not send editor notifications.
+	const UInstancedStaticMeshComponent* TrafficBodies = Content ? Content->TrafficBodies.Get() : nullptr;
 	if (TrafficBodies && TrafficBodies->IsVisible() != bShowTraffic) SetShowTraffic(bShowTraffic);
 	if (!Preview || !bShowTraffic) return;
 	if (Preview->Count != TrafficVehicleCount || Preview->Seed != TrafficSeed || Preview->Speed != TrafficSpeed || Preview->Gap != TrafficGap) ResetTraffic();
@@ -77,6 +86,8 @@ void ACSRoadNetworkActor::TickPreview(float DeltaSeconds)
 
 void ACSRoadNetworkActor::RenderTraffic()
 {
+	UInstancedStaticMeshComponent* TrafficBodies = Content ? Content->TrafficBodies.Get() : nullptr;
+	UInstancedStaticMeshComponent* TrafficCabins = Content ? Content->TrafficCabins.Get() : nullptr;
 	if (!Preview || !TrafficBodies || !TrafficCabins) return;
 	TArray<FTransform> Bodies, Cabins;
 	Bodies.Reserve(static_cast<int32>(Preview->Simulation.Cars.size()));
@@ -105,6 +116,8 @@ void ACSRoadNetworkActor::RenderTraffic()
 void ACSRoadNetworkActor::BuildPreview(const CSRoad::FGraph& Graph, const CSRoad::FRoadLanes& Lanes, const CSRoad::FGpuGeometryResult& Geometry, const CSRoad::FSavedTerrain* Terrain)
 {
 	using namespace CSRoad;
+	// The ground under the roads, as the whole network's are now.
+	UpdateTerrain(bShapeTerrain ? MakeTerrainFootprint(Graph, Geometry, Terrain, GetActorTransform(), TerrainMargin, TerrainShoulder).ToSharedPtr() : nullptr);
 	Preview = MakeUnique<FCSRoadNetworkPreview>();
 	Preview->Lanes = Lanes;
 	UnsupportedTrafficRoundabouts = Lanes.UnsupportedRoundaboutNodes;
@@ -147,6 +160,7 @@ void ACSRoadNetworkActor::BuildPreview(const CSRoad::FGraph& Graph, const CSRoad
 		Preview->Lanes.Lanes[I].EndComposition = nullptr;
 	}
 	if (bShowTraffic) ResetTraffic();
+	UInstancedStaticMeshComponent* BridgePiers = Content ? Content->BridgePiers.Get() : nullptr;
 	if (!bBuildBridgePiers || !BridgePiers) return;
 
 	std::vector<CSRoadBridge::FDeck> Decks;
@@ -178,6 +192,7 @@ void ACSRoadNetworkActor::BuildPreview(const CSRoad::FGraph& Graph, const CSRoad
 		const FVector Start = ActorTransform.TransformPosition(CSRoadPreview_Position(Point) - FVector(0, 0, 50));
 		const FVector End = ActorTransform.TransformPosition(FVector(Point.X * 100, -Point.Z * 100, Ground * 100 - 10000));
 		FCollisionQueryParams Query(SCENE_QUERY_STAT(CSRoadBridgeGround), true, this);
+		Query.AddIgnoredActor(Content);
 		FHitResult Hit;
 		if (GetWorld()->LineTraceSingleByObjectType(Hit, Start, End, FCollisionObjectQueryParams(ECC_WorldStatic), Query)) Ground = float(ActorTransform.InverseTransformPosition(Hit.ImpactPoint).Z * 0.01);
 		return Ground;
@@ -206,4 +221,7 @@ void ACSRoadNetworkActor::BuildPreview(const CSRoad::FGraph& Graph, const CSRoad
 	CSRoadPreview_Instances(BridgePiers, Instances);
 	NumBridgePiers = static_cast<int32>(Piers.size());
 	SkippedBridgePiers = Skipped;
+	int32 Elevated = 0;
+	for (const CSRoadBridge::FDeck& Deck : Decks) Elevated += Deck.bElevated ? 1 : 0;
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d bridge piers under %d elevated roads of %d, %d places skipped"), *GetName(), NumBridgePiers, Elevated, int32(Decks.size()), Skipped);
 }

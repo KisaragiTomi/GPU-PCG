@@ -11,8 +11,8 @@
 using namespace CSRoad;
 
 // How far a road's compositions and GPU geometry reach through the graph. Palmsland's roads are built
-// again from sub-graphs, a sampled road with every road within H rings of it (sharing a node, or an
-// owner: the geometry jobs treat one owner's roads together), the snapshot's order kept, and compared
+// again from sub-graphs, a sampled road with every road within H rings of it (sharing a node), the
+// snapshot's order kept, and compared
 // with the whole network built at once (without terrain, an input of each road alone). For each H it
 // logs how many sampled roads come out bit for bit the same: the three compositions, the edge
 // geometry, both edge-node geometries and the node geometry at both ends. Fails if a road is still off
@@ -79,20 +79,10 @@ bool FCSRoadSubgraphReachTest::RunTest(const FString& Parameters)
 	FBuilt Whole;
 	if (!TestTrue(TEXT("the whole network builds"), Build(Everything, Whole))) return false;
 
-	// Neighbours: roads sharing a node, and roads sharing an owner (a road's, or its nodes').
+	// Neighbours: roads sharing a node.
 	TArray<TArray<int32>> AtNode;
 	AtNode.SetNum(Network.Nodes.Num());
-	TMap<int32, TArray<int32>> OfOwner;
-	for (int32 Spec = 0; Spec < Specs.Num(); Spec++)
-	{
-		const FRoadSpec& Road = Specs[Spec];
-		for (const int32 Node : { Road.SourceStart, Road.SourceEnd })
-		{
-			AtNode[Node].Add(Spec);
-			if (Network.Nodes[Node].Owner != 0) OfOwner.FindOrAdd(Network.Nodes[Node].Owner).AddUnique(Spec);
-		}
-		if (Road.Owner != 0) OfOwner.FindOrAdd(Road.Owner).AddUnique(Spec);
-	}
+	for (int32 Spec = 0; Spec < Specs.Num(); Spec++) for (const int32 Node : { Specs[Spec].SourceStart, Specs[Spec].SourceEnd }) AtNode[Node].Add(Spec);
 	auto Within = [&](int32 Seed, int32 Rings)
 	{
 		TSet<int32> Taken = { Seed };
@@ -111,12 +101,7 @@ bool FCSRoadSubgraphReachTest::RunTest(const FString& Parameters)
 			};
 			for (const int32 Spec : Frontier)
 			{
-				for (const int32 Node : { Specs[Spec].SourceStart, Specs[Spec].SourceEnd })
-				{
-					Reach(AtNode[Node]);
-					if (Network.Nodes[Node].Owner != 0) Reach(OfOwner.FindChecked(Network.Nodes[Node].Owner));
-				}
-				if (Specs[Spec].Owner != 0) Reach(OfOwner.FindChecked(Specs[Spec].Owner));
+				for (const int32 Node : { Specs[Spec].SourceStart, Specs[Spec].SourceEnd }) Reach(AtNode[Node]);
 			}
 			Frontier = MoveTemp(Next);
 		}
@@ -209,7 +194,7 @@ bool FCSRoadSubgraphTilesTest::RunTest(const FString& Parameters)
 	int32 Largest = 0;
 	for (const TPair<FIntPoint, TArray<int32>>& Pair : ByTile)
 	{
-		const TArray<int32> Taken = Tiles.Around(Pair.Value, {}, {}, 2);
+		const TArray<int32> Taken = Tiles.Around(Pair.Value, {}, 2);
 		Largest = FMath::Max(Largest, Taken.Num());
 		TArray<uint64> Part;
 		if (!TestTrue(FString::Printf(TEXT("tile %d,%d builds"), Pair.Key.X, Pair.Key.Y), Build(Taken, Part))) return false;
@@ -223,12 +208,12 @@ bool FCSRoadSubgraphTilesTest::RunTest(const FString& Parameters)
 		for (int32 Rings = 1; Rings <= 8 && Exact == INDEX_NONE; Rings++)
 		{
 			TArray<uint64> Part;
-			if (!Build(Tiles.Around({ Spec }, {}, {}, Rings), Part)) return false;
+			if (!Build(Tiles.Around({ Spec }, {}, Rings), Part)) return false;
 			if (Part[Spec] == Whole[Spec]) Exact = Rings;
 		}
 		const FRoadSpec& Road = Specs[Spec];
-		AddInfo(FString::Printf(TEXT("road %d (tile %d,%d; owner %d; nodes %d, %d with owners %d, %d): exact alone from %d rings"), Spec, Tiles.Roads[Spec].Tile.X, Tiles.Roads[Spec].Tile.Y,
-			Road.Owner, Road.SourceStart, Road.SourceEnd, Network.Nodes[Road.SourceStart].Owner, Network.Nodes[Road.SourceEnd].Owner, Exact));
+		AddInfo(FString::Printf(TEXT("road %d (tile %d,%d; nodes %d, %d): exact alone from %d rings"), Spec, Tiles.Roads[Spec].Tile.X, Tiles.Roads[Spec].Tile.Y, Road.SourceStart,
+			Road.SourceEnd, Exact));
 	}
 	TestEqual(TEXT("roads off in their tile's sub-graph"), Off.Num(), 0);
 	return true;

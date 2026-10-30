@@ -14,11 +14,12 @@ class ACSRoadNetworkActor;
 UENUM()
 enum class ECSRoadTier : uint8
 {
-	/** A main road: alleys under it give way. */
-	Main,
-	/** An alley (laid out beforehand): where a main road covers it, it is cut away and its ends join that road. The
-	 *  spline stays as drawn, so the alley comes back when the road goes. */
-	Alley,
+	/** A main road: small roads under it give way. */
+	Main UMETA(DisplayName = "Main Road"),
+	/** A small road or alley, laid out beforehand: where a main road covers it, it is cut away and its ends join that
+	 *  road; a junction drawn with a main road (a point of each in the same place) stays as drawn. The spline stays
+	 *  as drawn, so the small road comes back when the main road goes. */
+	Alley UMETA(DisplayName = "Small Road"),
 };
 
 // Unset values are measured (elevation above the ground) or chosen by the network (node prefab).
@@ -50,20 +51,12 @@ struct CSROADNET_API FCSRoadSplinePoint
 	UPROPERTY(EditAnywhere, Category = "Node")
 	bool bOutsideConnection = false;
 
-	/** Something owns the node (a converted snapshot's building): the geometry does not flatten it. */
-	UPROPERTY(EditAnywhere, Category = "Node", AdvancedDisplay)
-	bool bNodeOwned = false;
-
 	UPROPERTY(EditAnywhere, Category = "Segment", meta = (InlineEditConditionToggle))
 	bool bSegmentElevation = false;
 
 	/** Height above the ground of the segment to the next point, left and right (m); unset: measured at its middle. */
 	UPROPERTY(EditAnywhere, Category = "Segment", meta = (EditCondition = "bSegmentElevation"))
 	FVector2D SegmentElevation = FVector2D::ZeroVector;
-
-	/** Something owns the segment's edge (a converted snapshot's building): the geometry does not flatten its ends. */
-	UPROPERTY(EditAnywhere, Category = "Segment", AdvancedDisplay)
-	bool bSegmentOwned = false;
 };
 
 UCLASS()
@@ -104,7 +97,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (GetOptions = "GetRoadPrefabOptions"))
 	FString Prefab = TEXT("Small Road");
 
-	/** A main road, or an alley that gives way to main roads. */
+	/** A main road, or a small road (alleys too) that gives way to main roads. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road")
 	ECSRoadTier Tier = ECSRoadTier::Main;
 
@@ -134,6 +127,10 @@ public:
 	// The network building this spline: the network actor owning it or one it hangs under, else the
 	// level's only network building from splines.
 	ACSRoadNetworkActor* FindNetwork() const;
+
+	// Goes up with every notice to the network (an edit of the points, their data or the settings): the
+	// network reads the spline again only when it went up, or when its settings or placement changed.
+	mutable uint32 Revision = 0;
 	// Has that network rebuild on its next tick.
 	void NotifyNetwork() const;
 

@@ -3,6 +3,8 @@
 #pragma once
 
 #include "CSRoadGpuGeometry.h"
+#include "CSRoadNetworkActor.h"
+#include "CSRoadNetworkContent.h"
 #include "Dom/JsonObject.h"
 #include "Misc/AutomationTest.h"
 
@@ -30,6 +32,19 @@ bool LoadGolden(const FString& Id, TSharedPtr<FJsonObject>& OutJson, TArray64<ui
 TArray<FString> GoldenScenarioIds();
 TArray<double> Numbers(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field);
 TArray<double> Numbers(const TArray<TSharedPtr<FJsonValue>>& Values);
+
+// Ticks the network as the editor's frames would until the build a tick starts has ended: a build in
+// tiles waits for the GPU between ticks.
+void TickBuild(ACSRoadNetworkActor* Network);
+
+// The components of a class the network has built (on its content actor; none before it built).
+template <class T>
+TArray<T*> Built(const ACSRoadNetworkActor* Network)
+{
+	TArray<T*> Out;
+	if (const ACSRoadNetworkContent* Content = Network->GetContent()) Content->GetComponents<T>(Out);
+	return Out;
+}
 
 // Element-wise comparison with an absolute tolerance scaled by magnitude; logs the first mismatches.
 struct FCompare

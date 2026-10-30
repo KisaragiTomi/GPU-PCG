@@ -30,7 +30,6 @@ void CSRoadTiles_AddNode(FCSRoadTiles_Hash& Hash, const FSavedNode& Node)
 	if (Node.bHasElevation) Hash.Add(Node.Elevation);
 	Hash.Add(Node.Upgrade);
 	Hash.Add(Node.bOutside);
-	Hash.Add(Node.Owner);
 }
 
 // A node by position: a saved node's as it is; a spec's end without one as FGraph::PositionNode
@@ -49,7 +48,6 @@ void FTileNetwork::Build(const TArray<FRoadSpec>& Specs, const TArray<FSavedNode
 {
 	Roads.Reset();
 	AtNode.Reset();
-	OfOwner.Reset();
 	Roads.SetNum(Specs.Num());
 	TMap<uint64, int32> Repeats;
 	for (int32 Index = 0; Index < Specs.Num(); Index++)
@@ -67,7 +65,6 @@ void FTileNetwork::Build(const TArray<FRoadSpec>& Specs, const TArray<FSavedNode
 		Asked.Add(Spec.bHasSource);
 		Asked.Add(Spec.bHasElevation);
 		if (Spec.bHasElevation) Asked.Add(Spec.Elevation);
-		Asked.Add(Spec.Owner);
 		for (const FSavedNode* Node : { Start, End }) if (Node) CSRoadTiles_AddNode(Asked, *Node);
 		Out.Key = Asked.Get();
 		// The same road twice (drawn on top of itself) still needs two keys.
@@ -84,16 +81,12 @@ void FTileNetwork::Build(const TArray<FRoadSpec>& Specs, const TArray<FSavedNode
 		Out.Tile = FIntPoint(FMath::FloorToInt32(double(Middle.x) / TileSize), FMath::FloorToInt32(double(Middle.z) / TileSize));
 		Out.StartNode = CSRoadTiles_NodeKey(Start, Spec.Curve.a);
 		Out.EndNode = CSRoadTiles_NodeKey(End, Spec.Curve.d);
-		Out.Owners[0] = Spec.Owner;
-		Out.Owners[1] = Start ? Start->Owner : 0;
-		Out.Owners[2] = End ? End->Owner : 0;
 		AtNode.FindOrAdd(Out.StartNode).Add(Index);
 		if (Out.EndNode != Out.StartNode) AtNode.FindOrAdd(Out.EndNode).Add(Index);
-		for (const int32 Owner : Out.Owners) if (Owner != 0) OfOwner.FindOrAdd(Owner).AddUnique(Index);
 	}
 }
 
-TArray<int32> FTileNetwork::Around(const TArray<int32>& From, const TSet<uint64>& Nodes, const TSet<int32>& Owners, int32 Rings) const
+TArray<int32> FTileNetwork::Around(const TArray<int32>& From, const TSet<uint64>& Nodes, int32 Rings) const
 {
 	TBitArray<> Taken(false, Roads.Num());
 	TArray<int32> Frontier;
@@ -121,13 +114,11 @@ TArray<int32> FTileNetwork::Around(const TArray<int32>& From, const TSet<uint64>
 			const FTileRoad& Here = Roads[Road];
 			Take(AtNode.Find(Here.StartNode));
 			Take(AtNode.Find(Here.EndNode));
-			for (const int32 Owner : Here.Owners) if (Owner != 0) Take(OfOwner.Find(Owner));
 		}
-		// The roads at the given nodes and of the given owners are one ring from them.
+		// The roads at the given nodes are one ring from them.
 		if (Ring == 0)
 		{
 			for (const uint64 Node : Nodes) Take(AtNode.Find(Node));
-			for (const int32 Owner : Owners) Take(OfOwner.Find(Owner));
 		}
 		Frontier = MoveTemp(Next);
 	}
@@ -160,21 +151,28 @@ TArray<int32> FTileState::Affected(const FTileNetwork& Network) const
 		Present.Add(Network.Roads[Road].Key);
 		if (!Last.Contains(Network.Roads[Road].Key)) Changed.Add(Road);
 	}
-	// A road that went is gone from the network: the roads at its nodes and of its owners are the
-	// ones a ring from it.
+	// A road that went is gone from the network: the roads at its nodes are the ones a ring from it.
 	TSet<uint64> Nodes;
-	TSet<int32> Owners;
 	for (const TPair<uint64, FTileRoad>& Pair : Last)
 	{
 		if (Present.Contains(Pair.Key)) continue;
 		Nodes.Add(Pair.Value.StartNode);
 		Nodes.Add(Pair.Value.EndNode);
-		for (const int32 Owner : Pair.Value.Owners) if (Owner != 0) Owners.Add(Owner);
 	}
-	return Network.Around(Changed, Nodes, Owners, 2);
+	return Network.Around(Changed, Nodes, 2);
 }
 
-TMap<FIntPoint, TArray<int32>> FTileState::Dirty(const FTileNetwork& Network, const TArray<int32>& Affected, const TArray<uint64>& Outputs, bool bEverything, const TArray<FIntPoint>& Existing) const
+TSet<FIntPoint> FTileState::TilesGone(const FTileNetwork& Network) const
+{
+	TSet<uint64> Present;
+	for (const FTileRoad& Road : Network.Roads) Present.Add(Road.Key);
+	TSet<FIntPoint> Out;
+	for (const TPair<uint64, FTileRoad>& Pair : Last) if (!Present.Contains(Pair.Key)) Out.Add(Pair.Value.Tile);
+	return Out;
+}
+
+TMap<FIntPoint, TArray<int32>> FTileState::Dirty(const FTileNetwork& Network, const TArray<int32>& Affected, const TArray<uint64>& Outputs, bool bEverything, const TArray<FIntPoint>& Existing,
+	int32& OutEdited, int32& OutFresh, const FVector2D* Focus) const
 {
 	// Nodes where a road came out different, appeared or went away. The roads that are not affected
 	// come out as before.
@@ -201,21 +199,28 @@ TMap<FIntPoint, TArray<int32>> FTileState::Dirty(const FTileNetwork& Network, co
 	for (const FTileRoad& Road : Network.Roads) if (bEverything || Changed.Contains(Road.StartNode) || Changed.Contains(Road.EndNode)) Fresh.Add(Road.Tile);
 
 	// Every road of a tile to rebuild is drawn again. What this edit changed goes before what earlier
-	// batches left, so a drag keeps up however much is pending.
+	// edits left, and those before the rest of the backlog, so a drag keeps up however much is pending;
+	// within each, the tiles nearest the camera come first.
+	auto Rank = [this, &Fresh, bEverything](const FIntPoint& Tile) { return Fresh.Contains(Tile) ? 0 : !bEverything && Edited.Contains(Tile) ? 1 : 2; };
 	TMap<FIntPoint, TArray<int32>> Out;
 	for (const FIntPoint& Tile : Fresh) Out.Add(Tile);
 	for (const FIntPoint& Tile : Pending) Out.Add(Tile);
-	Out.KeySort([&Fresh](const FIntPoint& A, const FIntPoint& B)
+	Out.KeySort([&Rank, Focus](const FIntPoint& A, const FIntPoint& B)
 	{
-		const bool bFreshA = Fresh.Contains(A);
-		if (bFreshA != Fresh.Contains(B)) return bFreshA;
-		return A.Y != B.Y ? A.Y < B.Y : A.X < B.X;
+		const int32 RankA = Rank(A);
+		const int32 RankB = Rank(B);
+		if (RankA != RankB) return RankA < RankB;
+		return TileBefore(A, B, Focus);
 	});
+	OutFresh = bEverything ? 0 : Fresh.Num();
+	OutEdited = 0;
+	if (!bEverything) for (const TPair<FIntPoint, TArray<int32>>& Pair : Out) OutEdited += Rank(Pair.Key) < 2 ? 1 : 0;
 	for (int32 Road = 0; Road < Network.Roads.Num(); Road++) if (TArray<int32>* Drawn = Out.Find(Network.Roads[Road].Tile)) Drawn->Add(Road);
 	return Out;
 }
 
-void FTileState::Commit(const FTileNetwork& Network, const TArray<int32>& Affected, const TArray<uint64>& Outputs, uint64 Signature, const TMap<FIntPoint, TArray<int32>>& Dirty, const TArray<FIntPoint>& Written)
+void FTileState::Commit(const FTileNetwork& Network, const TArray<int32>& Affected, const TArray<uint64>& Outputs, uint64 Signature, const TMap<FIntPoint, TArray<int32>>& Dirty, int32 NumEdited,
+	const TArray<FIntPoint>& Written)
 {
 	TMap<uint64, FTileRoad> Next;
 	Next.Reserve(Network.Roads.Num());
@@ -229,8 +234,18 @@ void FTileState::Commit(const FTileNetwork& Network, const TArray<int32>& Affect
 	// The tiles not written keep whatever they drew before: rebuilt by a later batch even though the
 	// roads they hold now compare equal.
 	Pending.Reset();
-	for (const TPair<FIntPoint, TArray<int32>>& Pair : Dirty) Pending.Add(Pair.Key);
-	for (const FIntPoint& Tile : Written) Pending.Remove(Tile);
+	Edited.Reset();
+	int32 Index = 0;
+	for (const TPair<FIntPoint, TArray<int32>>& Pair : Dirty)
+	{
+		Pending.Add(Pair.Key);
+		if (Index++ < NumEdited) Edited.Add(Pair.Key);
+	}
+	for (const FIntPoint& Tile : Written)
+	{
+		Pending.Remove(Tile);
+		Edited.Remove(Tile);
+	}
 	LastSignature = Signature;
 	bValid = true;
 }
@@ -239,6 +254,7 @@ void FTileState::Reset()
 {
 	Last.Reset();
 	Pending.Reset();
+	Edited.Reset();
 	LastSignature = 0;
 	bValid = false;
 }

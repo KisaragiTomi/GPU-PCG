@@ -36,12 +36,6 @@ CompositionFlags CSRoadNetworkFile_Upgrade(const TSharedPtr<FJsonObject>& O)
 	return MakeFlags(static_cast<uint>(A[0]->AsNumber()), static_cast<uint>(A[1]->AsNumber()), static_cast<uint>(A[2]->AsNumber()));
 }
 
-int32 CSRoadNetworkFile_Owner(const TSharedPtr<FJsonObject>& O)
-{
-	double Value = 0.0;
-	return O->TryGetNumberField(TEXT("owner"), Value) ? static_cast<int32>(Value) : 0;
-}
-
 bool CSRoadNetworkFile_LoadMap(const TSharedPtr<FJsonObject>& Terrain, const FString& Directory, const TCHAR* Key, const TCHAR* OffsetKey, const TCHAR* SizeKey, FSavedTerrain::FMap& Out, FString& OutError)
 {
 	const TSharedPtr<FJsonObject> M = Terrain->GetObjectField(Key);
@@ -119,7 +113,6 @@ bool FSavedNetwork::Load(const FString& Path, const FAssets* Assets, bool bLoadT
 		Node.bHasElevation = CSRoadNetworkFile_Elevation(N, Node.Elevation);
 		Node.Upgrade = CSRoadNetworkFile_Upgrade(N);
 		Node.bOutside = N->GetBoolField(TEXT("outside"));
-		Node.Owner = CSRoadNetworkFile_Owner(N);
 		NodeIndices.Add(Id, Nodes.Add(Node));
 	}
 	TSet<int32> EdgeIds;
@@ -143,7 +136,6 @@ bool FSavedNetwork::Load(const FString& Path, const FAssets* Assets, bool bLoadT
 		Spec.SourceStart = *Start;
 		Spec.SourceEnd = *End;
 		Spec.bHasElevation = CSRoadNetworkFile_Elevation(E, Spec.Elevation);
-		Spec.Owner = CSRoadNetworkFile_Owner(E);
 		if (EdgeIds.Contains(Id))
 		{
 			OutError = TEXT("Duplicate source edge");
@@ -160,12 +152,6 @@ bool FSavedNetwork::Load(const FString& Path, const FAssets* Assets, bool bLoadT
 		}
 		Roads.Add(Spec);
 	}
-	// In CS2 an owner may be another node or edge (a net owned by an edge); here owners only group what
-	// they own, so such an owner loses that link.
-	int32 NetOwners = 0;
-	for (const FSavedNode& Node : Nodes) NetOwners += Node.Owner != 0 && (NodeIndices.Contains(Node.Owner) || EdgeIds.Contains(Node.Owner)) ? 1 : 0;
-	for (const FRoadSpec& Road : Roads) NetOwners += Road.Owner != 0 && (NodeIndices.Contains(Road.Owner) || EdgeIds.Contains(Road.Owner)) ? 1 : 0;
-	if (NetOwners > 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %d nodes and edges are owned by another node or edge; that link is not kept, the owner only groups them"), *Path, NetOwners);
 	if (Assets)
 	{
 		for (const FRoadSpec& Road : Roads)

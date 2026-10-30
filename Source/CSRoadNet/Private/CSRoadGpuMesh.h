@@ -105,6 +105,9 @@ struct FGpuRoadMeshInput
 	uint32 NumMidpoints = 0;
 	// Leaves Refine would still split after its 20 passes (the C# throws); drawn as they are.
 	uint32 NumUnconverged = 0;
+	// The instance with the most of them (Instances index, INDEX_NONE with none) and its count.
+	int32 MostUnconvergedInstance = INDEX_NONE;
+	uint32 MostUnconverged = 0;
 	// Atlas name of each material slot (MeshTriangleMaterials values).
 	TArray<FString> MaterialSlots;
 	uint32 NumVertices = 0;
@@ -161,6 +164,29 @@ void AddRoadMeshPasses(FRDGBuilder& GraphBuilder, const FGpuGeometryOutput& Geom
 // Shared: an empty one keeps this graph's geometry for the build's later graphs; one that holds a
 // geometry is used instead of running the passes again.
 bool RunRefineCountsBlocking(const FGpuGeometryInput& Geometry, FGpuRoadMeshInput& Mesh, FString& OutError, FGpuGeometryResult* OutGeometry = nullptr, FPooledGeometry* Shared = nullptr);
+
+// RunRefineCountsBlocking for a game thread that must not wait on the GPU: made, it takes the inputs and
+// queues the same graph and copies (the geometry kept, its tables read back); Poll looks, at most once a
+// frame, whether the copies have landed; Finish then hands the inputs back as RunRefineCountsBlocking
+// leaves them. KeepAlive holds what the inputs point to (the terrain) until the graph is recorded.
+class FRefineCountsReadback
+{
+public:
+	FRefineCountsReadback(FGpuGeometryInput&& Geometry, FGpuRoadMeshInput&& Mesh, TSharedPtr<const void> KeepAlive);
+	~FRefineCountsReadback();
+
+	// Game thread: whether the copies have landed (or failed); never waits.
+	bool Poll();
+	// Game thread: Poll, waiting for the GPU.
+	void Wait();
+	// Game thread, once Poll is true: the inputs back, Mesh's refinement applied (when it needed it), the
+	// tables and the kept geometry. False when the copies failed or the counts did not fit.
+	bool Finish(FGpuGeometryInput& OutGeometry, FGpuRoadMeshInput& OutMesh, FGpuGeometryResult& OutResult, FPooledGeometry& OutShared, FString& OutError);
+
+private:
+	struct FShared;
+	TSharedPtr<FShared, ESPMode::ThreadSafe> Shared;
+};
 
 // Game thread, tests: geometry + deform, reading back the Unity-space vertices (8 floats each), and
 // optionally the junction seam partner of every side (parameter slot * 2 + side: 0 = none, else

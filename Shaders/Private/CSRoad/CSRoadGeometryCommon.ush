@@ -12,7 +12,6 @@
 #define COMPONENT_CURVE 4u
 #define COMPONENT_ELEVATION 8u
 #define COMPONENT_UPGRADED 16u
-#define COMPONENT_OWNER 32u
 #define COMPONENT_OUTSIDE_CONNECTION 64u
 #define COMPONENT_COMPOSITION 128u
 
@@ -29,7 +28,6 @@ StructuredBuffer<Node> NodeData;
 StructuredBuffer<Edge> EdgeData;
 StructuredBuffer<Curve> CurveData;
 StructuredBuffer<Elevation> ElevationData;
-StructuredBuffer<Owner> OwnerData;
 StructuredBuffer<Composition> CompositionData;
 StructuredBuffer<uint2> ConnectedEdgeRange;
 StructuredBuffer<int> ConnectedEdgeList;
@@ -74,14 +72,6 @@ bool HasComponent(int e, uint bit) { return e > 0 && (uint)e < NumEntities && (E
 int GetPrefab(int e) { return EntityPrefab[e]; }
 NetGeometryData GetPrefabGeometry(int e) { return PrefabGeometryData[EntityPrefab[e]]; }
 NetCompositionData GetComposition(int composition) { return PrefabCompositionData[composition]; }
-
-bool TryGetOwner(int e, out Owner o)
-{
-	o = (Owner)0;
-	if (!HasComponent(e, COMPONENT_OWNER)) return false;
-	o = OwnerData[e];
-	return true;
-}
 
 bool TryGetElevation(int e, out Elevation v)
 {

@@ -24,9 +24,10 @@ W, H = 1600, 900
 WARMUP = 48
 # Unity (5750, -3000): the snapshot terrain is 531.8-532.1 m within 160 m of it. Unity metres to
 # UE: (x, -z, y) * 100; the network sits at the origin, where its terrain matches the level's.
-# The level's terrain mesh is RoadLab's display terrain: the heightmap lowered 0.18 m, and lowered
-# under the snapshot's own roads only. A road's asphalt runs below its curve, so a road drawn on
-# the bare heightmap sinks under that mesh: the drawing sits 0.4 m higher, still a ground road.
+# The drawing sits 0.4 m above the heightmap, still a ground road: the level's ground was RoadLab's
+# display terrain (the heightmap lowered 0.18 m), under which a road on the bare heightmap sank. That
+# mesh was deleted on 2026-10-30 (L_PalmslandSplines stands on a Landscape instead): L_Palmsland now
+# has no ground.
 CENTRE = unreal.Vector(575000.0, 300000.0, 53228.0)
 NEVER = unreal.PropertyAccessChangeNotifyMode.NEVER
 KEEP = unreal.AttachmentRule.KEEP_WORLD
