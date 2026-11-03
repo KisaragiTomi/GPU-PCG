@@ -3,6 +3,7 @@
 #include "AssetRegistry/AssetData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "CSCityBuildingActor.h"
+#include "CSCityGarage.h"
 #include "CSCityLayout.h"
 #include "CSGpuMemoryBudget.h"
 #include "CSGpuMeshTypes.h"
@@ -747,6 +748,58 @@ TArray<CSRoad::FSplineRoad> ACSRoadNetworkActor::GatherSplines()
 	return Splines;
 }
 
+void ACSRoadNetworkActor::AddGarageRoads(TArray<CSRoad::FSplineRoad>& Splines, CSRoad::FAssets& Assets)
+{
+	NumGarages = 0;
+	NumJoinedGarages = 0;
+	UWorld* World = GetWorld();
+	if (!World) return;
+	const FTransform NetworkToWorld = GetActorTransform();
+	auto ToNetwork = [&NetworkToWorld](const FVector& Point) { return CSRoadNetworkActor_ToUnity(NetworkToWorld.InverseTransformPosition(Point)); };
+	// Every building's footprint is in the way of the driveways.
+	TArray<ACSCityBuildingActor*> Buildings;
+	TArray<CSCity::FObstacle> Obstacles;
+	for (ACSCityBuildingActor* Building : TActorRange<ACSCityBuildingActor>(World))
+	{
+		if (NetworkOf(Building) != this) continue;
+		CSCity::FObstacle& Obstacle = Obstacles.AddDefaulted_GetRef();
+		Obstacle.Name = Building->GetActorNameOrLabel();
+		for (const FVector2D& Corner : Building->Footprint())
+		{
+			const FVector3d Point = ToNetwork(FVector(Corner, Building->GetActorLocation().Z));
+			Obstacle.Outline.Add(FVector2d(Point.X, Point.Z));
+		}
+		Buildings.Add(Building);
+	}
+	TArray<CSRoad::FSplineRoad> Driveways;
+	for (int32 B = 0; B < Buildings.Num(); B++)
+	{
+		ACSCityBuildingActor* Building = Buildings[B];
+		Building->GarageStatus.Reset();
+		FVector Door;
+		FVector Facing;
+		if (!Building->GarageDoor(Door, Facing)) continue;
+		NumGarages++;
+		CSCity::FGarage Garage;
+		Garage.Name = Building->GetActorNameOrLabel() + TEXT(" driveway");
+		// The building's actor name, the same in every session (as the spline roads' ids).
+		const FString Identity = Building->GetPathName(Building->GetOuter()) + TEXT(".Garage");
+		Garage.Id = FXxHash64::HashBuffer(*Identity, Identity.Len() * sizeof(TCHAR)).Hash;
+		Garage.Prefab = Building->GarageRoad;
+		Garage.Door = ToNetwork(Door);
+		const FVector3d Ahead = ToNetwork(Door + Facing * 100.0) - Garage.Door;
+		Garage.Facing = FVector2d(Ahead.X, Ahead.Z).GetSafeNormal();
+		Garage.Reach = Building->GarageReach;
+		Garage.Clearance = SplineSettings.AlleyClearance;
+		Garage.Own = B;
+		CSRoad::FSplineRoad Driveway;
+		if (!CSCity::Driveway(Garage, Splines, Obstacles, Assets, Driveway, Building->GarageStatus)) continue;
+		NumJoinedGarages++;
+		if (Driveway.Points.Num() > 0) Driveways.Add(MoveTemp(Driveway));
+	}
+	Splines.Append(MoveTemp(Driveways));
+}
+
 bool ACSRoadNetworkActor::ConvertToSplines()
 {
 #if WITH_EDITOR
@@ -1037,6 +1090,7 @@ bool ACSRoadNetworkActor::BuildRoads(bool bWait, FString& OutError)
 	else
 	{
 		TSharedPtr<TArray<CSRoad::FSplineRoad>> Gathered = MakeShared<TArray<CSRoad::FSplineRoad>>(GatherSplines());
+		AddGarageRoads(*Gathered, Library->Assets);
 		const double GatherMs = Lap();
 		TSharedPtr<CSRoad::FSavedNetwork> Built = MakeShared<CSRoad::FSavedNetwork>();
 		CSRoad::FSplineNetworkSettings Settings;
@@ -2146,20 +2200,27 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		for (const FVector3d& Control : Input.Curve) Box += FVector2D(NetworkToWorld.TransformPosition(CSRoadNetworkActor_ToUnreal(Control)));
 		Input.Tiles = TilesOf(Box, Kind == EInput::Anchor ? CSCity::AnchorReach(Settings, Input.HalfWidth, Input.Setback) : CSCity::RoadReach(Settings, Input.HalfWidth, Input.Setback));
 	};
-	// The roads as built, which the plots keep clear of.
-	for (const CSRoad::FRoadSpec& Road : Roads) AddCurve(EInput::Road, 0, HalfWidth(Road.Prefab), Point(Road.Curve.a), Point(Road.Curve.b), Point(Road.Curve.c), Point(Road.Curve.d));
-	// The plots face the splines' segments as drawn, not the edges cut from them: a road joining the
-	// spline, or an edit of another segment, leaves the slots where they were. Only roads CS2 zones
-	// along (with zone blocks: not highways, not bridges) have plots.
+	// Only roads CS2 zones along (with zone blocks: not highways, not bridges), and custom roads asking for plots, have
+	// plots; never a spline without plots (a garage's driveway).
 	TMap<FString, bool> Zoning;
 	auto Zoned = [&Assets, &Zoning](const FString& Prefab)
 	{
 		if (const bool* Known = Zoning.Find(Prefab)) return *Known;
 		return Zoning.Add(Prefab, Assets.HasRoad(Prefab) && ((Assets.Road(Prefab).m_Flags & CSRoad::RoadFlags_EnableZoning) != 0 || Assets.Plots(Prefab)));
 	};
+	TSet<uint64> NoPlots;
+	for (const CSRoad::FSplineRoad& Spline : Splines) if (!Spline.bPlots) NoPlots.Add(Spline.Id);
+	// The roads as built, which the plots keep clear of; the plots of other roads stop halfway to those with plots.
+	for (const CSRoad::FRoadSpec& Road : Roads)
+	{
+		const bool bZoned = !NoPlots.Contains(Road.Spline) && Zoned(Road.Prefab);
+		AddCurve(EInput::Road, 0, Road.Spline, Road.Prefab, bZoned, Point(Road.Curve.a), Point(Road.Curve.b), Point(Road.Curve.c), Point(Road.Curve.d));
+	}
+	// The plots face the splines' segments as drawn, not the edges cut from them: a road joining the
+	// spline, or an edit of another segment, leaves the slots where they were.
 	for (const CSRoad::FSplineRoad& Spline : Splines)
 	{
-		if (!Zoned(Spline.Prefab)) continue;
+		if (!Spline.bPlots || !Zoned(Spline.Prefab)) continue;
 		const int32 Count = Spline.Points.Num();
 		for (int32 I = 0; I < (Spline.bClosed ? Count : Count - 1); I++)
 		{

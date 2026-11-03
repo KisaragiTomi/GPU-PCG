@@ -51,6 +51,9 @@ struct FSplineRoad
 	// An alley: where a main road (any road that is not an alley) covers it, it is cut away and its
 	// ends join that road. The spline itself never changes, so the alley is back once the road goes.
 	bool bAlley = false;
+	// Batch buildings stand along it where its road has plots (CSCityGarage's driveways have none). Not the network's
+	// concern: the conversion ignores it.
+	bool bPlots = true;
 	bool bClosed = false;
 	TArray<FVector3d> Points;
 	// Hermite tangents per unit of the segment parameter, as a USplineComponent keeps them.

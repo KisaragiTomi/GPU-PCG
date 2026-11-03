@@ -469,9 +469,17 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumRoads = 0;
 
-	/** Spline roads the last build took. */
+	/** Spline roads the last build took, the garages' driveways among them. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumSplines = 0;
+
+	/** The city buildings' garages the last build found (ACSCityBuildingActor::bHasGarage), and those joined to a main road,
+	 *  by a driveway or opening onto it; each building's GarageStatus says why one is not. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 NumGarages = 0;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 NumJoinedGarages = 0;
 
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumVertices = 0;
@@ -521,6 +529,10 @@ public:
 	void FinishWrites();
 	// Tests: whether a build in tiles waits for the GPU between ticks (Tick ends it).
 	bool IsBuilding() const;
+	// Tests: the spline roads (the garages' driveways after the drawn ones) and the network the last build in tiles made
+	// of them; null before one.
+	const TArray<CSRoad::FSplineRoad>* SplinesForTest() const { return LastSplines.Get(); }
+	const CSRoad::FSavedNetwork* RoadsForTest() const { return PreviewRoads.Get(); }
 
 	// The road prefabs of the network's asset directory (the default one without a network).
 	static TArray<FString> RoadPrefabNames(const ACSRoadNetworkActor* Network);
@@ -661,6 +673,9 @@ private:
 	// changed since the last time (SplineCache) is taken as read then.
 	TArray<CSRoad::FSplineRoad> GatherSplines();
 	TUniquePtr<FCSRoadNetworkActor_SplineCache> SplineCache;
+	// The city buildings' garages joined to the main roads among Splines: a driveway spline for each that needs one,
+	// after the drawn ones (CSCityGarage). Sets NumGarages, NumJoinedGarages and the buildings' GarageStatus.
+	void AddGarageRoads(TArray<CSRoad::FSplineRoad>& Splines, CSRoad::FAssets& Assets);
 	// Rebuild's work. bWait: every GPU round trip waited for. Else (Tick) a build in tiles waits for the
 	// GPU a tick at a time (TileJob) and writes the tiles without waiting for the render thread.
 	void RunBuild(bool bWait);

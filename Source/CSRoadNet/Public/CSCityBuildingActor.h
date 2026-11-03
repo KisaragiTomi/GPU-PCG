@@ -51,6 +51,28 @@ public:
 	UPROPERTY(EditAnywhere, Category = "City Building")
 	TObjectPtr<UMaterialInterface> Material;
 
+	/** A garage: the road network joins it to the nearest main road in front of it (within GarageReach) with a driveway of
+	 *  GarageRoad, which batch buildings keep clear of but do not line. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building|Garage")
+	bool bHasGarage = false;
+
+	/** Where the garage is, relative to the building (the diamond in the viewport while it is selected): its door is the
+	 *  nearest point of the footprint's sides, facing out. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building|Garage", meta = (MakeEditWidget, EditCondition = "bHasGarage"))
+	FVector GarageLocation = FVector(0.0, -700.0, 0.0);
+
+	/** The driveway's road. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building|Garage", meta = (GetOptions = "GetRoadPrefabOptions", EditCondition = "bHasGarage"))
+	FString GarageRoad = TEXT("Alley");
+
+	/** How far from the door a main road may be for the garage to join it: a driveway no longer than that. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building|Garage", meta = (ClampMin = "1", Units = "m", EditCondition = "bHasGarage"))
+	float GarageReach = 50.0f;
+
+	/** What the road network made of the garage when it last built: the road it joins, or why it joins none. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "City Building|Garage")
+	FString GarageStatus;
+
 	UPROPERTY(VisibleAnywhere, Category = "City Building")
 	TObjectPtr<UCSMeshRenderComponent> Mesh;
 
@@ -58,12 +80,18 @@ public:
 	TArray<FVector2D> Footprint() const;
 	// The footprint grown by Setback.
 	TArray<FVector2D> Reservation() const;
+	// The garage door (world space, on the footprint's side at the building's base) and the level way out of it; false
+	// without a garage or a footprint.
+	bool GarageDoor(FVector& OutDoor, FVector& OutFacing) const;
 
 	// Builds the prism again and tells the road network its plot may have moved.
 	void Rebuild();
 
 	// What buildings with no material of their own are drawn with: vertex colours.
 	static UMaterialInterface* DefaultMaterial();
+
+	UFUNCTION()
+	TArray<FString> GetRoadPrefabOptions() const;
 
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void PostRegisterAllComponents() override;

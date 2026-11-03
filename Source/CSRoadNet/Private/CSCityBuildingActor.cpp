@@ -53,6 +53,35 @@ TArray<FVector2D> ACSCityBuildingActor::Reservation() const
 	return CSCity::Grow(Footprint(), double(Setback) * 100.0);
 }
 
+bool ACSCityBuildingActor::GarageDoor(FVector& OutDoor, FVector& OutFacing) const
+{
+	const TArray<FVector2D> Hull = Footprint();
+	if (!bHasGarage || Hull.Num() < 3) return false;
+	FVector2D Centre = FVector2D::ZeroVector;
+	for (const FVector2D& Corner : Hull) Centre += Corner / Hull.Num();
+	const FVector2D Mark(GetActorTransform().TransformPosition(GarageLocation));
+	double Best = TNumericLimits<double>::Max();
+	for (int32 I = 0; I < Hull.Num(); I++)
+	{
+		const FVector2D& A = Hull[I];
+		const FVector2D& B = Hull[(I + 1) % Hull.Num()];
+		const FVector2D Door = FMath::ClosestPointOnSegment2D(Mark, A, B);
+		const double Distance = FVector2D::Distance(Mark, Door);
+		FVector2D Out = FVector2D(B.Y - A.Y, A.X - B.X).GetSafeNormal();
+		if (Distance >= Best || Out.IsNearlyZero()) continue;
+		if (FVector2D::DotProduct(Out, Door - Centre) < 0.0) Out = -Out;
+		Best = Distance;
+		OutDoor = FVector(Door, GetActorLocation().Z);
+		OutFacing = FVector(Out, 0.0);
+	}
+	return Best < TNumericLimits<double>::Max();
+}
+
+TArray<FString> ACSCityBuildingActor::GetRoadPrefabOptions() const
+{
+	return ACSRoadNetworkActor::RoadPrefabNames(ACSRoadNetworkActor::NetworkOf(this));
+}
+
 void ACSCityBuildingActor::Rebuild()
 {
 	if (!Mesh || IsTemplate() || !GetWorld()) return;
