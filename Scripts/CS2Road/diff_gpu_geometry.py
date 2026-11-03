@@ -1,5 +1,5 @@
 """Diff the GPU geometry dumps (Saved/CSRoadGpu/<golden dir name>/<id>.bin, written by the
-PCGPlugins.CSRoadNet.Geometry tests) against the C# golden data (Saved/CSRoadGolden).
+PCGPlugins.CSRoadNet.Geometry tests) against the C# golden data (the plugin's Data/CS2Road/Golden).
 
 Usage: python diff_gpu_geometry.py [ids...] [--golden <dir>] [--tol 1e-5] [--top 30]
 Prints, per field of EdgeGeometry / EdgeNodeGeometry / NodeGeometry, how many values exceed
@@ -17,7 +17,7 @@ PROJECT = Path(__file__).resolve().parents[4]
 def main():
     args = sys.argv[1:]
     global GOLDEN, GPU
-    GOLDEN = PROJECT / "Saved" / "CSRoadGolden"
+    GOLDEN = PROJECT / "Plugins" / "PCGPlugins" / "Data" / "CS2Road" / "Golden"
     if "--golden" in args:
         i = args.index("--golden")
         GOLDEN = Path(args[i + 1])

@@ -17,7 +17,9 @@ import os
 
 import unreal
 
-NETWORK = os.environ.get("CS2ROAD_NETWORK", r"D:/MyProject/CitiesSkylines-Road2-C#/Artifacts/public-saves/palmsland-3/network.json")
+# The Palmsland snapshot in the plugin's Data/CS2Road (not in git); the network actor takes NETWORK_FILE, relative, from there.
+NETWORK_FILE = os.environ.get("CS2ROAD_NETWORK", "Palmsland/network.json")
+NETWORK = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_plugins_dir()), "PCGPlugins", "Data", "CS2Road", NETWORK_FILE)
 OUT_DIR = os.path.join(unreal.Paths.project_saved_dir(), "CS2RoadSplineShots")
 W, H = 1600, 900
 # Lumen keeps history across frames: one capture per frame until it settles.
@@ -36,7 +38,7 @@ ACTORS = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
 world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
 network = ACTORS.spawn_actor_from_class(unreal.load_class(None, "/Script/CSRoadNet.CSRoadNetworkActor"), unreal.Vector(0, 0, 0))
 network.set_actor_label("CS2 Spline Roads")
-network.set_editor_property("network_file", unreal.FilePath(NETWORK), notify_mode=NEVER)
+network.set_editor_property("network_file", unreal.FilePath(NETWORK_FILE), notify_mode=NEVER)
 road_class = unreal.load_class(None, "/Script/CSRoadNet.CSRoadSplineActor")
 roads = []
 

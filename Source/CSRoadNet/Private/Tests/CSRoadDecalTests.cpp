@@ -119,7 +119,7 @@ FVector CSRoadDecalTests_Golden(const float* G) { return FVector(G[0], -G[2], G[
 }
 
 // The decals as the network actor draws them, instances of unit meshes laid along each item's
-// curve, against GoldenDump, which runs RoadLab's own RoadDecals (App/RoadDecals.cs compiled against
+// curve, against the golden export, made by RoadLab's own RoadDecals (App/RoadDecals.cs compiled against
 // a Godot shim) over its projection surfaces. The decal items are built from the golden geometry:
 // the synthetic scenarios have lanes whose length is an exact multiple of a strip row, so the GPU
 // geometry's last-ulp differences would flip row counts; the GPU builds the road surface the decals
@@ -146,10 +146,9 @@ bool FCSRoadDecalsScenariosTest::RunTest(const FString& Parameters)
 	const TArray<FString> Ids = CSRoadTest::GoldenScenarioIds();
 	if (Ids.Num() == 0)
 	{
-		AddWarning(TEXT("No golden data in Saved/CSRoadGolden; run Scripts/CS2Road/GoldenDump (skipped)"));
+		AddWarning(TEXT("No golden data in Data/CS2Road/Golden (skipped)"));
 		return true;
 	}
-	const FString AssetDirectory = FPaths::Combine(CSRoadTest::LabRoot(), TEXT("Assets"), TEXT("CS2"));
 	constexpr int32 Stride = DecalFitColumns + 1;
 	// The connectors' and crosswalks' surface heights against RoadLab's (m).
 	CSRoadTest::FBudgetCompare Surfaces;
@@ -191,7 +190,7 @@ bool FCSRoadDecalsScenariosTest::RunTest(const FString& Parameters)
 		const TSharedPtr<FJsonObject>* GoldenDecals = nullptr;
 		if (!Golden->TryGetObjectField(TEXT("decals"), GoldenDecals) || !(*GoldenDecals)->HasField(TEXT("blocks")))
 		{
-			AddError(FString::Printf(TEXT("%s: golden data has no decal blocks; rerun GoldenDump"), *Id));
+			AddError(FString::Printf(TEXT("%s: golden data has no decal blocks"), *Id));
 			continue;
 		}
 		FGraph Graph;
@@ -205,7 +204,7 @@ bool FCSRoadDecalsScenariosTest::RunTest(const FString& Parameters)
 		FGpuDecalStats ScenarioStats;
 		if (!Graph.Build(Lib.Assets, CSRoadTest::ScenarioSpecs(Golden), TArray<FSavedNode>(), Error) || !Geometry.Build(Graph, Lib.Assets, nullptr, Error)
 			|| !Mesh.Build(Graph, Lib.Assets, Error) || !RunRefineCountsBlocking(Geometry, Mesh, Error) || !CSRoadTest::GoldenGeometry(Golden, Graph, GeometryResult)
-			|| !Decals.Build(Graph, Lib.Assets, GeometryResult, Mesh, AssetDirectory, Error) || !RunDecalFitBlocking(Geometry, Mesh, Decals, Heights, Error, &ScenarioStats))
+			|| !Decals.Build(Graph, Lib.Assets, GeometryResult, Mesh, Error) || !RunDecalFitBlocking(Geometry, Mesh, Decals, Heights, Error, &ScenarioStats))
 		{
 			AddError(FString::Printf(TEXT("%s: %s"), *Id, *Error));
 			continue;

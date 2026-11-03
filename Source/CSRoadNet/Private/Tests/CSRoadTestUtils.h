@@ -1,5 +1,5 @@
-// Shared helpers for the golden-data tests. Golden files come from
-// Scripts/CS2Road/GoldenDump (C# RoadLab port) and live in <Project>/Saved/CSRoadGolden.
+// Shared helpers for the golden-data tests. The golden files were exported from the C# RoadLab port
+// (CitiesSkylines-Road2-C#, which no longer changes) and live in the plugin's Data/CS2Road/Golden.
 #pragma once
 
 #include "CSRoadGpuGeometry.h"
@@ -10,8 +10,11 @@
 
 namespace CSRoadTest
 {
-// CitiesSkylines-Road2-C# checkout (env CS2ROADLAB overrides the default path).
-FString LabRoot();
+// The CS2 data in the plugin (CSRoadDataDir): prefabs.json, raw-prefabs.json and pieces.bin, and the
+// Palmsland snapshot. Env CS2ROADLAB takes them from a CitiesSkylines-Road2-C# checkout instead.
+FString PrefabDir();
+FString PalmslandNetwork();
+// Env CS2ROADGOLDEN selects another export.
 FString GoldenDir();
 
 struct FLibrary
@@ -24,7 +27,7 @@ struct FLibrary
 	FString Error;
 };
 
-// Loaded once per process from <Lab>/Assets/CS2.
+// Loaded once per process from PrefabDir.
 FLibrary& Library();
 
 TSharedPtr<FJsonObject> LoadJson(const FString& Path);
@@ -61,7 +64,7 @@ struct FCompare
 };
 
 // The GPU stages are not compared bitwise. The geometry jobs are not stable under rounding:
-// GoldenDump --perturb (every input x/z moved by at most one ulp) moves the C# reference itself
+// an export with every input x/z moved by at most one ulp moves the C# reference itself
 // by up to 2.7 m in the scenarios and 7.7 m on Palmsland, with 0.62% / 0.20% of the values beyond
 // 1 cm, and symmetric scenarios sit on exact ties that the GPU and .NET break differently. So
 // values must agree within Agreement, and only a budgeted share may fall outside.

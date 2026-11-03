@@ -18,7 +18,9 @@ import os
 
 import unreal
 
-NETWORK = os.environ.get("CS2ROAD_NETWORK", r"D:/MyProject/CitiesSkylines-Road2-C#/Artifacts/public-saves/palmsland-3/network.json")
+# The Palmsland snapshot in the plugin's Data/CS2Road (not in git); the network actor takes NETWORK_FILE, relative, from there.
+NETWORK_FILE = os.environ.get("CS2ROAD_NETWORK", "Palmsland/network.json")
+NETWORK = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_plugins_dir()), "PCGPlugins", "Data", "CS2Road", NETWORK_FILE)
 MARKINGS = os.environ.get("CS2ROAD_SHOTS", "markings") != "roads"
 OUT_DIR = os.path.join(unreal.Paths.project_saved_dir(), "CS2RoadShots" if MARKINGS else "CS2RoadShots_roads")
 W, H = 1600, 900
@@ -38,7 +40,7 @@ markers = sorted([a for a in level_actors if a.get_actor_label().startswith("Vie
 road_class = unreal.load_class(None, "/Script/CSRoadNet.CSRoadNetworkActor")
 road = ACTORS.spawn_actor_from_class(road_class, unreal.Vector(0, 0, 0))
 road.set_actor_label("CS2 GPU Roads")
-road.set_editor_property("network_file", unreal.FilePath(NETWORK), notify_mode=unreal.PropertyAccessChangeNotifyMode.NEVER)
+road.set_editor_property("network_file", unreal.FilePath(NETWORK_FILE), notify_mode=unreal.PropertyAccessChangeNotifyMode.NEVER)
 unreal.CSRoadNetTools.convert_to_splines(road)
 stats = {k: road.get_editor_property(k) for k in ("num_roads", "num_vertices", "num_triangles", "num_marking_instances", "build_milliseconds", "last_error")}
 stats["missing_atlases"] = [str(a) for a in road.get_editor_property("missing_atlases")]

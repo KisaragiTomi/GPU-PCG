@@ -28,7 +28,9 @@ import os
 import unreal
 
 LEVEL = "/PCGPlugins/CSRoadNet/L_PalmslandSplines"
-NETWORK = os.environ.get("CS2ROAD_NETWORK", r"D:/MyProject/CitiesSkylines-Road2-C#/Artifacts/public-saves/palmsland-3/network.json")
+# The Palmsland snapshot in the plugin's Data/CS2Road (not in git); the network actor takes NETWORK_FILE, relative, from there.
+NETWORK_FILE = os.environ.get("CS2ROAD_NETWORK", "Palmsland/network.json")
+NETWORK = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_plugins_dir()), "PCGPlugins", "Data", "CS2Road", NETWORK_FILE)
 NEVER = unreal.PropertyAccessChangeNotifyMode.NEVER
 KEEP = unreal.AttachmentRule.KEEP_WORLD
 

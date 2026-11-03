@@ -130,7 +130,7 @@ void CreateCrosswalks(const FGraph& Graph, const FAssets& Assets, const FGpuGeom
 	}
 }
 
-bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGpuGeometryResult& Geometry, const FGpuRoadMeshInput& Mesh, const FString& AssetDirectory, FString& OutError,
+bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGpuGeometryResult& Geometry, const FGpuRoadMeshInput& Mesh, FString& OutError,
 	const FDecalScope* Scope)
 {
 	if (!Scope || !Scope->Lanes) Lanes.Build(Graph, Assets, Geometry);
@@ -203,14 +203,14 @@ bool FGpuDecalInput::Build(const FGraph& Graph, const FAssets& Assets, const FGp
 		return Index;
 	};
 
-	// RoadDecals.Material: a surface draws only if its base-colour texture exists.
+	// RoadDecals.Material: a surface draws only if its base-colour texture exists. The export has the
+	// texture of every base colour bound (33 of 33), so the binding decides here; UE draws with its own
+	// imported textures and never reads the .dds files.
 	TMap<FString, int32> SlotOfSurface;
 	auto MaterialSlot = [&](const FString& Surface)
 	{
 		if (const int32* Known = SlotOfSurface.Find(Surface)) return *Known;
-		const FString BaseColor = Assets.SurfaceBaseColor(Surface);
-		const bool bTexture = !BaseColor.IsEmpty() && FPaths::FileExists(FPaths::Combine(AssetDirectory, BaseColor + TEXT(".dds")));
-		const int32 Slot = bTexture ? MaterialSlots.Add(Surface) : INDEX_NONE;
+		const int32 Slot = Assets.SurfaceBaseColor(Surface).IsEmpty() ? INDEX_NONE : MaterialSlots.Add(Surface);
 		SlotOfSurface.Add(Surface, Slot);
 		return Slot;
 	};

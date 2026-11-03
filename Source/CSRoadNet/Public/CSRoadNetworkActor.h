@@ -186,14 +186,15 @@ public:
 	 *  first (C4150 once the blob order changes). Defined in the .cpp next to the destructor. */
 	ACSRoadNetworkActor(FVTableHelper& Helper);
 
-	/** Road snapshot (format cs2-road-network-v1), e.g. CitiesSkylines-Road2-C#
-	 *  Artifacts/public-saves/palmsland-3/network.json. It lends its terrain; UCSRoadNetTools turns its roads into
+	/** Road snapshot (format cs2-road-network-v1), its heightmaps beside it; a relative path starts in the plugin's
+	 *  Data/CS2Road, e.g. Palmsland/network.json. It lends its terrain; UCSRoadNetTools turns its roads into
 	 *  spline roads and its terrain into a Landscape. The roads built are the spline roads: ACSRoadSplineActors hanging
 	 *  under this actor (or, when it is the level's only network, every one in the level) and spline components on it. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (FilePathFilter = "json"))
 	FFilePath NetworkFile;
 
-	/** prefabs.json, raw-prefabs.json and pieces.bin. Empty: <CS2ROADLAB or D:/MyProject/CitiesSkylines-Road2-C#>/Assets/CS2. */
+	/** prefabs.json, raw-prefabs.json and pieces.bin. Empty: the plugin's Data/CS2Road/Prefabs, or <CS2ROADLAB>/Assets/CS2
+	 *  when that environment variable names a CitiesSkylines-Road2-C# checkout. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road")
 	FDirectoryPath AssetDirectory;
 
@@ -621,6 +622,7 @@ private:
 	};
 
 	FString ResolveAssetDirectory() const;
+	FString ResolveNetworkFile() const;
 	// The spline roads this network builds, in its space (Unity metres). A road spline that has not
 	// changed since the last time (SplineCache) is taken as read then.
 	TArray<CSRoad::FSplineRoad> GatherSplines();

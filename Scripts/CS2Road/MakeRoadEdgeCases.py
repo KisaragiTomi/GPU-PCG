@@ -17,7 +17,7 @@ groups of scenes, each scene apart from the others and labelled in the level (Do
   a spline, a ring, two roads closer than their widths, a steep ramp;
 - C, tile edges: a junction, a road's middle and an overpass right on tile corners, a long curve
   over several tiles crossed on a tile border;
-- R, RoadLab's own scenarios (the golden tests' RoadScenarios, from Saved/CSRoadGolden or
+- R, RoadLab's own scenarios (the golden tests' RoadScenarios, from Data/CS2Road/Golden or
   CS2ROADGOLDEN), each edge a fixed spline (bAdjustSegments off), plus the other two prefabs of
   the scenarios the GPU is known to disagree on (elevated-cross, curved-viaduct, highway-merge,
   sloped-junction).
@@ -190,11 +190,12 @@ def tile_scenes():
 
 
 def golden_dir():
+    """The tests' RoadLab export in the plugin's Data/CS2Road/Golden (CS2ROADGOLDEN overrides it)."""
     if os.environ.get("CS2ROADGOLDEN"):
         return os.environ["CS2ROADGOLDEN"]
     if unreal:
-        return os.path.join(unreal.Paths.project_saved_dir(), "CSRoadGolden")
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "Saved", "CSRoadGolden")
+        return os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_plugins_dir()), "PCGPlugins", "Data", "CS2Road", "Golden")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Data", "CS2Road", "Golden")
 
 
 def golden_scenes(missing):
@@ -289,7 +290,7 @@ def build():
     missing = []
     scenes = all_scenes(missing)
     if missing:
-        unreal.log_warning("CS2EDGECASES no golden data for {} (run Scripts/CS2Road/GoldenDump); left out".format(", ".join(missing)))
+        unreal.log_warning("CS2EDGECASES no golden data for {} in Data/CS2Road/Golden; left out".format(", ".join(missing)))
     if not levels.new_level_from_template(LEVEL, TEMPLATE):
         unreal.log_error("CS2EDGECASES could not create {} from {}".format(LEVEL, TEMPLATE))
         return

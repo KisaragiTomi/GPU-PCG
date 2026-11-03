@@ -101,6 +101,7 @@ TSharedPtr<FCSRoadNetworkActor_Library> CSRoadNetworkActor_Library(const FString
 	}
 	if (!Library->Assets.Load(Library->Prefabs, Library->Raw, &Library->Pieces, OutError)) return nullptr;
 	Cache.Add(Key, Library);
+	UE_LOG(LogCSRoadNet, Log, TEXT("CS2 road prefabs loaded from %s"), *Key);
 	return Library;
 }
 
@@ -412,7 +413,13 @@ FString ACSRoadNetworkActor::ResolveAssetDirectory() const
 {
 	if (!AssetDirectory.Path.IsEmpty()) return AssetDirectory.Path;
 	const FString Lab = FPlatformMisc::GetEnvironmentVariable(TEXT("CS2ROADLAB"));
-	return FPaths::Combine(Lab.IsEmpty() ? FString(TEXT("D:/MyProject/CitiesSkylines-Road2-C#")) : Lab, TEXT("Assets"), TEXT("CS2"));
+	return Lab.IsEmpty() ? FPaths::Combine(CSRoadDataDir(), TEXT("Prefabs")) : FPaths::Combine(Lab, TEXT("Assets"), TEXT("CS2"));
+}
+
+FString ACSRoadNetworkActor::ResolveNetworkFile() const
+{
+	const FString& Path = NetworkFile.FilePath;
+	return Path.IsEmpty() || !FPaths::IsRelative(Path) ? Path : FPaths::Combine(CSRoadDataDir(), Path);
 }
 
 void ACSRoadNetworkActor::PostRegisterAllComponents()
@@ -742,7 +749,7 @@ bool ACSRoadNetworkActor::ConvertToSplines()
 	if (!World) return false;
 	FString Error;
 	const TSharedPtr<FCSRoadNetworkActor_Library> Library = CSRoadNetworkActor_Library(ResolveAssetDirectory(), Error);
-	const TSharedPtr<const CSRoad::FSavedNetwork> Network = Library ? CSRoadNetworkActor_Network(NetworkFile.FilePath, Library->Assets, false, Error) : nullptr;
+	const TSharedPtr<const CSRoad::FSavedNetwork> Network = Library ? CSRoadNetworkActor_Network(ResolveNetworkFile(), Library->Assets, false, Error) : nullptr;
 	if (!Network)
 	{
 		LastError = Error;
@@ -796,7 +803,7 @@ bool ACSRoadNetworkActor::ConvertToSplines()
 			Points[I].bOutsideConnection = Data.bOutside;
 		}
 	}
-	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d edges of %s converted to %d spline roads"), *GetName(), Network->Roads.Num(), *NetworkFile.FilePath, Splines.Num());
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d edges of %s converted to %d spline roads"), *GetName(), Network->Roads.Num(), *ResolveNetworkFile(), Splines.Num());
 	bLeftHandTraffic = Network->bLeftHandTraffic;
 	Rebuild();
 	return true;
@@ -812,7 +819,7 @@ AActor* ACSRoadNetworkActor::ConvertTerrainToLandscape(UMaterialInterface* Mater
 	if (!World) return nullptr;
 	FString Error;
 	const TSharedPtr<FCSRoadNetworkActor_Library> Library = CSRoadNetworkActor_Library(ResolveAssetDirectory(), Error);
-	const TSharedPtr<const CSRoad::FSavedNetwork> Snapshot = Library ? CSRoadNetworkActor_Network(NetworkFile.FilePath, Library->Assets, true, Error) : nullptr;
+	const TSharedPtr<const CSRoad::FSavedNetwork> Snapshot = Library ? CSRoadNetworkActor_Network(ResolveNetworkFile(), Library->Assets, true, Error) : nullptr;
 	if (Snapshot && !Snapshot->Terrain.IsValid()) Error = TEXT("The snapshot has no terrain");
 	else if (Snapshot && TActorIterator<ALandscapeProxy>(World)) Error = TEXT("The level has a landscape already; delete it before converting again");
 	if (!Snapshot || !Error.IsEmpty())
@@ -864,7 +871,7 @@ AActor* ACSRoadNetworkActor::ConvertTerrainToLandscape(UMaterialInterface* Mater
 	Landscape->Import(FGuid::NewGuid(), 0, 0, Size - 1, Size - 1, Sections, QuadsPerSection, HeightData, TEXT(""), LayerData, ELandscapeImportAlphamapType::Additive, TArrayView<const FLandscapeLayer>());
 	if (ULandscapeInfo* Info = Landscape->GetLandscapeInfo()) Info->UpdateLayerInfoMap(Landscape);
 	Landscape->SetActorLabel(GetActorLabel() + TEXT(" Terrain"));
-	UE_LOG(LogCSRoadNet, Log, TEXT("%s: the terrain of %s as a %d x %d landscape (%d x %d components), %.1f m a quad"), *GetName(), *NetworkFile.FilePath, Size, Size, Components, Components, TexelX);
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: the terrain of %s as a %d x %d landscape (%d x %d components), %.1f m a quad"), *GetName(), *ResolveNetworkFile(), Size, Size, Components, Components, TexelX);
 	return Landscape;
 #else
 	return nullptr;
@@ -1008,7 +1015,7 @@ bool ACSRoadNetworkActor::BuildRoads(bool bWait, FString& OutError)
 	TSharedPtr<const CSRoad::FSavedNetwork> Snapshot;
 	if (bUseTerrain && !NetworkFile.FilePath.IsEmpty())
 	{
-		Snapshot = CSRoadNetworkActor_Network(NetworkFile.FilePath, Library->Assets, true, OutError);
+		Snapshot = CSRoadNetworkActor_Network(ResolveNetworkFile(), Library->Assets, true, OutError);
 		if (!Snapshot) return false;
 	}
 	const CSRoad::FSavedTerrain* Terrain = Snapshot && Snapshot->Terrain.IsValid() ? &Snapshot->Terrain : nullptr;
@@ -1401,7 +1408,7 @@ bool ACSRoadNetworkActor::AdvanceTiles(FCSRoadNetworkActor_TileJob& Job, FString
 			CSRoad::FDecalScope Scope;
 			Scope.Lanes = &Lanes;
 			Scope.Keep = &Keep;
-			if (bMarkings && !Decals.Build(Graph, Assets, Graphed->Result, MeshInput, ResolveAssetDirectory(), OutError, &Scope)) return Fail();
+			if (bMarkings && !Decals.Build(Graph, Assets, Graphed->Result, MeshInput, OutError, &Scope)) return Fail();
 			FCSRoadTile& Tile = EnsureTile(Item.Key);
 			FMeshTargets Targets;
 			Targets.Road = Tile.Road;

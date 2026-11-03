@@ -2,6 +2,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "CSRoadNet.h"
 #include "CSRoadNetworkActor.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformMisc.h"
@@ -25,24 +26,29 @@ void TickBuild(ACSRoadNetworkActor* Network)
 	}
 }
 
-FString LabRoot()
+FString PrefabDir()
 {
-	const FString Env = FPlatformMisc::GetEnvironmentVariable(TEXT("CS2ROADLAB"));
-	return Env.IsEmpty() ? FString(TEXT("D:/MyProject/CitiesSkylines-Road2-C#")) : Env;
+	const FString Lab = FPlatformMisc::GetEnvironmentVariable(TEXT("CS2ROADLAB"));
+	return Lab.IsEmpty() ? FPaths::Combine(CSRoadDataDir(), TEXT("Prefabs")) : FPaths::Combine(Lab, TEXT("Assets"), TEXT("CS2"));
+}
+
+FString PalmslandNetwork()
+{
+	const FString Lab = FPlatformMisc::GetEnvironmentVariable(TEXT("CS2ROADLAB"));
+	return Lab.IsEmpty() ? FPaths::Combine(CSRoadDataDir(), TEXT("Palmsland"), TEXT("network.json")) : FPaths::Combine(Lab, TEXT("Artifacts/public-saves/palmsland-3/network.json"));
 }
 
 FString GoldenDir()
 {
-	// CS2ROADGOLDEN selects another export, e.g. a GoldenDump --perturb run.
 	const FString Env = FPlatformMisc::GetEnvironmentVariable(TEXT("CS2ROADGOLDEN"));
-	return Env.IsEmpty() ? FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("CSRoadGolden")) : Env;
+	return Env.IsEmpty() ? FPaths::Combine(CSRoadDataDir(), TEXT("Golden")) : Env;
 }
 
 FLibrary& Library()
 {
 	static FLibrary Lib;
 	if (Lib.bLoaded || !Lib.Error.IsEmpty()) return Lib;
-	const FString Dir = FPaths::Combine(LabRoot(), TEXT("Assets"), TEXT("CS2"));
+	const FString Dir = PrefabDir();
 	if (!FFileHelper::LoadFileToArray(Lib.Prefabs, *FPaths::Combine(Dir, TEXT("prefabs.json")))
 		|| !FFileHelper::LoadFileToArray(Lib.Raw, *FPaths::Combine(Dir, TEXT("raw-prefabs.json")))
 		|| !FFileHelper::LoadFileToArray(Lib.Pieces, *FPaths::Combine(Dir, TEXT("pieces.bin"))))

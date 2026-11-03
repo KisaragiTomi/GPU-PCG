@@ -11,7 +11,7 @@ using namespace CSRoad;
 
 namespace
 {
-// Seam partners of every node instance side against GoldenDump's RoadJunctionSurface.Create
+// Seam partners of every node instance side against the golden export's RoadJunctionSurface.Create
 // (startInstance / endInstance "junction": partner slot * 2 + side, or -1).
 struct FCSRoadJunctionTests_Stats
 {
@@ -100,7 +100,7 @@ bool FCSRoadJunctionScenariosTest::RunTest(const FString& Parameters)
 	const TArray<FString> Ids = CSRoadTest::GoldenScenarioIds();
 	if (Ids.Num() == 0)
 	{
-		AddWarning(TEXT("No golden data in Saved/CSRoadGolden; run Scripts/CS2Road/GoldenDump (skipped)"));
+		AddWarning(TEXT("No golden data in Data/CS2Road/Golden (skipped)"));
 		return true;
 	}
 	FCSRoadJunctionTests_Stats Stats;
@@ -120,7 +120,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadJunctionPalmslandTest, "PCGPlugins.CSRoa
 bool FCSRoadJunctionPalmslandTest::RunTest(const FString& Parameters)
 {
 	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
-	const FString Path = FPaths::Combine(CSRoadTest::LabRoot(), TEXT("Artifacts/public-saves/palmsland-3/network.json"));
+	const FString Path = CSRoadTest::PalmslandNetwork();
 	if (!Lib.bLoaded || !FPaths::FileExists(Path) || !FPaths::FileExists(FPaths::Combine(CSRoadTest::GoldenDir(), TEXT("palmsland.json"))))
 	{
 		AddWarning(TEXT("Palmsland network or golden data missing (skipped)"));

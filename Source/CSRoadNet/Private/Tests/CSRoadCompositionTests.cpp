@@ -164,7 +164,7 @@ bool FCSRoadCompositionGoldenTest::RunTest(const FString& Parameters)
 	const TArray<FString> Ids = CSRoadTest::GoldenScenarioIds();
 	if (Ids.Num() == 0)
 	{
-		AddWarning(TEXT("No golden data in Saved/CSRoadGolden; run Scripts/CS2Road/GoldenDump (skipped)"));
+		AddWarning(TEXT("No golden data in Data/CS2Road/Golden (skipped)"));
 		return true;
 	}
 	CSRoadTest::FCompare Compare(*this);
@@ -185,7 +185,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadCompositionPalmslandTest, "PCGPlugins.CS
 bool FCSRoadCompositionPalmslandTest::RunTest(const FString& Parameters)
 {
 	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
-	const FString Path = FPaths::Combine(CSRoadTest::LabRoot(), TEXT("Artifacts/public-saves/palmsland-3/network.json"));
+	const FString Path = CSRoadTest::PalmslandNetwork();
 	if (!Lib.bLoaded || !FPaths::FileExists(Path) || !FPaths::FileExists(FPaths::Combine(CSRoadTest::GoldenDir(), TEXT("palmsland.json"))))
 	{
 		AddWarning(TEXT("Palmsland network or golden data missing (skipped)"));

@@ -13,9 +13,9 @@ namespace
 {
 static const TCHAR* CSRoadRefineTests_Kinds[3] = { nullptr, TEXT("startInstance"), TEXT("endInstance") };
 
-// Per node instance, the refined triangle count against GoldenDump's RoadMeshRefinement.Refine.
+// Per node instance, the refined triangle count against the golden export's RoadMeshRefinement.Refine.
 // Each split compares a chord error with 1 cm, so a decision near the threshold flips with the
-// geometry's rounding: GoldenDump --perturb=1 (inputs moved by at most one ulp) changes the C#
+// geometry's rounding: an export with the inputs moved by at most one ulp changes the C#
 // reference's own count on 27% of the Palmsland node instances, by 0.14% of all triangles summed
 // over instances. The budget is on that sum.
 struct FCSRoadRefineTests_Counts
@@ -84,7 +84,7 @@ bool CSRoadRefineTests_Prepare(FAutomationTestBase& Test, const FString& Id, con
 }
 }
 
-// Refined and deformed node meshes against GoldenDump: per node instance the triangle count, and
+// Refined and deformed node meshes against the golden export: per node instance the triangle count, and
 // for instances that agree, every refined triangle's corners (Unity-space position, normal, UV) in
 // Refine's triangle order. RoadLab shares a midpoint between the triangles of an edge, the GPU
 // creates one per split, so only triangles (not vertex lists) are comparable.
@@ -102,7 +102,7 @@ bool FCSRoadRefineScenariosTest::RunTest(const FString& Parameters)
 	const TArray<FString> Ids = CSRoadTest::GoldenScenarioIds();
 	if (Ids.Num() == 0)
 	{
-		AddWarning(TEXT("No golden data in Saved/CSRoadGolden; run Scripts/CS2Road/GoldenDump (skipped)"));
+		AddWarning(TEXT("No golden data in Data/CS2Road/Golden (skipped)"));
 		return true;
 	}
 	FCSRoadRefineTests_Counts Counts;
@@ -183,7 +183,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadRefinePalmslandTest, "PCGPlugins.CSRoadN
 bool FCSRoadRefinePalmslandTest::RunTest(const FString& Parameters)
 {
 	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
-	const FString Path = FPaths::Combine(CSRoadTest::LabRoot(), TEXT("Artifacts/public-saves/palmsland-3/network.json"));
+	const FString Path = CSRoadTest::PalmslandNetwork();
 	if (!Lib.bLoaded || !FPaths::FileExists(Path) || !FPaths::FileExists(FPaths::Combine(CSRoadTest::GoldenDir(), TEXT("palmsland.json"))))
 	{
 		AddWarning(TEXT("Palmsland network or golden data missing (skipped)"));

@@ -124,9 +124,9 @@ struct FGpuDecalInput
 	bool bForceFallback = false;
 
 	// Mesh: the road mesh input after ApplyRefinement (receiver segments index its instances).
-	// AssetDirectory: where RoadDecals.Material looks for a surface's base-colour texture; surfaces
-	// without one are skipped as in RoadLab. Scope (optional) limits the items to some roads.
-	bool Build(const FGraph& Graph, const FAssets& Assets, const FGpuGeometryResult& Geometry, const FGpuRoadMeshInput& Mesh, const FString& AssetDirectory, FString& OutError,
+	// Surfaces with no base-colour texture bound are skipped as in RoadLab. Scope (optional) limits
+	// the items to some roads.
+	bool Build(const FGraph& Graph, const FAssets& Assets, const FGpuGeometryResult& Geometry, const FGpuRoadMeshInput& Mesh, FString& OutError,
 		const FDecalScope* Scope = nullptr);
 
 private:

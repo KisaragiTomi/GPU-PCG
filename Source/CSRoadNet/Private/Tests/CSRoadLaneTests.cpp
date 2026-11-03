@@ -17,7 +17,7 @@ TArray<double> CSRoadLaneTests_Curve(const Bezier4x3& Curve)
 }
 }
 
-// The CPU lane graph and crosswalk curves against GoldenDump's RoadLanes / RoadCrosswalks, built from
+// The CPU lane graph and crosswalk curves against the golden export's RoadLanes / RoadCrosswalks, built from
 // the golden geometry so the C++ port is compared alone: everything should agree to the bit.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadLanesScenariosTest, "PCGPlugins.CSRoadNet.Lanes.Scenarios",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -33,7 +33,7 @@ bool FCSRoadLanesScenariosTest::RunTest(const FString& Parameters)
 	const TArray<FString> Ids = CSRoadTest::GoldenScenarioIds();
 	if (Ids.Num() == 0)
 	{
-		AddWarning(TEXT("No golden data in Saved/CSRoadGolden; run Scripts/CS2Road/GoldenDump (skipped)"));
+		AddWarning(TEXT("No golden data in Data/CS2Road/Golden (skipped)"));
 		return true;
 	}
 	CSRoadTest::FCompare Compare(*this);
@@ -48,7 +48,7 @@ bool FCSRoadLanesScenariosTest::RunTest(const FString& Parameters)
 		const TSharedPtr<FJsonObject>* Decals = nullptr;
 		if (!Golden->TryGetObjectField(TEXT("decals"), Decals))
 		{
-			AddError(FString::Printf(TEXT("%s: golden data has no decals; rerun GoldenDump"), *Id));
+			AddError(FString::Printf(TEXT("%s: golden data has no decals"), *Id));
 			continue;
 		}
 		FGraph Graph;

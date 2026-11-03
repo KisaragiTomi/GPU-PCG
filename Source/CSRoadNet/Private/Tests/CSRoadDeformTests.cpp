@@ -9,7 +9,7 @@
 
 using namespace CSRoad;
 
-// GPU parameters + deform against GoldenDump's RoadMeshes.Deform output, node instances through
+// GPU parameters + deform against the golden export's RoadMeshes.Deform output, node instances through
 // their junction surface: per vertex of the unrefined composition mesh the Unity-space position,
 // normal and UV, for every edge / start / end instance.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadDeformScenariosTest, "PCGPlugins.CSRoadNet.Deform.Scenarios",
@@ -26,7 +26,7 @@ bool FCSRoadDeformScenariosTest::RunTest(const FString& Parameters)
 	const TArray<FString> Ids = CSRoadTest::GoldenScenarioIds();
 	if (Ids.Num() == 0)
 	{
-		AddWarning(TEXT("No golden data in Saved/CSRoadGolden; run Scripts/CS2Road/GoldenDump (skipped)"));
+		AddWarning(TEXT("No golden data in Data/CS2Road/Golden (skipped)"));
 		return true;
 	}
 	// Every vertex of an instance inherits that instance's geometry, so the one symmetric tie of the

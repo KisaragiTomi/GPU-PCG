@@ -401,7 +401,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadSplinesPalmslandTest, "PCGPlugins.CSRoad
 bool FCSRoadSplinesPalmslandTest::RunTest(const FString& Parameters)
 {
 	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
-	const FString Path = FPaths::Combine(CSRoadTest::LabRoot(), TEXT("Artifacts/public-saves/palmsland-3/network.json"));
+	const FString Path = CSRoadTest::PalmslandNetwork();
 	if (!Lib.bLoaded || !FPaths::FileExists(Path))
 	{
 		AddWarning(TEXT("Palmsland network missing (skipped)"));
@@ -939,7 +939,7 @@ bool FCSRoadSplinesIncrementalTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("town: most edits converted around the change"), Run.Around * 2 > Run.Builds);
 	}
 
-	const FString Path = FPaths::Combine(CSRoadTest::LabRoot(), TEXT("Artifacts/public-saves/palmsland-3/network.json"));
+	const FString Path = CSRoadTest::PalmslandNetwork();
 	if (!FPaths::FileExists(Path))
 	{
 		AddWarning(TEXT("Palmsland network missing (its run skipped)"));

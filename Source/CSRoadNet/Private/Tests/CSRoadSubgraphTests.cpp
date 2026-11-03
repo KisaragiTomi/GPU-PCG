@@ -23,7 +23,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadSubgraphReachTest, "PCGPlugins.CSRoadNet
 bool FCSRoadSubgraphReachTest::RunTest(const FString& Parameters)
 {
 	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
-	const FString Path = FPaths::Combine(CSRoadTest::LabRoot(), TEXT("Artifacts/public-saves/palmsland-3/network.json"));
+	const FString Path = CSRoadTest::PalmslandNetwork();
 	if (!Lib.bLoaded || !FPaths::FileExists(Path))
 	{
 		AddWarning(TEXT("Palmsland network missing (skipped)"));
@@ -147,7 +147,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadSubgraphTilesTest, "PCGPlugins.CSRoadNet
 bool FCSRoadSubgraphTilesTest::RunTest(const FString& Parameters)
 {
 	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
-	const FString Path = FPaths::Combine(CSRoadTest::LabRoot(), TEXT("Artifacts/public-saves/palmsland-3/network.json"));
+	const FString Path = CSRoadTest::PalmslandNetwork();
 	if (!Lib.bLoaded || !FPaths::FileExists(Path))
 	{
 		AddWarning(TEXT("Palmsland network missing (skipped)"));

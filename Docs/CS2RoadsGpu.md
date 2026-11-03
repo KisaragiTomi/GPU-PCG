@@ -7,13 +7,13 @@
 ## 用法
 
 - 关卡里放 `ACSRoadNetworkActor`，在它下面挂 `ACSRoadSplineActor`，一根样条是一条路，见[样条路网](#样条路网)。路网 actor 是 manager：设置、操作和统计在它上面，建出来的东西在它名下一个单独的内容 actor 里，见[Manager 与内容 actor](#manager-与内容-actor)。示例关卡 `/PCGPlugins/CSRoadNet/L_SplineRoadDemo` 由 8 根样条组成，打开后拖样条点即可看到路网实时重建。
-- `NetworkFile` 指向 `cs2-road-network-v1` 快照（例如 `D:\MyProject\CitiesSkylines-Road2-C#\Artifacts\public-saves\palmsland-3\network.json`）时提供地形。转换是函数工具，不在详情面板上：`UCSRoadNetTools::ConvertToSplines(Network)` 把快照里的路转成样条路，`UCSRoadNetTools::ConvertTerrainToLandscape(Network, Material)` 把快照地形转成 Landscape（Python：`unreal.CSRoadNetTools.convert_to_splines(network)`，编辑器工具蓝图同名节点）。路网只从样条建，不直接读快照里的路。Palmsland 整张图转好的样条在 `/PCGPlugins/CSRoadNet/L_PalmslandSplines`，它也是测试高架桥、大路、小路和房子的通用关卡，见[Palmsland 通用测试关卡](#palmsland-通用测试关卡)。
+- `NetworkFile` 指向 `cs2-road-network-v1` 快照时提供地形；相对路径从插件的 `Data/CS2Road` 算起，例如 Palmsland 的 `Palmsland/network.json`，见[数据](#数据)。转换是函数工具，不在详情面板上：`UCSRoadNetTools::ConvertToSplines(Network)` 把快照里的路转成样条路，`UCSRoadNetTools::ConvertTerrainToLandscape(Network, Material)` 把快照地形转成 Landscape（Python：`unreal.CSRoadNetTools.convert_to_splines(network)`，编辑器工具蓝图同名节点）。路网只从样条建，不直接读快照里的路。Palmsland 整张图转好的样条在 `/PCGPlugins/CSRoadNet/L_PalmslandSplines`，它也是测试高架桥、大路、小路和房子的通用关卡，见[Palmsland 通用测试关卡](#palmsland-通用测试关卡)。
 - `bShapeTerrain` 让关卡的 Landscape 跟着地面路走，见[地形 edit layer](#地形-edit-layer)。
 - 城市局部更新：`bLocalUpdate` 让路网分 tile 重建，见[局部更新](#局部更新)；样条路分大路和小路，见[大路与小路](#大路与小路)；特殊建筑、小路生成和批量补房见[城市布局](#城市布局)。示例关卡 `/PCGPlugins/CSRoadNet/L_CityDemo`。
 - 改属性、移动松手、关卡加载或复制 actor 时自动重建，也可以点 `Rebuild`。常驻网格不存盘，加载后重新生成。
-- `AssetDirectory` 留空时读 `<CS2ROADLAB 或 D:/MyProject/CitiesSkylines-Road2-C#>/Assets/CS2` 下的 `prefabs.json`、`raw-prefabs.json`、`pieces.bin`。同一目录每个进程只加载一次。
+- `AssetDirectory` 留空时读插件 `Data/CS2Road/Prefabs` 下的 `prefabs.json`、`raw-prefabs.json`、`pieces.bin`，见[数据](#数据)。同一目录每个进程只加载一次，日志记下读的是哪个目录（`CS2 road prefabs loaded from`）。
 - 材质按 atlas 的 BaseColor 贴图名（目录里的 `material_bindings`）在 `MaterialFolder` 找 `M_CS2_<NN>_<BaseColor>`，这些材质由 `Scripts/ImportCS2Roads.py` 生成。找不到的 atlas 列在 `MissingAtlases`，改用 `FallbackMaterial`。
-- `bBuildMarkings`（默认开）把贴花画成实例化的 DBuffer 网格贴花，见[贴花](#贴花)。两张母材质 `M_RoadDecal`、`M_RoadDecalFitted`（`DecalMaterial`、`FittedDecalMaterial`）由 `Scripts/CS2Road/MakeRoadDecalMaterial.py` 生成；actor 为每个贴花表面建一个动态材质实例，贴图和 `Tint` 取自同名的 `M_CS2_*` 贴花材质，找不到的表面列在 `MissingMarkingSurfaces`。`AssetDirectory` 里没有 BaseColor 贴图的表面像 RoadLab 一样跳过。路面组件都接收贴花（`bReceivesDecals`），GPU 网格和 Nanite 网格一样。Palmsland 的 48,577 个贴花条目画成 204,631 个实例（条带 107,194 个，贴合网格 97,437 个）；原先的标线网格要约 690 MiB。
+- `bBuildMarkings`（默认开）把贴花画成实例化的 DBuffer 网格贴花，见[贴花](#贴花)。两张母材质 `M_RoadDecal`、`M_RoadDecalFitted`（`DecalMaterial`、`FittedDecalMaterial`）由 `Scripts/CS2Road/MakeRoadDecalMaterial.py` 生成；actor 为每个贴花表面建一个动态材质实例，贴图和 `Tint` 取自同名的 `M_CS2_*` 贴花材质，找不到的表面列在 `MissingMarkingSurfaces`。没有绑定 BaseColor 贴图的表面像 RoadLab 一样跳过：RoadLab 看贴图文件在不在，导出的 33 张都在，所以这里只看绑定，不读 `.dds`。路面组件都接收贴花（`bReceivesDecals`），GPU 网格和 Nanite 网格一样。Palmsland 的 48,577 个贴花条目画成 204,631 个实例（条带 107,194 个，贴合网格 97,437 个）；原先的标线网格要约 690 MiB。
 - 属性含义写在 `Source/CSRoadNet/Public/CSRoadNetworkActor.h` 的声明注释里。
 
 ### 车流预览与桥墩
@@ -46,6 +46,21 @@
 这样拆是因为选中卡顿：10-30 之前这些组件都在路网 actor 上，Palmsland 建完有 5,428 个（783 个 Nanite tile、3,993 个实例组件、651 个 GPU 网格组件）。点选路网时详情面板要列出全部组件，选中描边也要画全部组件：点一下约 1.2 s（选择调用 0.8 s，之后三帧各 120–220 ms），选中期间每帧从约 10 ms 涨到 40–50 ms。点一根样条路只要约 40 ms。拆开后路网名下只剩一个根组件，在 Palmsland 建完、空闲时点选路网，选择调用 13–18 ms，之后第一帧 30–45 ms，再往后与不选时相当（11–25 ms，不选时 10–14 ms）；点一根样条路约 36 ms。
 
 10-30 之前存的关卡里有路网的 `RoadMesh` 组件。加载后它成了没有属性引用的组件，`PostRegisterAllComponents` 把路网名下的 GPU 网格组件销毁；这不弄脏关卡，下次存盘就没有了。
+
+## 数据
+
+CSRoadNet 读的 CS2 数据都放在插件的 `Data/CS2Road` 下（`CSRoadDataDir()`），用不着 CitiesSkylines-Road2-C# 工程。这些是从游戏里提取的数据，仓库又是公开的，所以不进 git（`.gitignore`），靠同步盘带到另一台机器。
+
+| 目录 | 内容 | 大小 | 用途 |
+| --- | --- | --- | --- |
+| `Prefabs` | `prefabs.json`、`raw-prefabs.json`、`pieces.bin` | 118 MB | 建路必需，`AssetDirectory` 留空时读这里 |
+| `Palmsland` | 快照 `network.json`、高度图 `terrain-playable.r16` 与 `terrain-world.r16`、来源说明 `provenance.json` | 69 MB | `L_PalmslandSplines` 的地形（`NetworkFile` = `Palmsland/network.json`；其它示例关卡不设快照）、转换工具、Palmsland 测试 |
+| `Golden` | C# RoadLab 的金标导出：55 个场景和 Palmsland 全图 | 214 MB | 只有测试用，缺了时金标对照跳过 |
+
+- `NetworkFile` 是相对路径时从 `Data/CS2Road` 算起，绝对路径照旧。
+- 环境变量 `CS2ROADLAB` 指向一个 CitiesSkylines-Road2-C# 工程时，`AssetDirectory` 留空的路网和测试改读那里的 `Assets/CS2` 与 `Artifacts/public-saves/palmsland-3`；`CS2ROADGOLDEN` 指定另一份金标。
+- 标线只看表面有没有绑定 BaseColor 贴图（见[用法](#用法)），所以不需要 C# 工程里 1.6 GB 的 `.dds`；画面上的贴图是 `Content/CS2Roads` 里导入的 UE 贴图。
+- 来源：预制件和快照复制自 CitiesSkylines-Road2-C# 的 `Assets/CS2`、`Artifacts/public-saves/palmsland-3`，金标是它的 C# RoadLab 导出。C# 那边已经定型，这些数据不再更新，金标的导出工具 GoldenDump 和类型生成脚本 `generate_types.py` 11-02 已从插件删除（git 历史里还有），插件里不再有读 C# 源码的东西；转换工具、关卡和脚本只读 `Data/CS2Road`。
 
 ## 样条路网
 
@@ -297,7 +312,7 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 
 ## 约定
 
-- 结构布局由 `Scripts/CS2Road/generate_types.py` 从 `Port/Original` 生成 `Shaders/Private/CSRoad/CSRoadTypes.ush`，C++（`CSRoadCore.h`）和 HLSL 共用。实体、prefab、组合表都从 1 开始编号，0 代表 `Entity.Null`。
+- 结构布局在 `Shaders/Private/CSRoad/CSRoadTypes.ush`，C++（`CSRoadCore.h`）和 HLSL 共用。它当初由 `generate_types.py` 从 `Port/Original` 生成，C# 端定型后脚本已删除，之后手改。实体、prefab、组合表都从 1 开始编号，0 代表 `Entity.Null`。
 - 计算在 Unity 米坐标（y 向上）下进行，写入 `UCSMesh` 时转换为 UE 坐标：`(x, -z, y) * 100`，再乘 actor 变换。这个转换是正交旋转；但 Unity 正面三角形的 `cross(B-A, C-A)` 与法线同向，UE 的则反向，所以写索引时交换每个三角形的第 2、3 个顶点。UV 保持原值，与静态导入一致。贴花读回路面时做反变换。
 - `RoadMesh`、各 tile 的路面组件和标线实例组件存世界坐标、以绝对变换渲染，所以挂在单独的 `Root` 下，自身变换始终是单位变换（`NaniteTile_*` 放在烘焙时的原点上）。做 actor 的根时，它会带上 actor 的位置，把这个变换再乘一遍，路面就画到别处去了。actor 的变换只在写顶点时乘进去，所以移动 actor 后要重建。
 - Unity.Mathematics 语义：`min`/`max`/`clamp` 遇 NaN 的结果和 HLSL 内建函数不同，统一用 `CSRoadMath.ush` 的 `U_` 版本。
@@ -332,7 +347,7 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 
 ## 验证
 
-测试都在 `PCGPlugins.CSRoadNet.*`。金标由 `Scripts/CS2Road/GoldenDump` 运行 C# RoadLab 导出到 `Saved/CSRoadGolden`，包括 55 个场景（RoadScenarios × 3 种 prefab，外加左舵十字路口）和 Palmsland 全图（几何、接缝、细分计数）。
+测试都在 `PCGPlugins.CSRoadNet.*`。金标是 C# RoadLab 的导出，放在插件的 `Data/CS2Road/Golden`（见[数据](#数据)），包括 55 个场景（RoadScenarios × 3 种 prefab，外加左舵十字路口）和 Palmsland 全图（几何、接缝、细分计数）。
 
 | 测试 | 比对内容 | 判定 | 当前结果 |
 | --- | --- | --- | --- |
@@ -373,7 +388,7 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 
 重建耗时（10-26 直接读快照建路时测的）：Palmsland 暖启动整次重建 1.1–1.4 s。其中读快照约 140 ms，建图与组合约 25 ms，组合网格约 230 ms，细分计数（含阻塞回读）150–300 ms，车道图与贴花条目约 50 ms；GPU 上路面那张图约 200 ms，贴花约 70 ms。完整编辑器里刚打开 `L_Palmsland` 时，第一次重建要等渲染线程处理完静态导入的几千个 actor，细分计数这一步可达 13 s。`SplineNetworkShots.py` 手画的 5 根样条建成 16 条路，暖重建约 50 ms；第一次还要读 prefab 数据和地形，约 0.5 s。
 
-几何 job 本身对舍入不稳定，GPU 结果不按逐位比对。`GoldenDump --perturb=<seed>` 把输入的 x/z 各挪 ±1 ulp，C# 参考自身就会在场景里移动 2.7 m、在 Palmsland 里移动 7.7 m，超过 1 cm 的值分别占 0.62% 和 0.20%。GPU 与金标的偏差比扰动版 C# 小一个数量级。
+几何 job 本身对舍入不稳定，GPU 结果不按逐位比对。当初导出过一份扰动版，把输入的 x/z 各挪 ±1 ulp，C# 参考自身就会在场景里移动 2.7 m、在 Palmsland 里移动 7.7 m，超过 1 cm 的值分别占 0.62% 和 0.20%。GPU 与金标的偏差比扰动版 C# 小一个数量级。
 
 完全对称的场景（如 `elevated-cross`）处在平局上，GPU 和 .NET 的取舍不同。把环境变量 `CS2ROADGOLDEN` 指向扰动导出再跑测试，GPU 与扰动版 C# 的结果一致。排查新偏差时，先用这种方法区分是移植错误还是舍入敏感。
 
@@ -387,21 +402,11 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 - `Scripts/CS2Road/MakePalmslandSplines.py`：把 Palmsland 快照转成样条，存成 `L_PalmslandSplines`，见[从快照转换](#从快照转换)。`CS2ROAD_NETWORK` 可换快照。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖。
 - `Scripts/CS2Road/MakePalmslandTestLevel.py`：把 `L_PalmslandSplines` 补成通用测试关卡（Landscape、桥墩、小路街区和两条大路、特殊建筑、批量房子）并存盘，见[Palmsland 通用测试关卡](#palmsland-通用测试关卡)。只补缺的，可以重复跑。用无头编辑器的 `-ExecutePythonScript` 运行。
 - `Scripts/CS2Road/PalmslandTestShots.py`：打开 `L_PalmslandSplines`，等全部 tile 写完并烘成 Nanite，再从 12 个机位拍到 `Saved/CS2PalmslandShots`。运行方式同 `LocalUpdateTiming.py`（完整编辑器加 `-ini` 参数），不存盘。
-- `Scripts/CS2Road/MakeRoadEdgeCases.py`：生成问题场景关卡 `L_RoadEdgeCases`，见[问题场景关卡](#问题场景关卡)。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖；金标场景读 `Saved/CSRoadGolden`（或 `CS2ROADGOLDEN`），缺的跳过。
+- `Scripts/CS2Road/MakeRoadEdgeCases.py`：生成问题场景关卡 `L_RoadEdgeCases`，见[问题场景关卡](#问题场景关卡)。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖；金标场景读 `Data/CS2Road/Golden`（或 `CS2ROADGOLDEN`），缺的跳过。
 - `Scripts/CS2Road/MakeRoadDecalMaterial.py`：生成贴花母材质 `/PCGPlugins/CSRoadNet/M_RoadDecal` 和 `M_RoadDecalFitted`，用无头编辑器的 `-ExecutePythonScript` 运行，已存在时就地重建。材质着色器按下标读的实例数据布局见 `CSRoadDecalInstances.h`，两边要一起改。
 - `Scripts/CS2Road/CityDemoShots.py`：打开 `L_CityDemo`，给整网、分 tile、挪大路、挪特殊建筑计时，再从 4 个机位拍到 `Saved/CS2CityShots`。用完整编辑器运行，不存盘。
 - `Scripts/CS2Road/LocalUpdateTiming.py`：把 Palmsland 转成样条，开批量房子，给整网和分 tile 重建计时；从零建时每帧一批，直到没有积压。最后打开路网自己的 `Tick`、等编辑停下，预览整网重做的耗时记在日志里。结果写到 `Saved/CS2LocalUpdateTiming_<tile>_<batch>.json`。`CS2ROAD_TILE` 设 tile 尺寸（米，默认 256），`CS2ROAD_BATCH` 设每批 tile 数（默认 16）。要让帧在批与批之间过去，所以用完整编辑器的 `-ExecCmds="py <脚本>"` 运行，不存盘；再加上文[样条路网](#样条路网)里那个 `-ini` 参数，编辑器在后台时路网才会 tick，最后一步才测得到。
 
 ## 重新生成
 
-`Port/Original` 的结构定义变了以后，重新生成共享布局：
-
-```bash
-python Plugins/PCGPlugins/Scripts/CS2Road/generate_types.py
-```
-
-C# 端更新后重新导出金标。`GoldenDump` 引用 `Port/RoadPort.csproj`，并把 RoadLab 的 `App/RoadDecals.cs` 原样编进来，用 `GodotShim.cs` 补上它用到的 Godot API。RoadLab 目录由 MSBuild 属性 `CS2RoadLab` 指定，游戏目录由 `GameRoot` 指定。先在 `Scripts/CS2Road/GoldenDump` 里执行 `dotnet build -c Release`。参数 `--no-mesh` 跳过组合网格，`--perturb=<seed>` 导出扰动版，后面可以跟场景 id 只导出部分场景：
-
-```bash
-Plugins/PCGPlugins/Scripts/CS2Road/GoldenDump/bin/Release/net8.0/GoldenDump.exe Saved/CSRoadGolden
-```
+C# 端已经定型，不再从它重新生成任何东西。共享类型布局 `CSRoadTypes.ush` 当初由 `Scripts/CS2Road/generate_types.py` 从 `Port/Original` 生成，金标由 `Scripts/CS2Road/GoldenDump` 导出；两个工具 11-02 已从插件删除，要找回看 git 历史（`beb14da` 及以前）。之后 `CSRoadTypes.ush` 直接手改，C++ 与 HLSL 共用这一份。
