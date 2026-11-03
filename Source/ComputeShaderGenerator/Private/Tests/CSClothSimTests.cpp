@@ -23,6 +23,7 @@
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
+#include "StaticMeshResources.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -1233,6 +1234,65 @@ bool FCSClothParallelSkinningTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCSClothRemeshBindTest,
+	"PCGPlugins.ComputeShaderGenerator.ClothSplit.RemeshAndBind",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSClothRemeshBindTest::RunTest(const FString& Parameters)
+{
+	// Houdini 的链：remesh2 均匀重网格 → 切条带 → xyzdist / primuv 绑回原网格。100 cm 见方、2 cm 一格的竖网格（2601 点）
+	// 重网格到 4 cm：点数降到约四分之一；在平面上，锚点按原网格的三角插回来应与顶点重合，UV 按同一组重心插值也应精确
+	// （网格的 UV 是位置的仿射函数：u = x / Size + 0.5，v = 1 − z / Size）。
+	const double Size = 100.0;
+	const FCSGpuMeshCPUData Grid = CSClothTest::VerticalGrid(50, Size);
+	FCSGpuMeshCPUData Remeshed;
+	if (!TestTrue(TEXT("Remesh"), CSClothBandSplit::Remesh(Grid, 4.0f, Remeshed))) return false;
+	TArray<double> Edges;
+	for (int32 Index = 0; Index + 2 < Remeshed.Indices.Num(); Index += 3)
+	{
+		for (int32 Corner = 0; Corner < 3; ++Corner)
+		{
+			Edges.Add(FVector3f::Dist(Remeshed.Positions[Remeshed.Indices[Index + Corner]], Remeshed.Positions[Remeshed.Indices[Index + (Corner + 1) % 3]]));
+		}
+	}
+	Edges.Sort();
+	const double MedianEdge = Edges.IsEmpty() ? 0.0 : Edges[Edges.Num() / 2];
+	double OffPlane = 0.0;
+	for (const FVector3f& P : Remeshed.Positions) OffPlane = FMath::Max(OffPlane, double(FMath::Abs(P.Y)));
+	TestTrue(FString::Printf(TEXT("Remeshing coarsens the grid (%d -> %d vertices)"), Grid.Positions.Num(), Remeshed.Positions.Num()),
+		Remeshed.Positions.Num() < Grid.Positions.Num() / 2);
+	TestTrue(FString::Printf(TEXT("Edges come out near the target (median %.2f cm, want 4)"), MedianEdge), MedianEdge > 3.0 && MedianEdge < 5.0);
+	TestTrue(FString::Printf(TEXT("The remeshed surface stays on the source plane (worst %.5f cm)"), OffPlane), OffPlane < 1e-3);
+
+	FCSClothBandSplitResult Result;
+	if (!TestTrue(TEXT("Split the remeshed grid"), CSClothBandSplit::Split(Remeshed, FCSClothBandSplitSettings(), { FVector(0.0, 0.0, Size) }, Result))) return false;
+	TestTrue(FString::Printf(TEXT("About the same bands as the fine grid (%d)"), Result.NumBands), Result.NumBands >= 22 && Result.NumBands <= 30);
+	if (!TestTrue(TEXT("Bind back to the source grid"), CSClothBandSplit::BindToSurface(Grid, Result.Mesh, Result.Binding))) return false;
+
+	double WorstAnchor = 0.0;
+	double WorstUV = 0.0;
+	int32 BadSources = 0;
+	for (int32 Vertex = 0; Vertex < Result.Mesh.Positions.Num(); ++Vertex)
+	{
+		const FIntVector Sources = Result.Binding.AnchorSources[Vertex];
+		if (!Grid.Positions.IsValidIndex(Sources.X) || !Grid.Positions.IsValidIndex(Sources.Y) || !Grid.Positions.IsValidIndex(Sources.Z))
+		{
+			++BadSources;
+			continue;
+		}
+		const FVector3f P = Result.Mesh.Positions[Vertex];
+		WorstAnchor = FMath::Max(WorstAnchor, double(FVector3f::Dist(CSClothTest::AnchorOf(Result.Binding, Vertex, Grid.Positions), P)));
+		const FVector2f Expected(P.X / float(Size) + 0.5f, 1.0f - P.Z / float(Size));
+		WorstUV = FMath::Max(WorstUV, double(FVector2f::Distance(Result.Mesh.TexCoords()[Vertex], Expected)));
+	}
+	TestEqual(TEXT("Every anchor names three source vertices"), BadSources, 0);
+	TestTrue(FString::Printf(TEXT("Anchors land on their vertices (worst %.5f cm)"), WorstAnchor), WorstAnchor < 1e-3);
+	TestTrue(FString::Printf(TEXT("UVs are interpolated from the source grid (worst %.6f)"), WorstUV), WorstUV < 1e-4);
+	TestEqual(TEXT("One material slot per triangle"), Result.Mesh.TriangleMaterialSlots.Num(), Result.Mesh.Indices.Num() / 3);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCSClothSplitActorTest,
 	"PCGPlugins.ComputeShaderGenerator.ClothSplit.SplitActor",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
@@ -1251,6 +1311,7 @@ bool FCSClothSplitActorTest::RunTest(const FString& Parameters)
 	ACSClothSplitActor* Actor = World->SpawnActor<ACSClothSplitActor>();
 	if (!TestNotNull(TEXT("Split actor"), Actor)) return false;
 	Actor->LoopPeriod = 0.0f;
+	Actor->RemeshEdgeLength = 0.0f;   // 直接切 LOD 0：下面的块数、钉点与包围盒判据都按原网格写的
 	Actor->ClothComponent->bSimulate = false;
 	Actor->ClothComponent->ReleaseDelay = 0.2f;
 	Actor->Body->SetSkeletalMeshAsset(Mannequin);
@@ -1330,6 +1391,124 @@ bool FCSClothSplitActorTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("The replay releases again after ReleaseDelay"), Cloth->IsReleased());
 	TestFalse(TEXT("Not halted after the replay"), Cloth->IsHalted());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCSClothBakedSplitTest,
+	"PCGPlugins.ComputeShaderGenerator.ClothSplit.BakedSplit",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSClothBakedSplitTest::RunTest(const FString& Parameters)
+{
+	// 烘焙 → 运行时读：同一个 actor 先现场重网格 + 切分，再烘成 StaticMesh、按烘焙结果重建。两次的布应当一样
+	// （粒子数、块数），跟随阶段贴着身体，放开后照常甩出去；StaticMesh 构建不能把切口两侧的顶点并回去。
+	USkeletalMesh* Mannequin = LoadObject<USkeletalMesh>(nullptr, TEXT("/Engine/Tutorial/SubEditors/TutorialAssets/Character/TutorialTPP.TutorialTPP"));
+	if (!Mannequin)
+	{
+		AddWarning(TEXT("The engine tutorial mannequin is missing; skipped."));
+		return true;
+	}
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("Editor test world"), World)) return false;
+	ACSClothSplitActor* Actor = World->SpawnActor<ACSClothSplitActor>();
+	if (!TestNotNull(TEXT("Split actor"), Actor)) return false;
+	Actor->LoopPeriod = 0.0f;
+	Actor->RemeshEdgeLength = 3.0f;
+	Actor->ClothComponent->bSimulate = false;
+	Actor->ClothComponent->ReleaseDelay = 0.2f;
+	Actor->Body->SetSkeletalMeshAsset(Mannequin);
+	UCSClothSimComponent* Cloth = Actor->ClothComponent;
+
+	// 跟随阶段跑几帧，取粒子包围盒：粒子在锚点上 = Body 上的 primuv 点。
+	auto FollowingBounds = [this, Actor, Cloth](FBox& OutBounds)
+	{
+		for (int32 Frame = 0; Frame < 6; ++Frame)
+		{
+			Actor->Tick(CSClothTest::FrameDt);
+			Cloth->StepSimulation(CSClothTest::FrameDt);
+		}
+		TArray<FVector4f> Particles;
+		if (!TestTrue(TEXT("Particle readback"), Cloth->ReadbackParticlesSync(Particles))) return false;
+		OutBounds = FBox(ForceInit);
+		for (const FVector4f& P : Particles) OutBounds += FVector(P.X, P.Y, P.Z);
+		return true;
+	};
+
+	const double LiveStart = FPlatformTime::Seconds();
+	Actor->Restart();
+	const double LiveMs = (FPlatformTime::Seconds() - LiveStart) * 1e3;
+	if (!TestTrue(TEXT("The live remeshed split is simulating"), Cloth->IsSimulationReady())) return false;
+	const UCSClothSimComponent::FSetupStats LiveStats = Cloth->GetSetupStats();
+	const int32 LivePieces = Actor->GetNumPieces();
+	FBox LiveFollowing;
+	if (!FollowingBounds(LiveFollowing)) return false;
+
+	// 烘进 transient 的 StaticMesh：走同一条 MeshDescription 完整构建，但不在 Content 里落资产。
+	UStaticMesh* Baked = NewObject<UStaticMesh>(GetTransientPackage(), NAME_None, RF_Transient);
+	if (!TestTrue(TEXT("Bake into a StaticMesh"), Actor->BakeSplitInto(Baked))) return false;
+	const UCSClothSplitBakeData* Data = Baked->GetAssetUserData<UCSClothSplitBakeData>();
+	if (!TestNotNull(TEXT("The bake data rides on the StaticMesh"), Data)) return false;
+	const FStaticMeshRenderData* RenderData = Baked->GetRenderData();
+	if (!TestTrue(TEXT("The StaticMesh has render data"), RenderData && !RenderData->LODResources.IsEmpty())) return false;
+	// 每个渲染顶点带着自己的烘焙顶点号，且两两不同：构建没有把切口两侧的顶点并成一个。
+	// 渲染顶点会比烘焙顶点少几个：没有三角引用的孤立顶点（重网格留下的）构建时被丢掉，它们在现场切的布里只是钉住的空粒子。
+	const FStaticMeshVertexBuffer& BakedVertices = RenderData->LODResources[0].VertexBuffers.StaticMeshVertexBuffer;
+	const int32 NumRenderVertices = int32(RenderData->LODResources[0].GetNumVertices());
+	TSet<int32> BakedIds;
+	int32 OutOfRange = 0;
+	for (int32 Vertex = 0; Vertex < NumRenderVertices; ++Vertex)
+	{
+		const int32 Id = FMath::RoundToInt(BakedVertices.GetVertexUV(uint32(Vertex), uint32(Data->VertexIdChannel)).X);
+		OutOfRange += Data->AnchorSources.IsValidIndex(Id) ? 0 : 1;
+		BakedIds.Add(Id);
+	}
+	TestEqual(TEXT("Every render vertex carries a baked vertex id"), OutOfRange, 0);
+	TestEqual(TEXT("No two render vertices share a baked vertex (nothing merged across a cut)"), BakedIds.Num(), NumRenderVertices);
+	TestTrue(FString::Printf(TEXT("Only isolated vertices are dropped (%d of %d baked vertices render)"), NumRenderVertices, Data->AnchorSources.Num()),
+		NumRenderVertices >= Data->AnchorSources.Num() * 99 / 100);
+	TestEqual(TEXT("The bake remembers the source mesh's LOD 0"), Data->SourceNumVertices,
+		int32(Mannequin->GetResourceForRendering()->LODRenderData[0].GetNumVertices()));
+	TestTrue(TEXT("The bake keeps a CPU copy for the runtime"), bool(Baked->bAllowCPUAccess));
+	TestTrue(TEXT("BakedSplit points at the new mesh"), Actor->BakedSplit == Baked);
+
+	const double BakedStart = FPlatformTime::Seconds();
+	Actor->Restart();
+	const double BakedMs = (FPlatformTime::Seconds() - BakedStart) * 1e3;
+	if (!TestTrue(TEXT("The baked cloth is simulating"), Cloth->IsSimulationReady())) return false;
+	const UCSClothSimComponent::FSetupStats BakedStats = Cloth->GetSetupStats();
+	AddInfo(FString::Printf(TEXT("Restart: live %.1f ms, baked %.1f ms; particles live %d (%d pinned), baked %d (%d pinned); %d pieces"),
+		LiveMs, BakedMs, LiveStats.NumParticles, LiveStats.NumPinned, BakedStats.NumParticles, BakedStats.NumPinned, Actor->GetNumPieces()));
+	TestEqual(TEXT("Same anchored particles as the live split"), BakedStats.NumAnchored, LiveStats.NumAnchored);
+	TestEqual(TEXT("Same pieces as the live split"), Actor->GetNumPieces(), LivePieces);
+	TestFalse(TEXT("The skeletal body is hidden; the cloth draws the character"), Actor->Body->IsVisible());
+
+	// 跟随阶段：烘焙的布与现场切的布贴在同一组 primuv 点上。对参考姿态只做粗查：3 cm 的重网格会把细的指尖削短几厘米。
+	FBox Following;
+	if (!FollowingBounds(Following)) return false;
+	TestTrue(FString::Printf(TEXT("Before release the baked cloth sits where the live one did (baked %s, live %s)"), *Following.ToString(), *LiveFollowing.ToString()),
+		Following.Min.Equals(LiveFollowing.Min, 0.1) && Following.Max.Equals(LiveFollowing.Max, 0.1));
+	const FPositionVertexBuffer& RefPositions = Mannequin->GetResourceForRendering()->LODRenderData[0].StaticVertexBuffers.PositionVertexBuffer;
+	FBox RefPose(ForceInit);
+	for (uint32 Vertex = 0; Vertex < RefPositions.GetNumVertices(); ++Vertex) RefPose += FVector(RefPositions.VertexPosition(Vertex));
+	RefPose = RefPose.TransformBy(Actor->Body->GetComponentTransform());
+	TestTrue(FString::Printf(TEXT("Before release the baked cloth covers the body (cloth %s, reference pose %s)"), *Following.ToString(), *RefPose.ToString()),
+		Following.Min.Equals(RefPose.Min, 6.0) && Following.Max.Equals(RefPose.Max, 6.0));
+
+	TArray<FVector4f> Particles;
+	for (int32 Frame = 0; Frame < 60; ++Frame)
+	{
+		Actor->Tick(CSClothTest::FrameDt);
+		Cloth->StepSimulation(CSClothTest::FrameDt);
+	}
+	TestTrue(TEXT("Released"), Cloth->IsReleased());
+	if (!TestTrue(TEXT("Particle readback after release"), Cloth->ReadbackParticlesSync(Particles))) return false;
+	TestTrue(TEXT("No NaN / Inf"), CSClothTest::AllFinite(Particles));
+	TestFalse(TEXT("Not halted"), Cloth->IsHalted());
+	FBox Released(ForceInit);
+	for (const FVector4f& P : Particles) Released += FVector(P.X, P.Y, P.Z);
+	TestTrue(FString::Printf(TEXT("The strips leave the body (extent %.0f -> %.0f cm)"), Following.GetExtent().Size(), Released.GetExtent().Size()),
+		Released.GetExtent().Size() > Following.GetExtent().Size() * 1.1);
 	return true;
 }
 
