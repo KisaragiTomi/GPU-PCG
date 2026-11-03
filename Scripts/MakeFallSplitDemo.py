@@ -9,7 +9,11 @@ Houdini 场景 AnimationFallSplit 的 UE 移植（Docs/HoudiniFallSplit_Port.md�
 
 放开时刻按 Houdini 的思路挑：那边条带带着 trail 算的动画速度 × 5 甩出去，地上那一圈条带说明是砸地的下劈段放开的。
 这里在动画里采样骨盆高度，取向下最快的那一刻当 ReleaseDelay。条带材质仿 Houdini 渲染（CharVellumOFFix）：
-深蓝、偏金属、菲涅尔边缘发光。已有同名关卡就不建，要重建先删掉它；材质已在就沿用。
+深蓝、偏金属、菲涅尔边缘发光。材质已在就沿用。
+
+切分事先烘好（Houdini 也是先切、再用 primuv 挂到动画角色上）：1 cm 均匀重网格（remesh2）+ 切条带，存成
+/Game/ClothSplitDemo/SM_Quinn_Split 并设成 BakedSplit，运行时只读它。已有同名关卡就只重烘这一步并存盘；
+要整个重建先删掉关卡。
 """
 import math
 
@@ -18,6 +22,8 @@ import unreal
 FOLDER = "/Game/ClothSplitDemo"
 LEVEL = FOLDER + "/L_FallSplitDemo"
 STRIPS = FOLDER + "/M_FallSplitStrips"
+BAKED = FOLDER + "/SM_Quinn_Split"
+REMESH_CM = 1.0                # Houdini remesh2 的 targetsize 0.01 m
 TEMPLATE = "/Engine/Maps/Templates/Template_Default"
 CHARACTER = "/Game/Characters/Mannequins/Meshes/SKM_Quinn"
 ANIMATION = "/Game/Characters/Mannequins/Animations/Quinn/Mage_GroundSlam_RM"
@@ -100,10 +106,32 @@ def slam_release_time(animation):
     return length, fastest[0]
 
 
-def build():
-    if ASSETS.does_asset_exist(LEVEL):
-        unreal.log_error("FALLSPLIT {} exists; delete it to make it again".format(LEVEL))
+def bake(split):
+    """重网格 + 切分烘成 StaticMesh（存盘），设成 BakedSplit 后按它重建一次。"""
+    split.set_editor_property("remesh_edge_length", REMESH_CM, notify_mode=NEVER)
+    mesh = split.bake_split_to_asset(BAKED, True)
+    if not mesh:
+        unreal.log_error("FALLSPLIT baking {} failed".format(BAKED))
+        return False
+    split.restart()
+    log("baked {} at {:.1f} cm: {} bands, {} pieces, {} particles".format(
+        BAKED, REMESH_CM, split.get_num_bands(), split.get_num_pieces(),
+        split.get_editor_property("cloth_component").get_particle_count()))
+    return True
+
+
+def rebake():
+    """关卡已在：只重烘切分并存盘。"""
+    LEVELS.load_level(LEVEL)
+    splits = [a for a in ACTORS.get_all_level_actors() if isinstance(a, unreal.CSClothSplitActor)]
+    if len(splits) != 1:
+        unreal.log_error("FALLSPLIT expected one split actor in {}, found {}".format(LEVEL, len(splits)))
         return
+    if bake(splits[0]) and LEVELS.save_current_level():
+        log("saved " + LEVEL)
+
+
+def build():
     character = unreal.load_asset(CHARACTER)
     animation = unreal.load_asset(ANIMATION)
     if not character or not animation:
@@ -134,7 +162,8 @@ def build():
     # 放开后留足条带飞散、收绳（默认曲线 2.04 s 收完）的时间再从头来。
     split.set_editor_property("loop_period", max(length, release + 4.0), notify_mode=NEVER)
     split.get_editor_property("cloth_component").set_editor_property("release_delay", release, notify_mode=NEVER)
-    split.restart()
+    if not bake(split):
+        return
     cloth = split.get_editor_property("cloth_component")
     log("{} bands, {} pieces, simulating = {}, release at {:.2f} s, loop {:.1f} s".format(
         split.get_num_bands(), split.get_num_pieces(), cloth.is_simulation_ready(), release,
@@ -149,4 +178,7 @@ def build():
     unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).set_level_viewport_camera_info(eye, look_at(eye, aim))
 
 
-build()
+if ASSETS.does_asset_exist(LEVEL):
+    rebake()
+else:
+    build()

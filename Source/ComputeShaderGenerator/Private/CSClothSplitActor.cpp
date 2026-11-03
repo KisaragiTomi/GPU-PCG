@@ -5,6 +5,7 @@
 #include "CSMesh.h"
 #include "CSMeshOps.h"
 #include "CSMeshRenderComponent.h"
+#include "CSStaticMeshAssetSink.h"
 
 #include "Animation/AnimationAsset.h"
 #include "Async/ParallelFor.h"
@@ -13,12 +14,17 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "CoreGlobals.h"          // IsRunningCommandlet
 #include "Engine/SkeletalMesh.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "Materials/MaterialInterface.h"
+#include "MeshDescription.h"
+#include "Rendering/ColorVertexBuffer.h"
 #include "Rendering/SkeletalMeshLODRenderData.h"
 #include "Rendering/SkeletalMeshRenderData.h"
 #include "Rendering/SkinWeightVertexBuffer.h"
 #include "RHIGlobals.h"           // GUsingNullRHI
+#include "StaticMeshAttributes.h"
+#include "StaticMeshResources.h"
 #include "UObject/UnrealType.h"   // FPropertyChangedEvent
 
 void CSClothSkinning::ComputeSkinnedPositions(const FSkeletalMeshLODRenderData& LODData, const FSkinWeightVertexBuffer& Weights,
@@ -73,13 +79,14 @@ ACSClothSplitActor::ACSClothSplitActor()
 	RenderComponent->ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Always;
 
 	ClothComponent = CreateDefaultSubobject<UCSClothSimComponent>(TEXT("ClothSim"));
-	// Houdini vellumcloth4 / vellumsolver3 / forces 子网的参数（Docs/HoudiniFallSplit_Port.md 的「模拟」一节）。
+	// Houdini vellumcloth4 / vellumsolver4 / forces 子网的参数（Docs/HoudiniFallSplit_Port.md 的「模拟」一节）。
 	ClothComponent->Gravity = FVector::ZeroVector;          // gravity 0
 	ClothComponent->ArealDensity = 0.1f;                    // density 0.1
 	ClothComponent->StretchCompliance = 1.0f / 3.0e6f;      // 拉伸刚度 0.0003 × 1e10
 	ClothComponent->CompressionCompliance = 1.0e-3f;        // 压缩刚度 1 × 1e3
-	// Houdini 的弯曲刚度 3e-8（角度型）几乎为零，但 Vellum 每 substep 100 次迭代把条带磨平了；这里的弯曲是跨边距离、
-	// 每 substep 只解一次，柔度给到 100 时条带在三角尺度上皱成锯齿（2026-10-28 实测），1 是视觉上的折中。
+	// Houdini 的弯曲刚度 3e-8（角度型）几乎为零，条带在那边仍是平的（均匀 1 cm 网格、6 次约束迭代 + 10 次平滑迭代）；
+	// 这里的弯曲是跨边距离、每 substep 只解一次，在 LOD 0 原网格上柔度给到 100 时条带在三角尺度上皱成锯齿
+	// （2026-10-28 实测），1 是视觉上的折中。
 	ClothComponent->BendCompliance = 1.0f;
 	// 小白人的边长约 1.3 cm：格距 ≤ 2 cm 的布要 16 个 substep 才拉得住（Docs/GpuClothSim_Plan.md 的 substep 扫描）。
 	ClothComponent->Substeps = 16;
@@ -218,19 +225,13 @@ void ACSClothSplitActor::Restart()
 	if (!Body->GetSkeletalMeshAsset()) return;
 
 	PoseBodyAtStart();
-	FCSGpuMeshCPUData Snapshot;
-	if (!CaptureBody(Snapshot)) return;
-
-	TArray<FVector> Seeds;
-	for (const FVector& Point : Split.SeedPoints) Seeds.Add(GetActorTransform().TransformPosition(Point));
-	FCSClothBandSplitResult Result;
-	if (!CSClothBandSplit::Split(Snapshot, Split, Seeds, Result)) return;
-	NumPieces = Result.NumPieces;
-	NumBands = Result.NumBands;
+	FCSGpuMeshCPUData Mesh;
+	FCSClothVertexBinding Binding;
+	if (!(BakedSplit ? LoadBakedSplit(Mesh, Binding) : BuildSplit(Mesh, Binding))) return;
 
 	// 网格挂在渲染组件下：显存归它，组件销毁时自己还（见 UCSMeshRenderComponent 的类注释）。
 	if (!ClothMesh) ClothMesh = NewObject<UCSMesh>(RenderComponent, NAME_None, RF_Transient);
-	if (!UCSMeshOps::CopyFromMeshSnapshot(ClothMesh, Result.Mesh))
+	if (!UCSMeshOps::CopyFromMeshSnapshot(ClothMesh, Mesh))
 	{
 		UE_LOG(LogCSCloth, Warning, TEXT("[CSClothSplit] %s: the split mesh did not upload."), *GetName());
 		return;
@@ -256,11 +257,125 @@ void ACSClothSplitActor::Restart()
 		ClothComponent->Colliders.RemoveAt(GroundIndex);
 	}
 
-	ClothComponent->SetVertexBinding(Result.Binding);
+	ClothComponent->SetVertexBinding(Binding);
 	ClothComponent->SetTargetMesh(ClothMesh);
 	if (!ClothComponent->SetupFromMeshSync()) return;
 	PushAnchors();
 	Body->SetVisibility(false);
+}
+
+bool ACSClothSplitActor::BuildSplit(FCSGpuMeshCPUData& OutMesh, FCSClothVertexBinding& OutBinding)
+{
+	FCSGpuMeshCPUData Snapshot;
+	if (!CaptureBody(Snapshot)) return false;
+	TArray<FVector> Seeds;
+	for (const FVector& Point : Split.SeedPoints) Seeds.Add(GetActorTransform().TransformPosition(Point));
+
+	// Houdini：remesh2 → CharSplit 链 → attribwrangle18 的 xyzdist 绑回冻结的角色。不重网格时切的就是 LOD 0，
+	// 锚点本来就是它的渲染顶点，不必再绑。
+	const bool bRemesh = RemeshEdgeLength > 0.0f;
+	FCSGpuMeshCPUData Remeshed;
+	if (bRemesh && !CSClothBandSplit::Remesh(Snapshot, RemeshEdgeLength, Remeshed)) return false;
+	FCSClothBandSplitResult Result;
+	if (!CSClothBandSplit::Split(bRemesh ? Remeshed : Snapshot, Split, Seeds, Result)) return false;
+	if (bRemesh && !CSClothBandSplit::BindToSurface(Snapshot, Result.Mesh, Result.Binding)) return false;
+	NumPieces = Result.NumPieces;
+	NumBands = Result.NumBands;
+	OutMesh = MoveTemp(Result.Mesh);
+	OutBinding = MoveTemp(Result.Binding);
+	return true;
+}
+
+bool ACSClothSplitActor::LoadBakedSplit(FCSGpuMeshCPUData& OutMesh, FCSClothVertexBinding& OutBinding)
+{
+	const UCSClothSplitBakeData* Data = BakedSplit->GetAssetUserData<UCSClothSplitBakeData>();
+	const FStaticMeshRenderData* RenderData = BakedSplit->GetRenderData();
+	if (!Data || !RenderData || RenderData->LODResources.IsEmpty())
+	{
+		UE_LOG(LogCSCloth, Warning, TEXT("[CSClothSplit] %s: %s is not a baked split (no UCSClothSplitBakeData); bake it with BakeSplit."),
+			*GetName(), *BakedSplit->GetName());
+		return false;
+	}
+	const FSkeletalMeshRenderData* BodyData = Body->GetSkeletalMeshRenderData();
+	const int32 BodyVertices = BodyData && BodyData->LODRenderData.IsValidIndex(0) ? int32(BodyData->LODRenderData[0].GetNumVertices()) : 0;
+	if (Data->SourceNumVertices != BodyVertices)
+	{
+		UE_LOG(LogCSCloth, Warning, TEXT("[CSClothSplit] %s: %s was baked against %s (%d LOD 0 vertices) but Body has %d; bake it again."),
+			*GetName(), *BakedSplit->GetName(), *Data->SourceMesh.ToString(), Data->SourceNumVertices, BodyVertices);
+		return false;
+	}
+
+	const FStaticMeshLODResources& LOD = RenderData->LODResources[0];
+	const FPositionVertexBuffer& Positions = LOD.VertexBuffers.PositionVertexBuffer;
+	const FStaticMeshVertexBuffer& Vertices = LOD.VertexBuffers.StaticMeshVertexBuffer;
+	const FColorVertexBuffer& Colors = LOD.VertexBuffers.ColorVertexBuffer;
+	const int32 IdChannel = Data->VertexIdChannel;
+	TArray<uint32> Indices;
+	LOD.IndexBuffer.GetCopy(Indices);
+	if (!Positions.GetVertexData() || !Vertices.GetTangentData() || !Vertices.GetTexCoordData() || Indices.IsEmpty()
+		|| int32(Vertices.GetNumTexCoords()) <= IdChannel)
+	{
+		UE_LOG(LogCSCloth, Warning, TEXT("[CSClothSplit] %s: %s has no CPU copy of LOD 0 or lost its vertex id channel; enable Allow CPU Access or bake again."),
+			*GetName(), *BakedSplit->GetName());
+		return false;
+	}
+
+	// 烘焙存的是 Body 组件空间：按 Body 现在的变换摆回世界。每个渲染顶点按它那条 UV 里的烘焙顶点号取回自己的绑定。
+	const int32 NumVertices = int32(LOD.GetNumVertices());
+	const bool bColors = Colors.GetVertexData() && Colors.GetNumVertices() == uint32(NumVertices);
+	const FTransform ToWorld = Body->GetComponentTransform();
+	OutMesh.Reset();
+	OutMesh.Positions.SetNumUninitialized(NumVertices);
+	OutMesh.Normals.SetNumUninitialized(NumVertices);
+	OutMesh.Tangents.SetNumUninitialized(NumVertices);
+	OutMesh.BinormalSigns.SetNumUninitialized(NumVertices);
+	OutMesh.TexCoords().SetNumUninitialized(NumVertices);
+	if (bColors) OutMesh.Colors.SetNumUninitialized(NumVertices);
+	OutBinding = FCSClothVertexBinding();
+	OutBinding.WeldKeys.SetNumUninitialized(NumVertices);
+	OutBinding.AnchorSources.SetNumUninitialized(NumVertices);
+	OutBinding.AnchorWeights.SetNumUninitialized(NumVertices);
+	OutBinding.AnchorParams.SetNumUninitialized(NumVertices);
+	OutBinding.SwirlDirs.SetNumUninitialized(NumVertices);
+	for (int32 Vertex = 0; Vertex < NumVertices; ++Vertex)
+	{
+		const int32 Id = FMath::RoundToInt(Vertices.GetVertexUV(uint32(Vertex), uint32(IdChannel)).X);
+		if (!Data->AnchorSources.IsValidIndex(Id))
+		{
+			UE_LOG(LogCSCloth, Warning, TEXT("[CSClothSplit] %s: vertex %d of %s carries id %d outside the baked data; bake it again."),
+				*GetName(), Vertex, *BakedSplit->GetName(), Id);
+			return false;
+		}
+		const FVector4f TangentX = Vertices.VertexTangentX(uint32(Vertex));
+		const FVector4f TangentZ = Vertices.VertexTangentZ(uint32(Vertex));
+		OutMesh.Positions[Vertex] = FVector3f(ToWorld.TransformPosition(FVector(Positions.VertexPosition(uint32(Vertex)))));
+		OutMesh.Normals[Vertex] = FVector3f(ToWorld.TransformVectorNoScale(FVector(FVector3f(TangentZ))).GetSafeNormal());
+		OutMesh.Tangents[Vertex] = FVector3f(ToWorld.TransformVectorNoScale(FVector(FVector3f(TangentX))).GetSafeNormal());
+		OutMesh.BinormalSigns[Vertex] = TangentZ.W < 0.0f ? -1.0f : 1.0f;
+		OutMesh.TexCoords()[Vertex] = Vertices.GetVertexUV(uint32(Vertex), 0);
+		if (bColors) OutMesh.Colors[Vertex] = FVector4f(FLinearColor(Colors.VertexColor(uint32(Vertex))));
+		OutBinding.WeldKeys[Vertex] = Data->WeldKeys[Id];
+		OutBinding.AnchorSources[Vertex] = Data->AnchorSources[Id];
+		OutBinding.AnchorWeights[Vertex] = Data->AnchorWeights[Id];
+		OutBinding.AnchorParams[Vertex] = Data->AnchorParams[Id];
+		OutBinding.SwirlDirs[Vertex] = Data->SwirlDirs[Id];
+	}
+	OutMesh.Indices = MoveTemp(Indices);
+	OutMesh.TriangleMaterialSlots.SetNumZeroed(OutMesh.Indices.Num() / 3);
+	for (const FStaticMeshSection& Section : LOD.Sections)
+	{
+		for (uint32 Triangle = 0; Triangle < Section.NumTriangles; ++Triangle)
+		{
+			const int32 Index = int32(Section.FirstIndex / 3 + Triangle);
+			if (OutMesh.TriangleMaterialSlots.IsValidIndex(Index)) OutMesh.TriangleMaterialSlots[Index] = Section.MaterialIndex;
+		}
+	}
+	for (const FStaticMaterial& StaticMaterial : BakedSplit->GetStaticMaterials()) OutMesh.Materials.Add(StaticMaterial.MaterialInterface);
+	OutMesh.SourceSpace = FCSGpuMeshCPUData::ESpace::World;
+	OutMesh.AttrLayout = FCSGpuMeshCPUData::EAttrLayout::PerVertex;
+	NumBands = Data->NumBands;
+	NumPieces = Data->NumPieces;
+	return OutMesh.IsValid();
 }
 
 void ACSClothSplitActor::Replay()
@@ -321,6 +436,160 @@ void ACSClothSplitActor::Tick(float DeltaSeconds)
 }
 
 #if WITH_EDITOR
+void ACSClothSplitActor::BakeSplit()
+{
+	BakeSplitToAsset(BakeAssetPath, false);
+}
+
+UStaticMesh* ACSClothSplitActor::BakeSplitToAsset(const FString& AssetPath, bool bSaveToDisk)
+{
+	static const TCHAR* LogPrefix = TEXT("[CSClothSplit] Bake:");
+	USkeletalMesh* SourceMesh = Body ? Body->GetSkeletalMeshAsset() : nullptr;
+	if (!SourceMesh || !ClothComponent || !CanBuild())
+	{
+		UE_LOG(LogCSCloth, Warning, TEXT("%s %s needs a skeletal mesh on Body (and a GPU)."), LogPrefix, *GetName());
+		return nullptr;
+	}
+	const FString Path = AssetPath.IsEmpty() ? FString::Printf(TEXT("/Game/ClothSplit/SM_%s_Split"), *SourceMesh->GetName()) : AssetPath;
+
+	// 先只读地探路径；切分成功之后才动资产（PrepareMesh 会就地清空同名资产）。
+	FCSStaticMeshAssetTarget Target;
+	if (!CSStaticMeshAsset::ResolveTarget(Path, /*bReplaceExisting*/ true, LogPrefix, Target)) return nullptr;
+	PoseBodyAtStart();
+	FCSGpuMeshCPUData Mesh;
+	FCSClothVertexBinding Binding;
+	if (!BuildSplit(Mesh, Binding)) return nullptr;
+	UStaticMesh* StaticMesh = CSStaticMeshAsset::PrepareMesh(Target, LogPrefix);
+	if (!StaticMesh || !WriteBakedSplit(StaticMesh, Mesh, Binding)) return nullptr;
+	CSStaticMeshAsset::Finalize(StaticMesh, Target, bSaveToDisk, LogPrefix);
+	Modify();
+	BakedSplit = StaticMesh;
+	bRebuildPending = true;
+	return StaticMesh;
+}
+
+bool ACSClothSplitActor::BakeSplitInto(UStaticMesh* StaticMesh)
+{
+	if (!StaticMesh || !Body || !Body->GetSkeletalMeshAsset() || !ClothComponent || !CanBuild()) return false;
+	PoseBodyAtStart();
+	FCSGpuMeshCPUData Mesh;
+	FCSClothVertexBinding Binding;
+	if (!BuildSplit(Mesh, Binding) || !WriteBakedSplit(StaticMesh, Mesh, Binding)) return false;
+	Modify();
+	BakedSplit = StaticMesh;
+	bRebuildPending = true;
+	return true;
+}
+
+bool ACSClothSplitActor::WriteBakedSplit(UStaticMesh* StaticMesh, const FCSGpuMeshCPUData& Mesh, const FCSClothVertexBinding& Binding)
+{
+
+	// 存 Body 组件空间：烘出来的布不认 actor 摆在哪，运行时按 Body 当时的变换摆回世界。
+	// 每个烘焙顶点一个 MeshDescription 顶点，UV1 = 烘焙顶点号：构建只合并同一顶点上属性相同的角，切口两侧位置相同、
+	// 编号不同的顶点不会被并回去；构建重排顶点也不怕，运行时按 UV1 认人。
+	const FTransform ToWorld = Body->GetComponentTransform();
+	const int32 NumVertices = Mesh.Positions.Num();
+	const bool bColors = Mesh.Colors.Num() == NumVertices;
+	FMeshDescription Description;
+	{
+		FStaticMeshAttributes Attributes(Description);
+		Attributes.Register();
+		TVertexAttributesRef<FVector3f> Positions = Attributes.GetVertexPositions();
+		TVertexInstanceAttributesRef<FVector3f> Normals = Attributes.GetVertexInstanceNormals();
+		TVertexInstanceAttributesRef<FVector3f> Tangents = Attributes.GetVertexInstanceTangents();
+		TVertexInstanceAttributesRef<float> Signs = Attributes.GetVertexInstanceBinormalSigns();
+		TVertexInstanceAttributesRef<FVector4f> InstanceColors = Attributes.GetVertexInstanceColors();
+		TVertexInstanceAttributesRef<FVector2f> UVs = Attributes.GetVertexInstanceUVs();
+		UVs.SetNumChannels(2);
+		TPolygonGroupAttributesRef<FName> SlotNames = Attributes.GetPolygonGroupMaterialSlotNames();
+
+		TArray<FVertexID> VertexIds;
+		VertexIds.SetNumUninitialized(NumVertices);
+		Description.ReserveNewVertices(NumVertices);
+		for (int32 Vertex = 0; Vertex < NumVertices; ++Vertex)
+		{
+			VertexIds[Vertex] = Description.CreateVertex();
+			Positions[VertexIds[Vertex]] = FVector3f(ToWorld.InverseTransformPosition(FVector(Mesh.Positions[Vertex])));
+		}
+		TMap<int32, FPolygonGroupID> Groups;
+		const int32 NumTriangles = Mesh.Indices.Num() / 3;
+		Description.ReserveNewVertexInstances(NumTriangles * 3);
+		Description.ReserveNewTriangles(NumTriangles);
+		for (int32 Triangle = 0; Triangle < NumTriangles; ++Triangle)
+		{
+			const int32 Slot = Mesh.TriangleMaterialSlots.IsValidIndex(Triangle) ? Mesh.TriangleMaterialSlots[Triangle] : 0;
+			FPolygonGroupID* Group = Groups.Find(Slot);
+			if (!Group)
+			{
+				Group = &Groups.Add(Slot, Description.CreatePolygonGroup());
+				SlotNames[*Group] = CSStaticMeshAsset::MaterialSlotName(Slot);
+			}
+			FVertexInstanceID Corners[3];
+			for (int32 Corner = 0; Corner < 3; ++Corner)
+			{
+				const int32 Vertex = int32(Mesh.Indices[Triangle * 3 + Corner]);
+				const FVertexInstanceID Instance = Description.CreateVertexInstance(VertexIds[Vertex]);
+				Normals[Instance] = FVector3f(ToWorld.InverseTransformVectorNoScale(FVector(Mesh.Normals[Vertex])).GetSafeNormal());
+				Tangents[Instance] = FVector3f(ToWorld.InverseTransformVectorNoScale(FVector(Mesh.Tangents[Vertex])).GetSafeNormal());
+				Signs[Instance] = Mesh.BinormalSigns.IsValidIndex(Vertex) ? Mesh.BinormalSigns[Vertex] : 1.0f;
+				InstanceColors[Instance] = bColors ? Mesh.Colors[Vertex] : FVector4f(1.0f, 1.0f, 1.0f, 1.0f);
+				UVs.Set(Instance, 0, Mesh.TexCoords()[Vertex]);
+				UVs.Set(Instance, 1, FVector2f(float(Vertex), 0.0f));
+				Corners[Corner] = Instance;
+			}
+			Description.CreateTriangle(*Group, Corners);
+		}
+	}
+
+	// 就地重写：材质槽与 section 表按本次网格重新装配，旧的会串到前面（同 CSStaticMeshAsset::PrepareMesh）。
+	StaticMesh->GetStaticMaterials().Empty();
+	StaticMesh->GetSectionInfoMap().Clear();
+	// 法线切线原样保留；不生成光照 UV（它会写到 UV1，把顶点号盖掉）；全精度 UV（半精度在 2048 以上就丢整数）；
+	// 留 CPU 副本（运行时从它读几何与顶点号）。
+	StaticMesh->SetNumSourceModels(1);
+	FMeshBuildSettings& BuildSettings = StaticMesh->GetSourceModel(0).BuildSettings;
+	BuildSettings.bRecomputeNormals = false;
+	BuildSettings.bRecomputeTangents = false;
+	BuildSettings.bGenerateLightmapUVs = false;
+	BuildSettings.bUseFullPrecisionUVs = true;
+	BuildSettings.bRemoveDegenerates = false;
+	StaticMesh->bAllowCPUAccess = true;
+	TArray<UMaterialInterface*> Materials;
+	for (UMaterialInterface* SlotMaterial : Mesh.Materials) Materials.Add(SlotMaterial);
+	if (!CSStaticMeshAsset::PopulateFromDescription(StaticMesh, Description, Materials, Mesh.TriangleMaterialSlots,
+		/*bCommitMeshDescription*/ true, /*bEnableNanite*/ false))
+	{
+		UE_LOG(LogCSCloth, Error, TEXT("[CSClothSplit] Bake: StaticMesh build failed for '%s'."), *StaticMesh->GetPathName());
+		return false;
+	}
+
+	UCSClothSplitBakeData* Data = StaticMesh->GetAssetUserData<UCSClothSplitBakeData>();
+	if (!Data)
+	{
+		Data = NewObject<UCSClothSplitBakeData>(StaticMesh, NAME_None, RF_Transactional);
+		StaticMesh->AddAssetUserData(Data);
+	}
+	const FSkeletalMeshRenderData* SourceData = Body->GetSkeletalMeshRenderData();
+	Data->SourceMesh = Body->GetSkeletalMeshAsset();
+	Data->SourceNumVertices = SourceData && SourceData->LODRenderData.IsValidIndex(0) ? int32(SourceData->LODRenderData[0].GetNumVertices()) : 0;
+	Data->Animation = Animation;
+	Data->StartTime = StartTime;
+	Data->RemeshEdgeLength = FMath::Max(RemeshEdgeLength, 0.0f);
+	Data->Split = Split;
+	Data->NumBands = NumBands;
+	Data->NumPieces = NumPieces;
+	Data->VertexIdChannel = 1;
+	Data->WeldKeys = Binding.WeldKeys;
+	Data->AnchorSources = Binding.AnchorSources;
+	Data->AnchorWeights = Binding.AnchorWeights;
+	Data->AnchorParams = Binding.AnchorParams;
+	Data->SwirlDirs = Binding.SwirlDirs;
+	UE_LOG(LogCSCloth, Log, TEXT("[CSClothSplit] Bake: %s: %d vertices, %d triangles, %d bands, %d pieces (remesh %.2f cm) -> %d render vertices."),
+		*StaticMesh->GetPathName(), NumVertices, Mesh.Indices.Num() / 3, NumBands, NumPieces, Data->RemeshEdgeLength,
+		StaticMesh->GetRenderData() && !StaticMesh->GetRenderData()->LODResources.IsEmpty() ? StaticMesh->GetRenderData()->LODResources[0].GetNumVertices() : 0);
+	return true;
+}
+
 void ACSClothSplitActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);

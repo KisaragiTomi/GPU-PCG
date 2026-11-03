@@ -90,4 +90,19 @@ namespace CSClothBandSplit
 	 */
 	COMPUTESHADERGENERATOR_API bool Split(const FCSGpuMeshCPUData& Source, const FCSClothBandSplitSettings& Settings,
 		const TArray<FVector>& SeedPoints, FCSClothBandSplitResult& OutResult);
+
+	/**
+	 * Houdini remesh2：把网格重铺成边长约 TargetEdgeLength 的均匀三角。先按位置焊掉 UV 缝，只留几何；
+	 * 输出逐顶点布局、单材质槽、UV 全零（UV 与材质槽由 BindToSurface 从原网格插回来）。失败返回 false 并写日志。
+	 */
+	COMPUTESHADERGENERATOR_API bool Remesh(const FCSGpuMeshCPUData& Source, float TargetEdgeLength, FCSGpuMeshCPUData& OutMesh);
+
+	/**
+	 * primuv 绑定：InOutMesh 的每个顶点在 Surface 上找最近的三角，锚点改成那个三角的三个顶点 + 重心坐标
+	 * （Houdini：attribwrangle18 的 xyzdist 记下 sourceprim / sourceprimuv，attribinterpolate 按它插回动画角色）。
+	 * Surface 是会动的那张网格（骨骼网格 LOD 0 的快照），两者同一空间。UV 与顶点色按同一组重心坐标从 Surface 插值，
+	 * 每个三角取它第一个角所在 Surface 三角的材质槽。
+	 */
+	COMPUTESHADERGENERATOR_API bool BindToSurface(const FCSGpuMeshCPUData& Surface, FCSGpuMeshCPUData& InOutMesh,
+		FCSClothVertexBinding& InOutBinding);
 }

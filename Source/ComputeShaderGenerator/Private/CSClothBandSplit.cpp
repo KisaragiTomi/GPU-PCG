@@ -1,6 +1,14 @@
 #include "CSClothBandSplit.h"
 
+#include "Async/ParallelFor.h"
+#include "Distance/DistPoint3Triangle3.h"
+#include "DynamicMesh/DynamicMesh3.h"
+#include "DynamicMesh/DynamicMeshAABBTree3.h"
+#include "DynamicMesh/MeshNormals.h"
+#include "GeometryScript/MeshRemeshFunctions.h"
 #include "Math/RandomStream.h"
+#include "UDynamicMesh.h"
+#include "UObject/Package.h"   // GetTransientPackage
 
 namespace
 {
@@ -696,6 +704,152 @@ bool Split(const FCSGpuMeshCPUData& Source, const FCSClothBandSplitSettings& Set
 	OutResult.NumSeedVertices = Seeds.Num();
 	UE_LOG(LogCSCloth, Log, TEXT("[CSClothSplit] %d source vertices -> %d bands, %d pieces, %d output vertices (%d seed vertices, %d smoothed)."),
 		NumVertices, OutResult.NumBands, OutResult.NumPieces, Mesh.Positions.Num(), OutResult.NumSeedVertices, OutResult.NumSmoothedVertices);
+	return true;
+}
+
+bool Remesh(const FCSGpuMeshCPUData& Source, float TargetEdgeLength, FCSGpuMeshCPUData& OutMesh)
+{
+	using namespace UE::Geometry;
+	OutMesh.Reset();
+	if (Source.AttrLayout != FCSGpuMeshCPUData::EAttrLayout::PerVertex || !Source.IsValid() || !(TargetEdgeLength > 0.0f))
+	{
+		UE_LOG(LogCSCloth, Warning, TEXT("[CSClothSplit] Remesh refused: needs a valid per-vertex mesh and a positive edge length."));
+		return false;
+	}
+
+	// UV 缝两侧的渲染顶点同位置：先焊成连通的一张面（Houdini remesh2 的 hardenuvseams 也是关的）。
+	// 非流形的三角（第三个三角挂上同一条边）进不了 FDynamicMesh3，丢掉：重网格只要一张走得通的面。
+	TArray<uint32> VertexToNode;
+	TArray<int32> NodeSource;
+	CSClothSetup::WeldPositions(Source.Positions, 0.01f, nullptr, VertexToNode, NodeSource);
+	FDynamicMesh3 Input;
+	for (const int32 Vertex : NodeSource) Input.AppendVertex(FVector3d(Source.Positions[Vertex]));
+	int32 Rejected = 0;
+	for (int32 Index = 0; Index + 2 < Source.Indices.Num(); Index += 3)
+	{
+		const int32 A = int32(VertexToNode[Source.Indices[Index + 0]]);
+		const int32 B = int32(VertexToNode[Source.Indices[Index + 1]]);
+		const int32 C = int32(VertexToNode[Source.Indices[Index + 2]]);
+		if (A == B || B == C || A == C || Input.AppendTriangle(A, B, C) < 0) ++Rejected;
+	}
+	const int32 InputTriangles = Input.TriangleCount();
+	if (InputTriangles == 0)
+	{
+		UE_LOG(LogCSCloth, Warning, TEXT("[CSClothSplit] Remesh refused: no manifold triangle survived welding."));
+		return false;
+	}
+
+	UDynamicMesh* Work = NewObject<UDynamicMesh>(GetTransientPackage());
+	Work->SetMesh(MoveTemp(Input));
+	FGeometryScriptRemeshOptions RemeshOptions;
+	RemeshOptions.bDiscardAttributes = true;
+	FGeometryScriptUniformRemeshOptions UniformOptions;
+	UniformOptions.TargetType = EGeometryScriptUniformRemeshTargetType::TargetEdgeLength;
+	UniformOptions.TargetEdgeLength = TargetEdgeLength;
+	UGeometryScriptLibrary_RemeshingFunctions::ApplyUniformRemesh(Work, RemeshOptions, UniformOptions, nullptr);
+
+	Work->ProcessMesh([&OutMesh](const FDynamicMesh3& Result)
+	{
+		FMeshNormals Normals(&Result);
+		Normals.ComputeVertexNormals();
+		TArray<int32> Compact;
+		Compact.Init(INDEX_NONE, Result.MaxVertexID());
+		for (const int32 Vertex : Result.VertexIndicesItr())
+		{
+			Compact[Vertex] = OutMesh.Positions.Num();
+			const FVector3f Normal = FVector3f(Normals[Vertex]).GetSafeNormal(UE_SMALL_NUMBER, FVector3f::UnitZ());
+			// 切线取任意一条与法线垂直的：布不用法线贴图，SkinBack 只要求它与法线正交。
+			const FVector3f Axis = FMath::Abs(Normal.Z) < 0.9f ? FVector3f::UnitZ() : FVector3f::UnitX();
+			OutMesh.Positions.Add(FVector3f(Result.GetVertex(Vertex)));
+			OutMesh.Normals.Add(Normal);
+			OutMesh.Tangents.Add(FVector3f::CrossProduct(Axis, Normal).GetSafeNormal());
+			OutMesh.BinormalSigns.Add(1.0f);
+			OutMesh.TexCoords().Add(FVector2f::ZeroVector);
+		}
+		for (const int32 Triangle : Result.TriangleIndicesItr())
+		{
+			const FIndex3i Tri = Result.GetTriangle(Triangle);
+			OutMesh.Indices.Append({ uint32(Compact[Tri.A]), uint32(Compact[Tri.B]), uint32(Compact[Tri.C]) });
+			OutMesh.TriangleMaterialSlots.Add(0);
+		}
+	});
+	Work->MarkAsGarbage();
+	OutMesh.Materials = Source.Materials;
+	OutMesh.SourceSpace = Source.SourceSpace;
+	OutMesh.AttrLayout = FCSGpuMeshCPUData::EAttrLayout::PerVertex;
+	UE_LOG(LogCSCloth, Log, TEXT("[CSClothSplit] Remeshed %d nodes / %d triangles at %.2f cm -> %d vertices / %d triangles (%d source triangles dropped)."),
+		NodeSource.Num(), InputTriangles, TargetEdgeLength, OutMesh.Positions.Num(), OutMesh.Indices.Num() / 3, Rejected);
+	return OutMesh.IsValid();
+}
+
+bool BindToSurface(const FCSGpuMeshCPUData& Surface, FCSGpuMeshCPUData& InOutMesh, FCSClothVertexBinding& InOutBinding)
+{
+	using namespace UE::Geometry;
+	if (Surface.AttrLayout != FCSGpuMeshCPUData::EAttrLayout::PerVertex || !Surface.IsValid() || !InOutMesh.IsValid())
+	{
+		UE_LOG(LogCSCloth, Warning, TEXT("[CSClothSplit] BindToSurface refused: needs two valid per-vertex meshes."));
+		return false;
+	}
+
+	// 三角汤：每个三角自己的三个顶点，非流形也建得起来，三角号 = Surface 的三角号。
+	const int32 NumSurfaceTriangles = Surface.Indices.Num() / 3;
+	FDynamicMesh3 Soup;
+	for (int32 Triangle = 0; Triangle < NumSurfaceTriangles; ++Triangle)
+	{
+		const int32 A = Soup.AppendVertex(FVector3d(Surface.Positions[Surface.Indices[Triangle * 3 + 0]]));
+		const int32 B = Soup.AppendVertex(FVector3d(Surface.Positions[Surface.Indices[Triangle * 3 + 1]]));
+		const int32 C = Soup.AppendVertex(FVector3d(Surface.Positions[Surface.Indices[Triangle * 3 + 2]]));
+		Soup.AppendTriangle(A, B, C);
+	}
+	const FDynamicMeshAABBTree3 Tree(&Soup, true);
+
+	const int32 NumVertices = InOutMesh.Positions.Num();
+	const int32 NumChannels = FMath::Clamp(Surface.NumTexCoordChannels, 1, FCSGpuMeshCPUData::MaxTexCoordChannels);
+	const bool bColors = Surface.Colors.Num() == Surface.Positions.Num();
+	InOutBinding.AnchorSources.SetNumUninitialized(NumVertices);
+	InOutBinding.AnchorWeights.SetNumUninitialized(NumVertices);
+	for (int32 Channel = 0; Channel < NumChannels; ++Channel) InOutMesh.TexCoordChannels[Channel].SetNumZeroed(NumVertices);
+	InOutMesh.NumTexCoordChannels = NumChannels;
+	if (bColors) InOutMesh.Colors.SetNumUninitialized(NumVertices);
+	TArray<int32> VertexTriangle;
+	VertexTriangle.Init(INDEX_NONE, NumVertices);
+	ParallelFor(TEXT("CSClothSplit.BindToSurface"), NumVertices, 256, [&](int32 Vertex)
+	{
+		const FVector3d Point(InOutMesh.Positions[Vertex]);
+		double DistanceSqr = 0.0;
+		const int32 Triangle = Tree.FindNearestTriangle(Point, DistanceSqr);
+		if (!Soup.IsTriangle(Triangle)) return;
+		const FIndex3i Corners = Soup.GetTriangle(Triangle);
+		FDistPoint3Triangle3d Query(Point, FTriangle3d(Soup.GetVertex(Corners.A), Soup.GetVertex(Corners.B), Soup.GetVertex(Corners.C)));
+		Query.GetSquared();
+		const FVector3f Weights(Query.TriangleBaryCoords);
+		const FIntVector Sources(int32(Surface.Indices[Triangle * 3 + 0]), int32(Surface.Indices[Triangle * 3 + 1]), int32(Surface.Indices[Triangle * 3 + 2]));
+		InOutBinding.AnchorSources[Vertex] = Sources;
+		InOutBinding.AnchorWeights[Vertex] = Weights;
+		VertexTriangle[Vertex] = Triangle;
+		for (int32 Channel = 0; Channel < NumChannels; ++Channel)
+		{
+			const TArray<FVector2f>& UVs = Surface.TexCoordChannels[Channel];
+			InOutMesh.TexCoordChannels[Channel][Vertex] = UVs[Sources.X] * Weights.X + UVs[Sources.Y] * Weights.Y + UVs[Sources.Z] * Weights.Z;
+		}
+		if (bColors)
+		{
+			InOutMesh.Colors[Vertex] = Surface.Colors[Sources.X] * Weights.X + Surface.Colors[Sources.Y] * Weights.Y + Surface.Colors[Sources.Z] * Weights.Z;
+		}
+	});
+	if (VertexTriangle.Contains(INDEX_NONE))
+	{
+		UE_LOG(LogCSCloth, Warning, TEXT("[CSClothSplit] BindToSurface: some vertices found no surface triangle."));
+		return false;
+	}
+
+	const bool bSlots = Surface.TriangleMaterialSlots.Num() == NumSurfaceTriangles;
+	InOutMesh.TriangleMaterialSlots.SetNumUninitialized(InOutMesh.Indices.Num() / 3);
+	for (int32 Triangle = 0; Triangle < InOutMesh.TriangleMaterialSlots.Num(); ++Triangle)
+	{
+		InOutMesh.TriangleMaterialSlots[Triangle] = bSlots ? Surface.TriangleMaterialSlots[VertexTriangle[InOutMesh.Indices[Triangle * 3]]] : 0;
+	}
+	InOutMesh.Materials = Surface.Materials;
 	return true;
 }
 }
