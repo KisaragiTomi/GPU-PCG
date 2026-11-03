@@ -545,7 +545,7 @@ void SimulateFrame_RenderThread(FRHICommandListImmediate& RHICmdList, FCSClothGp
 
 		// 锚点绳：放开之后、刚度 > 0 时。排在布自己的约束**之前**：这么小的粒子质量下绳与拉伸都近乎硬约束，
 		// 单次迭代的 Gauss-Seidel 谁最后解谁说了算 —— 绳排最后时每个 substep 都把粒子硬拽到绳长的球壳上，
-		// 条带被拉碎成锯齿（2026-10-28 实测）。Vellum 靠 100 次迭代让刚 3000 倍的布赢；这里让布最后解，
+		// 条带被拉碎成锯齿（2026-10-28 实测）。这里让布最后解，
 		// 绳就像一股把整条带往外拽的力，条带保持连续。
 		if (bAnchors && !bFollow && Params.bAnchorConstraints)
 		{

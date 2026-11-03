@@ -21,7 +21,7 @@ Houdini 场景 `D:\MyProject\HoudiniCloth\AnimetionFallSplit` 做的是「角色
 | 步骤 | 节点 | 做了什么 |
 | --- | --- | --- |
 | 冻结姿态 | `timeshift9` | 动画角色定在第 1 帧，切分在这一个姿态上做 |
-| 重网格 | `remesh2` | 目标边长 0.01 m（1 cm 的均匀三角） |
+| 重网格 | `remesh2` | 目标边长 0.01 m（1 cm 的均匀三角）。同一份 `UE5_Character.bgeo.sc` 复算：46,039 点 → 25,724 点 / 46,454 三角，约减一半 |
 | 起点 | `drawcurve3` → `ray1` → `deformbyinfluence3`（kalou_attribfromgeometry） | 手画在身上的一条笔画投到表面，1 cm 以内的点 `start = 1` |
 | 测地距离 | `distancealonggeometry3` | 从 `start > 0.5` 的点出发，写 `dist`（m） |
 | 条带号 | `attribvop2` | 见下面的公式 |
@@ -44,9 +44,14 @@ float dist = xyzdist(1, @P, prim, uv, chf("maxdist"));           // maxdist 0.04
 @P = lerp(@P, primuv(2, "P", prim, uv), chramp("deform", fit(dist, 0, maxdist, 0, 1) / maxdist));
 ```
 
-## Houdini：模拟（`EndChar` → `vellumsolver3`）
+## Houdini：模拟（`EndChar` → `vellumsolver4`）
 
 `EndChar` 合并两份几何：条带（组 `cloth`）与只有点的一份（组 `staticpt`）。每个布点被 stitch 到同位置的 `staticpt` 上，`staticpt` 每帧贴回动画角色——条带就这样挂在会动的身体上。
+
+出图用的是 `vellumsolver4`：
+- 缓存 `CharVellumBack`（vellumio）的几何输入从它来：`add3`（只留点）→ `attribdelete3` → `groupdelete1`。再经 `CharVellumBackMesh` → `retime5` 倒放出图。
+- `vellumsolver3` 与它参数完全相同，只是约束迭代是默认的 100 次。它只给这份缓存提供约束几何（输入 2）。
+- 19.hip 与 19_uec_save.hip 里都是这样连的。
 
 | 部分 | 节点 | 参数 |
 | --- | --- | --- |
@@ -55,7 +60,7 @@ float dist = xyzdist(1, @P, prim, uv, chf("maxdist"));           // maxdist 0.04
 | 绳 | `vellumstitch1` | `cloth` 的点 → `staticpt` 最近点，拉伸组用默认名 `stretch` |
 | 绳的随机长度 | `attribrandomize1` | 每条约束 `restlengthnoise` ∈ [1.9, 2.0] m，种子 8278 |
 | 绳的高度 | `KaLou_faceattrib1` + `FitValue5` | `high = @P.y`，再按全体约束归一化到 [0, 1] |
-| 解算器 | `vellumsolver3` | 1 substep、100 次约束迭代（默认），重力 0，地面 y = 0，风 0、风阻 0.1，从 1004 帧起算 |
+| 解算器 | `vellumsolver4` | 1 substep、6 次约束迭代（默认 100）、10 次平滑迭代，重力 0，地面 y = 0，风 0、风阻 0.1，从 1004 帧起算 |
 | 改绳 | `forces/sopsolver1/attribwrangle2`（每步，组 `stretch` = 只有绳） | 见下 |
 | 锚点贴回动画 | `forces/sopsolver2/attribwrangle3` | `staticpt`：`i@stopped = 1`，`@P` = `EndChar` 的当前位置 |
 | 速度场 | `forces/popadvectbyvolumes1` | `BackVel`（体积 `v`）当风用：velscale 0.98、velblend 0.844、airresist 1 |
@@ -89,8 +94,11 @@ f@stiffness  = lerp(1000, 0, chf('stiffnesschange'));
 ```text
 ACSClothSplitActor（编辑器视口里也跑）
   Body：USkeletalMeshComponent 播动画，藏起来但每帧求骨骼
-  重建（Restart：第一次、改了属性）：Body 在 StartTime 的蒙皮快照（CPU）
-        → CSClothBandSplit::Split → UCSMesh → UCSClothSimComponent（SetVertexBinding + SetupFromMeshSync）
+  烘焙（BakeSplit，编辑器里做一次）：Body 在 StartTime 的蒙皮快照（CPU）→ CSClothBandSplit::Remesh（1 cm）
+        → Split → BindToSurface（每个顶点在 LOD 0 上的最近三角 + 重心 = sourceprim / sourceprimuv）
+        → StaticMesh（Body 组件空间，UV1 = 烘焙顶点号）+ UCSClothSplitBakeData（逐顶点绑定）
+  重建（Restart：第一次、改了属性）：设了 BakedSplit 就读它的 LOD 0 与绑定；没设就现场走上面那条链
+        → UCSMesh → UCSClothSimComponent（SetVertexBinding + SetupFromMeshSync）
   重播（Replay：LoopPeriod 到点）：Body 回到 StartTime + ResetToRestPose，沿用切好的布
   每帧：Body 的蒙皮位置（CSClothSkinning::ComputeSkinnedPositions，按段并行）→ SetAnchorSourcePositions
         → 每粒子锚点（CPU 分块并行收集、上传）
@@ -100,14 +108,14 @@ ACSClothSplitActor（编辑器视口里也跑）
 
 | Houdini | UE | 程度 |
 | --- | --- | --- |
-| `remesh2`（1 cm） | 不重网格，直接用 LOD 0（Quinn 边长约 1.3 cm） | 近似 |
+| `remesh2`（均匀 1 cm，25,724 点） | `RemeshEdgeLength` 1 cm（Geometry Script 均匀重网格）：Quinn 43,642 → 24,039 点，切开后 29,576 粒子 | 近似：重网格算法不同 |
 | 笔画 + 1 cm 捕获 | `Split.SeedPoints` + `SeedRadius`（actor 局部；空 = 头顶） | 手工：笔画换成点 |
 | `distancealonggeometry` | 网格边 + 跨相邻三角摊平的捷径上做 Dijkstra（规则网格误差从约 41% 降到几个百分点） | 近似 |
 | `attribvop2` 的条带号 | 同一公式：`floor((dist + 2.25 cm × noise) / 4.5 cm)`，噪声周期 2.6 cm | 近似：Perlin 代替 aanoise |
 | `attribpromote` min + `splitpoints` | 面取最小 + 焊接键（切口两侧不焊回） | 一致 |
 | 切口平滑 | 切口曲线拉普拉斯 9 次 × 0.643，4.4 cm 以内的点跟着平移（线性衰减），开放边界不动 | 近似：平移代替往曲线上拉 |
 | `createcurveuv` 的 `curvev` | 每块两次最远点扫描，`u < 0.5` 取反 | 近似 |
-| `sourceprim` / `sourceprimuv` 绑定 | 锚点 = 源渲染顶点；被平滑挪过的点取原网格上最近三角的重心坐标 | 一致 |
+| `sourceprim` / `sourceprimuv` 绑定 + `attribinterpolate` | `BindToSurface`：每个顶点在 LOD 0 上找最近三角，存三个顶点 + 重心坐标，烘进 StaticMesh；每帧按 Body 的蒙皮位置插值 | 一致 |
 | `vellumcloth4` | 拉伸柔度 1/3e6、压缩 1e-3、密度 0.1；弯曲 1（跨边距离） | 近似：弯曲模型不同，见下 |
 | `vellumstitch1` + `staticpt` | 每粒子一条到锚点的双边距离约束 | 一致 |
 | `sopsolver1` 两行 | `AnchorReelIn`、`AnchorStiffnessFade` 两条曲线，同一公式；`AnchorRestLengthRange` 190–200 cm | 一致（默认关键帧取 19.hip） |
@@ -116,32 +124,37 @@ ACSClothSplitActor（编辑器视口里也跑）
 | `BackVel` | 每粒子的表面旋流方向 `cross(N, ∇dist)` × `SwirlSpeed`（500 cm/s），`FieldDrag` 1/s 收敛 | 近似：只有表面项，没有流线外延与烟雾速度；起点复用分块的起点 |
 | `popwind1` | `WindTurbulence` 205、`WindTurbulenceScale` 467、两向阻尼 0.17 | 近似：噪声函数不同 |
 | 重力 0、地面、风阻 0.1 | `Gravity` 0、跟随 actor 的地面平面、`Damping` 0.1 | 一致 |
-| 1 substep × 100 次迭代 | 16 substep × 1 次迭代，绳排在布之前解 | 不同解法，见下 |
+| `vellumsolver4`：1 substep × 6 次约束迭代 + 10 次平滑迭代 | 16 substep × 1 次迭代，绳排在布之前解 | 不同解法，见下 |
 | `retime` 倒放、VAT 导出、pyro、`DefEndChar` 变体 | — | 未移植 |
 
 两处有意的偏离：
 
-- **解算顺序。** 粒子质量约 1e-5 kg，刚度 1000 的绳与 3e6 的布在 XPBD 里都近乎硬约束。Vellum 靠每步 100 次迭代让刚 3000 倍的布赢；这里每个 substep 只解一次，谁最后解谁说了算。绳排在最后时，条带每步都被硬拽到绳长的壳上、拉成锯齿（2026-10-28 实测），所以 `SolveAnchors` 排在布的约束之前，布最后保持边长，绳像一股拽整条带的力。
-- **弯曲。** Houdini 的弯曲刚度 3e-8 几乎为零，但 100 次迭代把条带磨平了；这里的弯曲是跨边距离、每步一次，柔度 100 时条带在三角尺度上皱成锯齿，`ACSClothSplitActor` 默认取 1、substep 取 16。
+- **解算顺序。** 粒子质量约 1e-5 kg，刚度 1000 的绳与 3e6 的布在 XPBD 里都近乎硬约束。这里每个 substep 只解一次，谁最后解谁说了算。绳排在最后时，条带每步都被硬拽到绳长的壳上、拉成锯齿（2026-10-28 实测），所以 `SolveAnchors` 排在布的约束之前，布最后保持边长，绳像一股拽整条带的力。
+- **弯曲。** Houdini 的弯曲刚度 3e-8 几乎为零，条带在那边仍是平的（均匀 1 cm 网格，6 次约束迭代 + 10 次平滑迭代）。这里的弯曲是跨边距离、每步一次，在 LOD 0 原网格上（手和脸的三角很碎）柔度 100 时条带在三角尺度上皱成锯齿（2026-10-28 实测），所以 `ACSClothSplitActor` 默认取柔度 1、16 个 substep。
 
 ## 用法
 
 1. 放一个 `ACSClothSplitActor`，在 `Body` 上设骨骼网格，`Animation` 设要播的动画（单节点模式）。
-2. 布料组件的 `ReleaseDelay` 定放开时刻；`Split` 调条带（`SeedPoints` 为空时从头顶切）。
-3. 编辑器视口里自动播放；`LoopPeriod` > 0 时到点 `Replay`（沿用切好的布，不重建）。改任何属性都会在下一帧 `Restart` 重建。
-4. 示例关卡 `/Game/ClothSplitDemo/L_FallSplitDemo` 由 [`Scripts/MakeFallSplitDemo.py`](../Scripts/MakeFallSplitDemo.py) 生成：Quinn + `Mage_GroundSlam_RM`，放开时刻取骨盆下落最快的 1.02 s，条带材质仿 Houdini 渲染。资产属于第三人称模板，所以关卡在工程里、不在插件里。
+2. 布料组件的 `ReleaseDelay` 定放开时刻；`Split` 调条带（`SeedPoints` 为空时从头顶切）；`RemeshEdgeLength` 定切分前的重网格边长（默认 1 cm，≤ 0 直接切 LOD 0）。
+3. 点 `BakeSplit`：在 `StartTime` 的姿态上重网格、切分，烘到 `BakeAssetPath`（空 = `/Game/ClothSplit/SM_<骨骼网格名>_Split`，只标脏不存盘），并设成 `BakedSplit`。脚本用 `BakeSplitToAsset(路径, 是否存盘)`。设了 `BakedSplit`，运行时不再重网格、切分；换了骨骼网格（LOD 0 顶点数对不上）会写日志、不建布，要重烘。
+4. 编辑器视口里自动播放；`LoopPeriod` > 0 时到点 `Replay`（沿用切好的布，不重建）。改任何属性都会在下一帧 `Restart`：有 `BakedSplit` 时只读它，没有时现场切一遍。
+5. 示例关卡 `/Game/ClothSplitDemo/L_FallSplitDemo` 由 [`Scripts/MakeFallSplitDemo.py`](../Scripts/MakeFallSplitDemo.py) 生成：Quinn + `Mage_GroundSlam_RM`，放开时刻取骨盆下落最快的 1.02 s，条带材质仿 Houdini 渲染，切分烘在 `SM_Quinn_Split`。关卡已在时脚本只重烘切分。资产属于第三人称模板，所以关卡在工程里、不在插件里。
 
-⚠️ 蒙皮位置在 CPU 上算：编辑器里骨骼网格的 CPU 数据常在；cook 出去的包要在骨骼网格 LOD 0 上勾 Allow CPU Access，否则重建失败并写日志。
+⚠️ 蒙皮位置在 CPU 上算：编辑器里骨骼网格的 CPU 数据常在；cook 出去的包要在骨骼网格 LOD 0 上勾 Allow CPU Access，否则重建失败并写日志。烘出来的 StaticMesh 自己已经勾上了 Allow CPU Access（运行时从它读几何与 UV1 的顶点号）。
+
+⚠️ 烘焙关掉了这个 StaticMesh 的光照 UV 生成、法线切线重算，并用全精度 UV：UV1 存的是顶点号，被光照 UV 覆盖或降成半精度就对不上绑定。改它的构建设置后要重烘。
 
 ## 验证
 
-- `PCGPlugins.ComputeShaderGenerator.ClothSplit.*` 5 条（`ClothSim.*` 11 条照旧全过）：
+- `PCGPlugins.ComputeShaderGenerator.ClothSplit.*` 7 条（`ClothSim.*` 11 条照旧全过）：
   - `BandSplit`：100 cm 见方、2 cm 一格的竖网格从顶边中点切，27 条带 / 30 块；每个三角只在一条带里；不看焊接键焊回 51² 个点、看键时切口分开；旋流在面内且垂直于半径（沿等距线）；平滑过的点按锚点插回原平面误差 < 1e-3 cm。
   - `SetupKeepsCuts`：setup 后粒子 = (位置, 条带) 的组数，没有一条拉伸 / 弯曲约束跨过切口。
   - `AnchorsFollowAndRelease`：放开前跟着宿主平移误差 < 0.01 cm；满刚度、绳长 20 cm 时整块布被推开 20 ± 2 cm；收绳后回到锚点 < 1 cm。
   - `ParallelSkinning`：给小白人每根骨一个各不相同的刚体变换，`CSClothSkinning::ComputeSkinnedPositions` 与引擎的 `ComputeSkinnedPositions` 逐顶点比，3924 个位置逐位相同。
+  - `RemeshAndBind`：2 cm 一格的竖网格重网格到 4 cm（2601 → 618 点，边长中位数在 3–5 cm、面不离开原平面），切开后 22 条带；`BindToSurface` 绑回原网格，锚点插回顶点误差 < 1e-3 cm，UV 按重心插值误差 < 1e-4。
+  - `BakedSplit`：小白人以 3 cm 现场重网格 + 切分，再烘进一个 transient StaticMesh、按它重建。每个渲染顶点带着互不相同的烘焙顶点号（切口两侧没被并回去），只丢了没有三角引用的孤立顶点；有锚点的粒子数、块数与现场切的一样，跟随阶段两者的粒子包围盒差 < 0.1 cm，放开后照常甩出去。重建 94.6 → 8.7 ms。
   - `SplitActor`：引擎自带的 UE4 小白人（`TutorialTPP`），44 条带 / 229 块 / 4867 粒子；放开前粒子包围盒与参考姿态顶点的包围盒差 < 1.5 cm（切口平滑把指尖往里收约 1.2 cm）；放开 1 s 后有限、不停摆、条带离开身体。之后 `LoopPeriod` 到点重播：同一张网格、同样的块数，模拟帧数接着涨（没有重新 setup），布回到身体上，过了 `ReleaseDelay` 再放开一次。
-- 示例关卡（Quinn）：45 条带 / 110 块 / 50975 粒子，显存 15 MiB。真编辑器里（不进 PIE）从头跑一遍，0.56 s 是在动的角色，放开后 0.5 s 条带成环旋开，2.5 s 时脚下的条带被收回、头顶的仍在外面，全程不停摆。
+- 示例关卡（Quinn）。直接切 LOD 0 时：45 条带 / 110 块 / 50975 粒子，显存 15 MiB。烘焙版（1 cm）：44 条带 / 93 块 / 29576 粒子，显存 8.5 MiB。两版都在真编辑器里（不进 PIE）从头跑过：0.56 s 是在动的角色，放开后 0.5 s 条带成环旋开，2.5 s 时脚下的条带被收回、头顶的仍在外面，全程不停摆。
 
 ## 性能
 
@@ -171,6 +184,18 @@ ACSClothSplitActor（编辑器视口里也跑）
   - 跟随阶段整个解算 0.20 ms。阴影多 0.28 ms：布每帧让 VSM 失效重画。
   - 渲染线程上 `CSClothSimulate` 0.64–0.69 ms，每帧建 424 个 RDG pass。
 
+烘焙版（1 cm 重网格，29,576 粒子，同一套测法）与上表「改后」的对比：
+
+| | 直接切 LOD 0 | 烘焙 1 cm |
+| --- | --- | --- |
+| 粒子 / 约束 | 50,978 / 26 万 | 29,576 / 14.4 万 |
+| `Restart`（游戏线程） | 266–270 ms | 39–41 ms（其中 `SetupFromMeshSync` 31–33 ms） |
+| 布料解算（GPU） | 1.47 ms，419 次派发，23 种颜色 | 1.21 ms，371 次派发，20 种颜色 |
+| 放开后 GPU 整帧 | 5.0 ms | 4.7 ms |
+| 游戏线程 | 6.2 ms | 6.3 ms |
+
+粒子少了 42%，解算只快了 18%：瓶颈在派发次数（颜色数 × substep），不在粒子数。游戏线程不变：每帧蒙皮的仍是 Body 的 4.6 万个 LOD 0 顶点（锚点挂在它们上面）。
+
 ## 读取方法
 
 `hython` 读 `.hip` 时只能读原文，不能求值：`parm.eval()`、`parm.keyframes()` 都会求表达式，表达式引用解算器输出时整个 Vellum 模拟会被 cook（2026-10-28 实测 22 GB 内存、十分钟不出来）。先 `parm.expression()` 拿原文，只对 `bezier()` 这类纯动画曲线读关键帧。`FitValue` 与 `KaLou_faceattrib` 在 hip 里是空壳嵌入定义，逻辑取自 kalou 库快照与 houdini-node-translator 技能里的重建记录。
@@ -178,9 +203,10 @@ ACSClothSplitActor（编辑器视口里也跑）
 ## 未做与开放问题
 
 - `BackVel` 只移植了表面旋流项；要更像原效果，可以把 Houdini 里的速度场烘成 UE 的 Vector Field，GPU 上按位置采样。
-- 每帧在 CPU 上蒙皮全部 LOD 0 顶点，已按段并行（0.36 ms，见「性能」）。再往下是挪到 GPU：每帧只传骨骼矩阵，锚点在 Predict 前一个 pass 里算，CPU 收集和每帧 0.8 MB 的上传一起省掉。
-- 第一次重建（`Restart`）仍在游戏线程上卡 ~270 ms，放置、开局、改属性时各一次。可以把切带挪到后台线程，或把切分结果存进 actor。
-- GPU 解算受派发次数限制：substep 16 → 8 能减半，但 16 是为了条带不出锯齿定的，要看效果；颜色数的下限是单个粒子挂的约束数。
+- substep：网格已是 Houdini 那样的均匀 1 cm，没有碎三角了，可能不再需要 16 个 substep（Houdini 只用 1 substep × 6 次迭代）。GPU 解算受派发次数限制，16 → 8 能减半，要看条带会不会出锯齿。
+- 每帧在 CPU 上蒙皮全部 LOD 0 顶点，已按段并行（0.36 ms，见「性能」）。再往下是挪到 GPU：每帧只传骨骼矩阵，锚点在 Predict 前一个 pass 里算，CPU 收集和每帧 0.5 MB 的上传一起省掉。
+- 烘焙后重建仍有 31–33 ms 花在 `SetupFromMeshSync`（回读网格、焊接、建约束、上色）。约束与上色也能烘进 `UCSClothSplitBakeData`，重建就只剩上传。
+- 没烘焙时现场切仍要 ~270 ms（重网格后更久），放置、开局、改属性时各一次。
 - 条带只在 `StartTime` 的姿态上切一次；Houdini 也是在冻结的第 1 帧上切。
 - 没有自碰撞（Houdini 的 Vellum 同样关着自碰撞）；运动矢量、光追 BLAS 的限制同 [`GpuClothSim_Plan.md`](GpuClothSim_Plan.md)。
 - 倒放（条带汇聚成人）在实时里不能直接倒着解；用曲线让绳从长收到 0 可以做出「汇聚」，没做成默认。
