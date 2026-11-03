@@ -378,6 +378,25 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 - 细分的中点不共享，每次切分各自生成，因此顶点比 C# 多（Palmsland 378 万个，C# 新增 201 万个），但位置相同，网格仍然闭合。C# 超过 20 轮会抛异常，GPU 的深度上限是 19 层。
 - 车流只有预览（见[车流预览与桥墩](#车流预览与桥墩)），没有市民出行。原版按 `Updated` 标记只重算改动实体的做法没有照搬，局部更新改为按 tile 重写，见[局部更新](#局部更新)。
 
+## 小路与大路小场景
+
+`Scripts/CS2Road/MakeRoadTierMini.py` 生成 `/PCGPlugins/CSRoadNet/L_RoadTierMini`，专测大路挪动时小路的裁切、接驳和复原，打开后几秒就建完。平地上 2 × 2 个 80 m 的街块，由小路围成（东西向 3 条 `Alley`、南北向 3 条 `Small Road`，都是 `Tier = Alley`），西边两个街块里有 4 条形状各异的 2 m 巷子，再加 3 条大路（`Medium Road`），共 13 根样条，分 64 m 的 tile；北边小巷与 A 之间还有一栋带车库的特殊建筑。房子用路网自带的挤出体，填满街块（[城市布局](#城市布局)里的「填满街块」），关卡里没有插件外的东西，哪台机器打开都一样。说明文字浮在 26 m 高处，高过所有房子。不开引擎时 `python MakeRoadTierMini.py --check` 核对大路在原处和回归检查挪到的位置上：每处与小路的交叉不小于 30°，离小路之间的路口不少于 30 m、离巷子拐点不少于 15 m（再近就是会挂 GPU 的细长路口）；A 在原处时离所有小路都在覆盖范围外；巷子的每个点都在大路覆盖范围外（不会整条被盖掉）。
+
+| 道路 | 摆法 | 拖它看什么 |
+| --- | --- | --- |
+| `A Drag me` | 街块南边，离所有小路都在覆盖范围外 | 拖进网格：横穿的小路和巷子 F 裁开成十字路口，经过的街块房子重排；拖回去复原 |
+| `B Drawn` | 沿网格西边，三条小巷的端点落在它的样条点上 | 画好的 T 形路口保持；往东挪就压住小巷西端，裁掉后重新接上；往西挪开 17 m 以上（覆盖不到小巷端点），小巷停在原处成圆头断头（小路只裁不长，实测西移 25 m 如此，挪回复原） |
+| `C Crossing` | 南北向，穿过东边两个街块的中间 | 三条小巷各裁成一个十字路口；左右挪动时裁口跟着走。它把东边街块挤得每侧只剩约 14 m 的地，所以那里不放巷子 |
+| `D Lane bends`（巷子） | 西南街块，从南边小巷北上，两处拐弯后接到中间那条小巷 | 拐弯处的短段也有房子；两侧房子离巷子 0.5 m、每栋沿巷子 7 m 宽；接小巷的 T 形路口是干净的圆角 |
+| `E Lane branch`（巷子） | 从 D 的第一个拐点向西接到西边的街 | 巷子之间的 T 形路口，巷子与街的 T 形路口 |
+| `G Lane dead end`（巷子） | 从 D 上向西伸出 25 m 的死胡同 | 尽头之外的地归西边那条街的房子 |
+| `F Lane curve`（巷子） | 西北街块，接着 D 穿过中间那条小巷（四岔路口），S 形北上接到北边的小巷 | 弯曲的巷子；A 拖到 y = 120 m 时横穿它 |
+| `H House with garage`（特殊建筑，不是样条） | 北边小巷与 A 之间，车库朝 A，车门离 A 的中线 33 m | 路网从车库拉一条 `Alley` 车道，T 形接到 A 上（见[城市布局](#城市布局)的「车库」）；拖房子、挪车库的菱形、拖 A，车道和路口跟着走；A 拖进网格后车库前方没有大路，车道消失，拖回来恢复 |
+
+巷子都是 `Alley 2m`（见[自定义道路](#自定义道路)）。挪动时注意：大路离平行的小路中心线 21 m 以内（两边半宽加 `AlleyClearance`）会把那条小路整条盖掉，离巷子是 14.5 m，那是另一种情况。巷子离平行的街道不到约 25 m 时，两边的房子都不够半个 `MinDepth`，中间会空出一条。
+
+`Scripts/CS2Road/RoadTierMiniCheck.py` 是它的回归检查：在编辑器里打开关卡后运行，等路网稳定（没有积压的 tile、全部烘成 Nanite、路数和房子数 30 帧不变）后拍俯视图，再依次把 A 拖到街块中间（y = 120 m）、B 东移 10 m、C 西移 10 m、带车库的房子东移 25 m、车库换到房子背面，每次等稳定、拍图、核对车库接没接上（A 拖入后和车库在背面时前方都没有大路，应当没接上），挪回、再等稳定，核对路数、房子数和接上的车库数复原。结果和图在 `Saved/CS2RoadTierMini`，日志最后一行是 `CS2ROADTIERMINI VERDICT OK` 或 `FAILED`；不存盘，不关编辑器。编辑器在后台时不 tick actor，脚本会一直等烘焙，所以编辑器要带[样条路网](#样条路网)里那个 `-ini` 参数启动。11-02 晚加上带车库的房子后实跑通过：基线 45 条边、147 栋房子，车库接 A（车门离中线 33 m）；A 拖入后 51 条、102 栋，车库没接上；B 东移 45 条、133 栋；C 西移 45 条、140 栋；房子东移 45 条、146 栋，仍接 A；车库在背面 44 条、148 栋，没接上；五次挪回都复原。更早（11-02 下午，2 m 巷子、填满街块、还没有车库）：基线 44 条边、148 栋房子；A 拖入后 51 条边、102 栋，B 东移 44 条、134 栋，C 西移 44 条、141 栋，三次挪回都复原，没有细分不收敛的警告。同一天另把 `MinFreeVideoMemory` 设成 1,000,000 MiB 再拖 A：300 帧里路和房子都不变、`bWaitingForVideoMemory` 置位、没有报错；改回 512 MiB 后 A 的挪动照常落地，挪回复原（当时还是 3 m 巷子）。
+
 ## 问题场景关卡
 
 `Scripts/CS2Road/MakeRoadEdgeCases.py` 生成 `/PCGPlugins/CSRoadNet/L_RoadEdgeCases`：一个分 tile（256 m）、烘 Nanite 的路网 actor，下面挂 49 组容易出问题的样条路，组与组隔开，地上有编号和说明。地面平在 0 m，不设 `NetworkFile`，路的高程就是它的高度。不开引擎时 `python MakeRoadEdgeCases.py --preview <png>` 只画布局图，并检查金标数据是否齐全、各组是否互相重叠。10-29 只写了脚本，还没在引擎里生成过关卡。
@@ -456,6 +475,8 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 - `Scripts/CS2Road/MakePalmslandSplines.py`：把 Palmsland 快照转成样条，存成 `L_PalmslandSplines`，见[从快照转换](#从快照转换)。`CS2ROAD_NETWORK` 可换快照。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖。
 - `Scripts/CS2Road/MakePalmslandTestLevel.py`：把 `L_PalmslandSplines` 补成通用测试关卡（Landscape、桥墩、小路街区和两条大路、特殊建筑、批量房子）并存盘，见[Palmsland 通用测试关卡](#palmsland-通用测试关卡)。只补缺的，可以重复跑。用无头编辑器的 `-ExecutePythonScript` 运行。
 - `Scripts/CS2Road/PalmslandTestShots.py`：打开 `L_PalmslandSplines`，等全部 tile 写完并烘成 Nanite，再从 12 个机位拍到 `Saved/CS2PalmslandShots`。运行方式同 `LocalUpdateTiming.py`（完整编辑器加 `-ini` 参数），不存盘。
+- `Scripts/CS2Road/MakeRoadTierMini.py`：生成小路与大路小场景 `L_RoadTierMini`，见[小路与大路小场景](#小路与大路小场景)。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖；`--check` 不开引擎核对布局。
+- `Scripts/CS2Road/RoadTierMiniCheck.py`：`L_RoadTierMini` 的回归检查，在打开了该关卡的编辑器里运行，见同一节。
 - `Scripts/CS2Road/MakeRoadEdgeCases.py`：生成问题场景关卡 `L_RoadEdgeCases`，见[问题场景关卡](#问题场景关卡)。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖；金标场景读 `Data/CS2Road/Golden`（或 `CS2ROADGOLDEN`），缺的跳过。
 - `Scripts/CS2Road/MakeRoadDecalMaterial.py`：生成贴花母材质 `/PCGPlugins/CSRoadNet/M_RoadDecal` 和 `M_RoadDecalFitted`，用无头编辑器的 `-ExecutePythonScript` 运行，已存在时就地重建。材质着色器按下标读的实例数据布局见 `CSRoadDecalInstances.h`，两边要一起改。
 - `Scripts/CS2Road/CityDemoShots.py`：打开 `L_CityDemo`，给整网、分 tile、挪大路、挪特殊建筑计时，再从 4 个机位拍到 `Saved/CS2CityShots`。用完整编辑器运行，不存盘。
