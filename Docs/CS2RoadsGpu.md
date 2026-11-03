@@ -9,7 +9,7 @@
 - 关卡里放 `ACSRoadNetworkActor`，在它下面挂 `ACSRoadSplineActor`，一根样条是一条路，见[样条路网](#样条路网)。路网 actor 是 manager：设置、操作和统计在它上面，建出来的东西在它名下一个单独的内容 actor 里，见[Manager 与内容 actor](#manager-与内容-actor)。示例关卡 `/PCGPlugins/CSRoadNet/L_SplineRoadDemo` 由 8 根样条组成，打开后拖样条点即可看到路网实时重建。
 - `NetworkFile` 指向 `cs2-road-network-v1` 快照时提供地形；相对路径从插件的 `Data/CS2Road` 算起，例如 Palmsland 的 `Palmsland/network.json`，见[数据](#数据)。转换是函数工具，不在详情面板上：`UCSRoadNetTools::ConvertToSplines(Network)` 把快照里的路转成样条路，`UCSRoadNetTools::ConvertTerrainToLandscape(Network, Material)` 把快照地形转成 Landscape（Python：`unreal.CSRoadNetTools.convert_to_splines(network)`，编辑器工具蓝图同名节点）。路网只从样条建，不直接读快照里的路。Palmsland 整张图转好的样条在 `/PCGPlugins/CSRoadNet/L_PalmslandSplines`，它也是测试高架桥、大路、小路和房子的通用关卡，见[Palmsland 通用测试关卡](#palmsland-通用测试关卡)。
 - `bShapeTerrain` 让关卡的 Landscape 跟着地面路走，见[地形 edit layer](#地形-edit-layer)。
-- 城市局部更新：`bLocalUpdate` 让路网分 tile 重建，见[局部更新](#局部更新)；样条路分大路和小路，见[大路与小路](#大路与小路)；特殊建筑、小路生成和批量补房见[城市布局](#城市布局)。示例关卡 `/PCGPlugins/CSRoadNet/L_CityDemo`。
+- 城市局部更新：`bLocalUpdate` 让路网分 tile 重建，见[局部更新](#局部更新)；样条路分大路和小路，见[大路与小路](#大路与小路)；特殊建筑、小路生成和批量补房见[城市布局](#城市布局)。示例关卡 `/PCGPlugins/CSRoadNet/L_CityDemo`；专门试小路与大路怎么接的小关卡是 `/PCGPlugins/CSRoadNet/L_RoadTierTest`，见[小路与大路测试关卡](#小路与大路测试关卡)；更小、只用插件自带内容的是 `L_RoadTierMini`，见[小路与大路小场景](#小路与大路小场景)。
 - 改属性、移动松手、关卡加载或复制 actor 时自动重建，也可以点 `Rebuild`。常驻网格不存盘，加载后重新生成。
 - `AssetDirectory` 留空时读插件 `Data/CS2Road/Prefabs` 下的 `prefabs.json`、`raw-prefabs.json`、`pieces.bin`，见[数据](#数据)。同一目录每个进程只加载一次，日志记下读的是哪个目录（`CS2 road prefabs loaded from`）。
 - 材质按 atlas 的 BaseColor 贴图名（目录里的 `material_bindings`）在 `MaterialFolder` 找 `M_CS2_<NN>_<BaseColor>`，这些材质由 `Scripts/ImportCS2Roads.py` 生成。找不到的 atlas 列在 `MissingAtlases`，改用 `FallbackMaterial`。
@@ -380,6 +380,25 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 - 细分的中点不共享，每次切分各自生成，因此顶点比 C# 多（Palmsland 378 万个，C# 新增 201 万个），但位置相同，网格仍然闭合。C# 超过 20 轮会抛异常，GPU 的深度上限是 19 层。
 - 车流只有预览（见[车流预览与桥墩](#车流预览与桥墩)），没有市民出行。原版按 `Updated` 标记只重算改动实体的做法没有照搬，局部更新改为按 tile 重写，见[局部更新](#局部更新)。
 
+## 小路与大路测试关卡
+
+`Scripts/CS2Road/MakeRoadTierTest.py` 生成 `/PCGPlugins/CSRoadNet/L_RoadTierTest`：平地上一片约 500 × 240 m 的小路网格（东西向 `Alley`、南北向 `Small Road`，都是 `Tier = Alley`），上面 6 条大路各占一处，共 14 根样条（`L_PalmslandSplines` 有 4,083 根），分 128 m 的 tile。每条大路旁的标签写着它的编号。不开引擎时 `python MakeRoadTierTest.py --preview <png>` 画布局图，并检查大路与小路的夹角不小于 30°、交点离网格节点不小于 30 m（否则会形成细长路口，见[路口接缝与细分](#路口接缝与细分)）。关卡已存在时脚本拒绝覆盖。
+
+| 大路 | 摆法 | 看什么 |
+| --- | --- | --- |
+| `A Crossing` | `Medium Road`，在街块中间直穿四条小巷 | 每处裁口落在同一点，成十字路口 |
+| `B Slant` | `Medium Road`，以 39° 和 51° 斜穿两条小巷和一条小路，停在街块里 | 斜接的路口，大路尽头不碰小路 |
+| `C Drawn` | `Medium Road`，沿网格西边，小巷的端点落在它的样条点上 | 画好的 T 形路口按画好的保持；挪开后被覆盖的段才裁切、接上 |
+| `D Along` | `Medium Road`，离东边那条小路 3 m、顺着它走 80 m | 压住的段没了，两段残路接到它的两端；停在它底下的小巷垂直接上 |
+| `E Over` | `Highway Twoway - 2 lanes`，带坡道，从 12 m 高跨过一条小巷 | 小巷不裁；高速不划区，所以没有悬空的房子 |
+| `F Drag me` | `Medium Road`，离所有路都够远 | 用来拖进网格，看小路和房子的反应 |
+
+房子用 6 张 Nanite 网格（`/PCGPlugins/CSRoadNet/Houses`，见[城市布局](#城市布局)的网格房子）：`/Game/Hong_Kong_Street` 里整栋的房子，选的是 `SM_House_04`、`08`、`09`、`11`、`12`、`14`。Nanite 画不了半透明，其余的房子里除了 `SM_House_10` 都带 `M_PBR_Translucent` 的贴花槽；`SM_House_10` 没有这种槽，但有 16 m 宽，默认 14 m 宽的地块放不下。脚本复制一份再开 Nanite，包里原来的网格不动，但两张母材质 `M_Wall`、`M_PBR` 要勾 `bUsedWithNanite`，这一点改的是包里的资产。关卡因此依赖 Hong Kong 这个包；没有它时，网格的材质槽会空着。这些房子的正面（窗和阳台）朝 +Y，背面是空白墙，正是 `BuildingMeshFrontYaw` 的默认值 90°。
+
+`Scripts/CS2Road/RoadTierTestShots.py` 用完整编辑器跑验收：等 tile 全部烘成 Nanite，核对每栋房子都是走 Nanite 路的实例，从 7 个机位拍图；再逐个做 7 种编辑（`F` 横穿小巷、`F` 顺着小巷、`A` 挪走、`C` 向西和向东挪、`D` 挪走、`D` 与小路夹 14° 的楔形），每次拍俯视和近景，挪回后核对路数和每栋房子的位置与编辑前相同。最后一种就是曾经让 GPU 挂起的那种路口，所以 `summary.json` 每次编辑后都写一遍，编辑器真的崩了也留得下前面的结果。结果在 `Saved/CS2RoadTierShots`，日志末尾有 `CS2ROADTIERSHOT VERDICT`。
+
+10-31 的状态：关卡和网格已生成，但当时的机器上没有 CS2 prefab 数据（`D:/MyProject/CitiesSkylines-Road2-C#/Assets/CS2`），路网建不出来，所以**路面、小路裁切和路旁的房子都还没有在这个关卡里看到过**，验收脚本也只验证了不依赖路网的部分。房子这一半单独验证过：同样的摆放算法在一条没有路面的街上，6 张网格都走 Nanite 路（`IsNaniteRenderPath`、`DebugGetDrawnAssetMismatchSync` 通过），材质、阴影和正面朝向在画面上是对的。
+
 ## 小路与大路小场景
 
 `Scripts/CS2Road/MakeRoadTierMini.py` 生成 `/PCGPlugins/CSRoadNet/L_RoadTierMini`，专测大路挪动时小路的裁切、接驳和复原，打开后几秒就建完。平地上 2 × 2 个 80 m 的街块，由小路围成（东西向 3 条 `Alley`、南北向 3 条 `Small Road`，都是 `Tier = Alley`），西边两个街块里有 4 条形状各异的 2 m 巷子，再加 3 条大路（`Medium Road`），共 13 根样条，分 64 m 的 tile；北边小巷与 A 之间还有一栋带车库的特殊建筑。房子用路网自带的挤出体，填满街块（[城市布局](#城市布局)里的「填满街块」），关卡里没有插件外的东西，哪台机器打开都一样。说明文字浮在 26 m 高处，高过所有房子。不开引擎时 `python MakeRoadTierMini.py --check` 核对大路在原处和回归检查挪到的位置上：每处与小路的交叉不小于 30°，离小路之间的路口不少于 30 m、离巷子拐点不少于 15 m（再近就是会挂 GPU 的细长路口）；A 在原处时离所有小路都在覆盖范围外；巷子的每个点都在大路覆盖范围外（不会整条被盖掉）。
@@ -481,6 +500,8 @@ Palmsland 转成样条（`LocalUpdateTiming.py`，3,894 根样条、5,667 条路
 - `Scripts/CS2Road/MakePalmslandSplines.py`：把 Palmsland 快照转成样条，存成 `L_PalmslandSplines`，见[从快照转换](#从快照转换)。`CS2ROAD_NETWORK` 可换快照。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖。
 - `Scripts/CS2Road/MakePalmslandTestLevel.py`：把 `L_PalmslandSplines` 补成通用测试关卡（Landscape、桥墩、小路街区和两条大路、特殊建筑、批量房子）并存盘，见[Palmsland 通用测试关卡](#palmsland-通用测试关卡)。只补缺的，可以重复跑。用无头编辑器的 `-ExecutePythonScript` 运行。
 - `Scripts/CS2Road/PalmslandTestShots.py`：打开 `L_PalmslandSplines`，等全部 tile 写完并烘成 Nanite，再从 12 个机位拍到 `Saved/CS2PalmslandShots`。运行方式同 `LocalUpdateTiming.py`（完整编辑器加 `-ini` 参数），不存盘。
+- `Scripts/CS2Road/MakeRoadTierTest.py`：生成小路与大路测试关卡 `L_RoadTierTest` 和它的 Nanite 房子，见[小路与大路测试关卡](#小路与大路测试关卡)。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖。
+- `Scripts/CS2Road/RoadTierTestShots.py`：`L_RoadTierTest` 的验收和出图，见同一节。运行方式同 `LocalUpdateTiming.py`（完整编辑器加 `-ini` 参数），不存盘。
 - `Scripts/CS2Road/MakeRoadTierMini.py`：生成小路与大路小场景 `L_RoadTierMini`，见[小路与大路小场景](#小路与大路小场景)。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖；`--check` 不开引擎核对布局。
 - `Scripts/CS2Road/RoadTierMiniCheck.py`：`L_RoadTierMini` 的回归检查，在打开了该关卡的编辑器里运行，见同一节。
 - `Scripts/CS2Road/MakeRoadEdgeCases.py`：生成问题场景关卡 `L_RoadEdgeCases`，见[问题场景关卡](#问题场景关卡)。运行方式同 `MakeSplineRoadDemo.py`，关卡已存在时拒绝覆盖；金标场景读 `Data/CS2Road/Golden`（或 `CS2ROADGOLDEN`），缺的跳过。
