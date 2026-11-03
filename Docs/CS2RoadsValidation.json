@@ -1,0 +1,19 @@
+{
+  "map": "/PCGPlugins/CS2Roads/Maps/L_Palmsland",
+  "mesh_actors": 374,
+  "triangles": 34514319,
+  "materials": 13,
+  "textures": 29,
+  "screenshots": [
+    "palmsland-overview.png",
+    "palmsland-interchange.png",
+    "palmsland-highway-close.png",
+    "palmsland-junction.png"
+  ],
+  "validated_at": "2026-10-25T17:52:54.7556669+08:00",
+  "unreal_version": "5.7.4",
+  "road_segments": 5667,
+  "max_bounds_error_cm": 0.00390625,
+  "native_asset_files": 417,
+  "screenshots_visually_reviewed": true
+}
