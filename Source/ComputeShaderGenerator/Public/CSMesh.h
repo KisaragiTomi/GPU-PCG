@@ -674,6 +674,27 @@ public:
 	 */
 	bool EditMeshAsync(TFunction<void(FCSMeshEditContext&)> EditFunc, TFunction<void(bool)> OnComplete = nullptr);
 
+	/**
+	 * EnsureCapacitySync + EditMeshAsync for a mesh with no GPU allocation yet, with no flush at all:
+	 * the render thread allocates the declared streams at this capacity (counters and args zeroed, as
+	 * AllocateSync does) right before it records the edit, in the same command. Everything else is
+	 * EditMeshAsync's contract — owned EditFunc, OnComplete on the game thread, in flight until then.
+	 *
+	 * The price of skipping the flush: the allocation's state (the pooled buffers, AllocationGeneration,
+	 * the dropped section table) is written on the render thread with nothing fencing the game thread, so
+	 * NOTHING may look at this mesh until OnComplete — above all, no render component may draw it (its
+	 * CreateSceneProxy reads the buffers). It is for a fresh mesh written in the background and shown
+	 * once it has landed: a double buffer for a mesh on screen is a new UCSMesh written this way,
+	 * swapped in from OnComplete, and the old one handed back (ReleaseDeferred). Stream layout and the
+	 * arg-set count are declared beforehand (EnsureIndirectDrawCapacitySync on an unallocated mesh only
+	 * records the declaration).
+	 *
+	 * Refused (false, nothing changed, OnComplete never runs) as EditMeshAsync is, when the mesh is
+	 * already allocated, and when the VRAM pre-flight refuses the allocation (bCheckGpuMemoryBudget).
+	 * Game thread only.
+	 */
+	bool AllocateAndEditAsync(int32 InVertexCapacity, int32 InIndexCapacity, TFunction<void(FCSMeshEditContext&)> EditFunc, TFunction<void(bool)> OnComplete = nullptr);
+
 	/** True between an accepted EditMeshAsync and its completion callback. */
 	bool IsEditInFlight() const { return bAsyncEditInFlight; }
 
@@ -884,6 +905,10 @@ private:
 	 *  on a guess. Never prompts: allocations happen inside operators, and a modal dialog per
 	 *  operator is not a thing the callers of this API can survive. */
 	bool ConfirmGpuMemoryBudget(int64 RequestedBytes, const TCHAR* OperationName) const;
+
+	/** EditMeshAsync's queueing and game-thread hop, its checks passed. bAllocate: the render thread first
+	 *  allocates the streams at the capacities already set (AllocateAndEditAsync). */
+	void EnqueueAsyncEdit(bool bAllocate, TFunction<void(FCSMeshEditContext&)> EditFunc, TFunction<void(bool)> OnComplete);
 
 	FCSMeshResidentRef Resident;
 

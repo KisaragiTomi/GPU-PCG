@@ -1348,6 +1348,51 @@ bool UCSMesh::EditMeshAsync(TFunction<void(FCSMeshEditContext&)> EditFunc, TFunc
 		return false;
 	}
 
+	EnqueueAsyncEdit(false, MoveTemp(EditFunc), MoveTemp(OnComplete));
+	return true;
+}
+
+bool UCSMesh::AllocateAndEditAsync(int32 InVertexCapacity, int32 InIndexCapacity, TFunction<void(FCSMeshEditContext&)> EditFunc, TFunction<void(bool)> OnComplete)
+{
+	if (!IsInGameThread())
+	{
+		UE_LOG(LogCSMesh, Warning, TEXT("[CSMesh] Async allocation rejected: not on the game thread."));
+		return false;
+	}
+	if (Resident.IsValid() && Resident->IsAllocated())
+	{
+		UE_LOG(LogCSMesh, Warning, TEXT("[CSMesh] Async allocation rejected: the mesh is allocated already (EditMeshAsync edits it)."));
+		return false;
+	}
+	if (bAsyncEditInFlight)
+	{
+		UE_LOG(LogCSMesh, Warning, TEXT("[CSMesh] Async allocation rejected: an edit is already in flight on this mesh."));
+		return false;
+	}
+	if (!EditFunc)
+	{
+		UE_LOG(LogCSMesh, Warning, TEXT("[CSMesh] Async allocation rejected: no operator was supplied."));
+		return false;
+	}
+
+	if (!Resident.IsValid()) Resident = MakeShared<FCSMeshResident, ESPMode::ThreadSafe>();
+	if (Resident->Streams.Num() == 0) Resident->AddStandardTriangleStreams(Resident->NumIndirectDraws);
+
+	// The same rounding as AllocateSync.
+	const uint32 WantVertices = FMath::Max(uint32(FMath::Max(InVertexCapacity, 3)), CSMesh_MinCapacity);
+	const uint32 WantIndices = FMath::Max(((uint32(FMath::Max(InIndexCapacity, 3)) + 2u) / 3u) * 3u, CSMesh_MinCapacity);
+	if (!ConfirmGpuMemoryBudget(Resident->GetRequiredBytes(WantVertices, WantIndices), TEXT("AllocateAsync"))) return false;
+
+	// As in AllocateSync, the capacities are the game thread's to set; the render thread allocates from them.
+	Resident->VertexCapacity = WantVertices;
+	Resident->IndexCapacity = WantIndices;
+	Resident->WorldBounds = FBox(ForceInit);
+	EnqueueAsyncEdit(true, MoveTemp(EditFunc), MoveTemp(OnComplete));
+	return true;
+}
+
+void UCSMesh::EnqueueAsyncEdit(bool bAllocate, TFunction<void(FCSMeshEditContext&)> EditFunc, TFunction<void(bool)> OnComplete)
+{
 	bAsyncEditInFlight = true;
 
 	// A shared ref, not the raw pointer EditMeshSync hands over: without the flush, this UCSMesh can
@@ -1357,12 +1402,16 @@ bool UCSMesh::EditMeshAsync(TFunction<void(FCSMeshEditContext&)> EditFunc, TFunc
 	TWeakObjectPtr<UCSMesh> WeakThis(this);
 
 	ENQUEUE_RENDER_COMMAND(CSMeshEditAsync)(
-		[ResidentRef, WeakThis, EditFunc = MoveTemp(EditFunc), OnComplete = MoveTemp(OnComplete)](FRHICommandListImmediate& RHICmdList) mutable
+		[ResidentRef, WeakThis, bAllocate, EditFunc = MoveTemp(EditFunc), OnComplete = MoveTemp(OnComplete)](FRHICommandListImmediate& RHICmdList) mutable
 		{
+			// AllocateAndEditAsync: nothing looks at this set until the hop below, so the buffers go in here.
+			if (bAllocate) ResidentRef->AllocateBuffers();
 			FCSMeshEditContext::FStagedPublish Staged;
 			{
 				FRDGBuilder GraphBuilder(RHICmdList, RDG_EVENT_NAME("CSMesh.EditAsync"));
 				FCSMeshEditContext Context(GraphBuilder, *ResidentRef, FCSMeshEditContext::EKind::OwnedGraphAsync);
+				// Fresh pooled buffers hold the previous tenant's bytes: the counters and the args zeroed first, as AllocateSync does.
+				if (bAllocate) CSMesh_AddClearCountersPasses(Context);
 				EditFunc(Context);
 				CSMesh_FinalizeGraph(GraphBuilder, Context);
 				Staged = Context.GetStagedPublish();
@@ -1387,8 +1436,6 @@ bool UCSMesh::EditMeshAsync(TFunction<void(FCSMeshEditContext&)> EditFunc, TFunc
 				if (OnComplete) OnComplete(Mesh != nullptr);
 			});
 		});
-
-	return true;
 }
 
 bool UCSMesh::ConfirmGpuMemoryBudget(int64 RequestedBytes, const TCHAR* OperationName) const
