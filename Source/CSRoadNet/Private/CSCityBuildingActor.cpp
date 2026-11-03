@@ -1,12 +1,9 @@
 #include "CSCityBuildingActor.h"
 
 #include "CSCityLayout.h"
-#include "CSGpuMeshTypes.h"
-#include "CSMesh.h"
-#include "CSMeshOps.h"
-#include "CSMeshRenderComponent.h"
 #include "CSRoadNetworkActor.h"
-#include "Materials/MaterialInterface.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 
 UCSCityOutlineComponent::UCSCityOutlineComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -34,10 +31,8 @@ ACSCityBuildingActor::ACSCityBuildingActor()
 	PrimaryActorTick.bCanEverTick = false;
 	Outline = CreateDefaultSubobject<UCSCityOutlineComponent>(TEXT("Outline"));
 	RootComponent = Outline;
-	// World-space streams drawn with an absolute transform: never the root (it would apply the
-	// actor's placement twice).
-	Mesh = CreateDefaultSubobject<UCSMeshRenderComponent>(TEXT("Mesh"));
-	Mesh->SetupAttachment(Outline);
+	Blocks = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("Blocks"));
+	Blocks->SetupAttachment(Outline);
 }
 
 TArray<FVector2D> ACSCityBuildingActor::Footprint() const
@@ -84,22 +79,36 @@ TArray<FString> ACSCityBuildingActor::GetRoadPrefabOptions() const
 
 void ACSCityBuildingActor::Rebuild()
 {
-	if (!Mesh || IsTemplate() || !GetWorld()) return;
-	FCSGpuMeshCPUData Data;
-	CSCity::AppendPrism(Data, Footprint(), GetActorLocation().Z, double(Height) * 100.0, Color);
-	UMaterialInterface* Surface = Material ? Material.Get() : DefaultMaterial();
-	if (!Prism || Prism->GetOuter() != Mesh) Prism = NewObject<UCSMesh>(Mesh);
-	Prism->Materials = { Surface };
-	Prism->NotifyMaterialsChanged();
-	Mesh->MeshMaterial = Surface;
-	if (Data.Indices.Num() >= 3 && UCSMeshOps::CopyFromMeshSnapshot(Prism, Data)) Mesh->SetGpuMesh(Prism);
-	else Mesh->SetGpuMesh(nullptr);
+	if (!Blocks || IsTemplate() || !GetWorld()) return;
+	UStaticMesh* Piece = Module ? Module.Get() : DefaultModule();
+	if (Blocks->GetStaticMesh() != Piece) Blocks->SetStaticMesh(Piece);
+	TArray<FTransform> Pieces;
+	if (Piece)
+	{
+		const FBox Bounds = Piece->GetBoundingBox();
+		CSCity::AssembleBlock(CSCity::HullBlock(Footprint(), GetActorLocation().Z, double(Height) * 100.0), Bounds, double(StoreyHeight) * 100.0, Pieces);
+		// The garage door: a slab 3 m wide and 2.6 m high, 10 cm into the wall and 20 cm out of it.
+		FVector Door;
+		FVector Facing;
+		if (GarageDoor(Door, Facing))
+		{
+			CSCity::FBlock Slab;
+			Slab.Base = Door + Facing * 5.0;
+			Slab.Front = FVector2D(Facing);
+			Slab.Width = 300.0;
+			Slab.Depth = 30.0;
+			Slab.Height = 260.0;
+			Pieces.Add(CSCity::BlockPiece(Slab, Bounds));
+		}
+	}
+	Blocks->ClearInstances();
+	Blocks->AddInstances(Pieces, /*bShouldReturnIndices*/ false, /*bWorldSpace*/ true);
 	NotifyNetwork();
 }
 
-UMaterialInterface* ACSCityBuildingActor::DefaultMaterial()
+UStaticMesh* ACSCityBuildingActor::DefaultModule()
 {
-	return LoadObject<UMaterialInterface>(nullptr, TEXT("/PCGPlugins/MeshBoolean/M_VertexColor.M_VertexColor"));
+	return LoadObject<UStaticMesh>(nullptr, TEXT("/PCGPlugins/CSRoadNet/Houses/SM_CityBlock.SM_CityBlock"));
 }
 
 void ACSCityBuildingActor::NotifyNetwork() const
@@ -116,8 +125,8 @@ void ACSCityBuildingActor::OnConstruction(const FTransform& Transform)
 void ACSCityBuildingActor::PostRegisterAllComponents()
 {
 	Super::PostRegisterAllComponents();
-	// The prism is transient: a loaded or duplicated building has none until it builds.
-	if (!IsTemplate() && GetWorld() && Mesh && !Mesh->HasGeneratedGeometry()) Rebuild();
+	// A building saved before it had copies (or with the module gone) puts them where they go.
+	if (!IsTemplate() && GetWorld() && Blocks && Blocks->GetInstanceCount() == 0) Rebuild();
 }
 
 void ACSCityBuildingActor::Destroyed()

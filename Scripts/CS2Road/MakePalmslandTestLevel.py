@@ -81,13 +81,12 @@ def road(network, label, prefab, points):
     return actor
 
 
-def building(label, x, z, size, yaw, height, setback, colour):
+def building(label, x, z, size, yaw, height, setback):
     """A special building on the landscape: a rectangular outline (metres) turned by yaw (degrees, UE), pushed up height (m)."""
     actor = ACTORS.spawn_actor_from_class(unreal.load_class(None, "/Script/CSRoadNet.CSCityBuildingActor"), ue(x, z, FLAT - 0.5), unreal.Rotator(0.0, 0.0, yaw))
     actor.set_actor_label(label)
     actor.set_editor_property("height", height, notify_mode=NEVER)
     actor.set_editor_property("setback", setback, notify_mode=NEVER)
-    actor.set_editor_property("color", unreal.LinearColor(*colour), notify_mode=NEVER)
     outline = actor.get_editor_property("outline")
     outline.clear_spline_points(False)
     half_x, half_y = size[0] * 50.0, size[1] * 50.0
@@ -141,8 +140,8 @@ def build():
     if not labelled("North-east District"):
         # 1. Special buildings first: their plots are reserved before the alleys are laid out.
         yaw = -math.degrees(TURN)
-        building("Town Hall", *along(250.0, -200.0), (60.0, 40.0), yaw, 22.0, 8.0, (0.80, 0.52, 0.38, 1.0))
-        building("Tower", *along(-200.0, 200.0), (24.0, 24.0), yaw + 30.0, 60.0, 6.0, (0.45, 0.55, 0.70, 1.0))
+        building("Town Hall", *along(250.0, -200.0), (60.0, 40.0), yaw, 22.0, 8.0)
+        building("Tower", *along(-200.0, 200.0), (24.0, 24.0), yaw + 30.0, 60.0, 6.0)
         # 2. The alleys, laid out once, turned to the roads around them; the western road crosses the
         # district's west end and cuts them.
         region = ACTORS.spawn_actor_from_class(unreal.load_class(None, "/Script/CSRoadNet.CSCityAlleyRegion"), ue(DISTRICT[0], DISTRICT[1], FLAT), unreal.Rotator(0.0, 0.0, yaw))

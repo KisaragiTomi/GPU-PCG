@@ -49,6 +49,9 @@ TArray<T*> Built(const ACSRoadNetworkActor* Network)
 	return Out;
 }
 
+// The eight corners of every batch building piece (an instance of its tile component's mesh), world space.
+TArray<FVector3f> BuildingCorners(const ACSRoadNetworkActor* Network);
+
 // Element-wise comparison with an absolute tolerance scaled by magnitude; logs the first mismatches.
 struct FCompare
 {

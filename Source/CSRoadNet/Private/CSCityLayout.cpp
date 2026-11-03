@@ -1,7 +1,5 @@
 #include "CSCityLayout.h"
 
-#include "CSGpuMeshTypes.h"
-
 namespace CSCity
 {
 namespace
@@ -850,11 +848,6 @@ TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine
 				FLot& Lot = Candidate.Lot;
 				Lot.Id = CSCityLayout_Mix(Anchor.Id ^ CSCityLayout_Mix(uint64(Slot) * 2 + (Side > 0.0 ? 1 : 0)));
 				const double Depth = FMath::Lerp(Settings.MinDepth, Settings.MaxDepth, CSCityLayout_Unit(Lot.Id ^ Seed ^ 1));
-				// Plaster, stone and brick tones, a little apart from each other.
-				static const FLinearColor Tones[] = { FLinearColor(0.82f, 0.76f, 0.66f), FLinearColor(0.70f, 0.70f, 0.68f), FLinearColor(0.66f, 0.42f, 0.33f), FLinearColor(0.88f, 0.84f, 0.74f), FLinearColor(0.56f, 0.60f, 0.64f) };
-				const FLinearColor Tone = Tones[CSCityLayout_Mix(Lot.Id ^ Seed ^ 3) % UE_ARRAY_COUNT(Tones)];
-				Lot.Color = Tone * float(0.9 + 0.2 * CSCityLayout_Unit(Lot.Id ^ Seed ^ 4));
-				Lot.Color.A = 1.0f;
 				Candidate.Front = FVector2D(Position) + Normal * (Side * Inner);
 				Candidate.Along = Tangent * Side;
 				Candidate.Back = Normal * Side;
@@ -962,40 +955,92 @@ double ReservedReach(const FLotSettings& Settings)
 	return 2.0 * LotStrip(Settings) + 6.0 * Settings.Gap + 100.0;
 }
 
-void AppendPrism(FCSGpuMeshCPUData& Out, const FPolygon& Footprint, double Base, double Height, const FLinearColor& Color)
+FBlock LotBlock(const FLot& Lot)
 {
-	if (Footprint.Num() < 3 || Height <= 0.0) return;
-	const FVector4f Tint(Color.R, Color.G, Color.B, 1.0f);
-	// Normals face out as cross(B - A, C - A); the indices go in the engine's winding (corners 2 and
-	// 3 swapped), as every resident-stream writer does (CSMeshBuild.h).
-	auto Face = [&Out, &Tint](const TArray<FVector>& Corners, const FVector& Normal, const FVector& Tangent)
-	{
-		const int32 First = Out.Positions.Num();
-		for (const FVector& Corner : Corners)
-		{
-			Out.Positions.Add(FVector3f(Corner));
-			Out.Normals.Add(FVector3f(Normal));
-			Out.Tangents.Add(FVector3f(Tangent));
-			Out.TexCoords().Add(FVector2f(float((Corner.X + Corner.Y) / 400.0), float(Corner.Z / 400.0)));
-			Out.Colors.Add(Tint);
-		}
-		for (int32 I = 1; I + 1 < Corners.Num(); I++)
-		{
-			Out.Indices.Append({ uint32(First), uint32(First + I + 1), uint32(First + I) });
-			Out.TriangleMaterialSlots.Add(0);
-		}
-	};
-	const double Top = Base + Height;
-	TArray<FVector> Roof;
-	for (const FVector2D& P : Footprint) Roof.Add(FVector(P.X, P.Y, Top));
-	Face(Roof, FVector::UpVector, FVector(Footprint[1] - Footprint[0], 0.0).GetSafeNormal());
+	FBlock Block;
+	Block.Base = FVector(Lot.Centre, Lot.Base);
+	Block.Front = Lot.Front;
+	Block.Width = Lot.Width;
+	Block.Depth = Lot.Depth;
+	Block.Height = Lot.Height;
+	return Block;
+}
+
+FBlock HullBlock(const FPolygon& Footprint, double Base, double Height)
+{
+	FBlock Best;
+	Best.Base = FVector(0.0, 0.0, Base);
+	Best.Height = Height;
+	if (Footprint.Num() < 3) return Best;
+	double BestArea = TNumericLimits<double>::Max();
 	for (int32 I = 0; I < Footprint.Num(); I++)
 	{
-		const FVector2D A = Footprint[I];
-		const FVector2D B = Footprint[(I + 1) % Footprint.Num()];
-		const FVector2D Along = (B - A).GetSafeNormal();
-		// Counter-clockwise from above: outward is to the right of each edge.
-		Face({ FVector(A, Base), FVector(B, Base), FVector(B, Top), FVector(A, Top) }, FVector(Along.Y, -Along.X, 0.0), FVector(Along, 0.0));
+		const FVector2D Along = (Footprint[(I + 1) % Footprint.Num()] - Footprint[I]).GetSafeNormal();
+		if (Along.IsNearlyZero()) continue;
+		// Counter-clockwise from above: out of the side is to its right.
+		const FVector2D Out(Along.Y, -Along.X);
+		FVector2D Min(TNumericLimits<double>::Max());
+		FVector2D Max(TNumericLimits<double>::Lowest());
+		for (const FVector2D& P : Footprint)
+		{
+			const FVector2D Local(P.Dot(Along), P.Dot(Out));
+			Min = Min.ComponentMin(Local);
+			Max = Max.ComponentMax(Local);
+		}
+		const FVector2D Size = Max - Min;
+		if (Size.X * Size.Y >= BestArea) continue;
+		BestArea = Size.X * Size.Y;
+		const FVector2D Middle = (Min + Max) * 0.5;
+		Best.Base = FVector(Along * Middle.X + Out * Middle.Y, Base);
+		Best.Front = Out;
+		Best.Width = Size.X;
+		Best.Depth = Size.Y;
 	}
+	return Best;
+}
+
+FTransform BlockPiece(const FBlock& Block, const FBox& Bounds)
+{
+	const FVector Size = Bounds.GetSize();
+	const FVector Scale(Block.Width / FMath::Max(Size.X, UE_KINDA_SMALL_NUMBER), Block.Depth / FMath::Max(Size.Y, UE_KINDA_SMALL_NUMBER), Block.Height / FMath::Max(Size.Z, UE_KINDA_SMALL_NUMBER));
+	// +Y, at 90 degrees, turned to the front.
+	const FRotator Rotation(0.0, FMath::RadiansToDegrees(FMath::Atan2(Block.Front.Y, Block.Front.X)) - 90.0, 0.0);
+	// The middle of the module's bottom on the block's.
+	const FVector Bottom(Bounds.GetCenter().X, Bounds.GetCenter().Y, Bounds.Min.Z);
+	return FTransform(Rotation, Block.Base - Rotation.RotateVector(Bottom * Scale), Scale);
+}
+
+void AssembleBlock(const FBlock& Block, const FBox& Bounds, double StoreyHeight, TArray<FTransform>& Out)
+{
+	if (Block.Width <= 0.0 || Block.Depth <= 0.0 || Block.Height <= 0.0 || !Bounds.IsValid) return;
+	const int32 Storeys = FMath::Max(1, FMath::RoundToInt32(Block.Height / FMath::Max(StoreyHeight, 1.0)));
+	FBlock Storey = Block;
+	Storey.Height = Block.Height / Storeys;
+	for (int32 S = 0; S < Storeys; S++)
+	{
+		Storey.Base.Z = Block.Base.Z + Storey.Height * S;
+		Out.Add(BlockPiece(Storey, Bounds));
+	}
+}
+
+int32 LotMesh(const FLot& Lot, int32 Seed, int32 Count)
+{
+	if (Count <= 0) return INDEX_NONE;
+	return int32(CSCityLayout_Mix(Lot.Id ^ CSCityLayout_Mix(uint64(uint32(Seed)) + 0x5EEDull) ^ 6) % uint64(Count));
+}
+
+FTransform LotInstance(const FLot& Lot, const FBox& Bounds, double FrontYaw)
+{
+	// The mesh's size along its front and across it, a box turned by any FrontYaw.
+	const FVector2D MeshFront = FVector2D(1.0, 0.0).GetRotated(FrontYaw);
+	const FVector Size = Bounds.GetSize();
+	const double MeshDepth = FMath::Abs(MeshFront.X) * Size.X + FMath::Abs(MeshFront.Y) * Size.Y;
+	const double MeshWidth = FMath::Abs(MeshFront.Y) * Size.X + FMath::Abs(MeshFront.X) * Size.Y;
+	const double Scale = FMath::Min3(1.0, Lot.Width / FMath::Max(MeshWidth, 1.0), Lot.Depth / FMath::Max(MeshDepth, 1.0));
+	const FRotator Rotation(0.0, FMath::RadiansToDegrees(FMath::Atan2(Lot.Front.Y, Lot.Front.X)) - FrontYaw, 0.0);
+	// The middle of the mesh's box, half the mesh behind the plot's near edge.
+	const FVector2D Middle = Lot.Centre + Lot.Front * ((Lot.Depth - MeshDepth * Scale) * 0.5);
+	const FVector Local = FVector(Bounds.GetCenter().X, Bounds.GetCenter().Y, Bounds.Min.Z) * Scale;
+	return FTransform(Rotation, FVector(Middle, Lot.Base) - Rotation.RotateVector(Local), FVector(Scale));
 }
 }

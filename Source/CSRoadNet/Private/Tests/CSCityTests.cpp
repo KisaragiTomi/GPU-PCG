@@ -5,7 +5,8 @@
 #include "CSCityAlleyRegion.h"
 #include "CSCityBuildingActor.h"
 #include "CSCityLayout.h"
-#include "CSGpuMeshTypes.h"
+#include "CSGpuInstancedMeshComponent.h"
+#include "CSGpuInstancedNaniteComponent.h"
 #include "CSMesh.h"
 #include "CSMeshRenderComponent.h"
 #include "CSRoadNetworkActor.h"
@@ -13,8 +14,12 @@
 #include "CSRoadSplineNetwork.h"
 #include "CSRoadTestUtils.h"
 #include "Components/BoxComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "RenderingThread.h"
 #include "Tests/AutomationEditorCommon.h"
+#include "UObject/Package.h"
 
 namespace
 {
@@ -51,27 +56,452 @@ bool CSCityTests_SameLots(const TArray<CSCity::FLot>& A, const TArray<CSCity::FL
 	return true;
 }
 
-// The world positions the network's batch buildings are drawn with.
-TArray<FVector3f> CSCityTests_BuildingVertices(ACSRoadNetworkActor* Network)
+// Each building tile component by name, with what changes when its instances are written: the component made anew, or
+// its instances packed again.
+TMap<FString, uint32> CSCityTests_BuildingSerials(ACSRoadNetworkActor* Network)
 {
-	TArray<FVector3f> Out;
-	TArray<UCSMeshRenderComponent*> Components = CSRoadTest::Built<UCSMeshRenderComponent>(Network);
-	for (const UCSMeshRenderComponent* Component : Components)
+	TMap<FString, uint32> Out;
+	for (const UCSGpuInstancedMeshComponent* Component : CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network)) if (Component->GetName().StartsWith(TEXT("BuildingTile"))) Out.Add(Component->GetName(), HashCombine(GetTypeHash(Component), uint32(Component->GetInstancePackSerial())));
+	return Out;
+}
+
+// GPU meshes drawn for buildings: none, the buildings are instances only.
+int32 CSCityTests_BuildingMeshes(ACSRoadNetworkActor* Network)
+{
+	int32 Count = 0;
+	for (const UCSMeshRenderComponent* Component : CSRoadTest::Built<UCSMeshRenderComponent>(Network)) Count += Component->GetName().StartsWith(TEXT("BuildingTile")) ? 1 : 0;
+	// The classic path's copy of the base mesh (a mesh without Nanite): not on the Nanite path.
+	for (const UCSGpuInstancedMeshComponent* Component : CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network)) Count += Component->GetName().StartsWith(TEXT("BuildingTile")) && Component->GetGpuMesh() && Component->GetGpuMesh()->GetResidentPtr() && Component->GetGpuMesh()->GetResidentPtr()->IsAllocated() ? 1 : 0;
+	return Count;
+}
+
+// The engine's cube with Nanite on, built here and now; a copy per name, so that each is a mesh of its own. Make
+// it after the test's CreateNewMap: the map's garbage collection takes it otherwise.
+UStaticMesh* CSCityTests_NaniteCube(const TCHAR* Name)
+{
+	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	if (!Cube) return nullptr;
+	UStaticMesh* Mesh = DuplicateObject<UStaticMesh>(Cube, GetTransientPackage(), MakeUniqueObjectName(GetTransientPackage(), UStaticMesh::StaticClass(), Name));
+	FMeshNaniteSettings Settings = Mesh->GetNaniteSettings();
+	Settings.bEnabled = true;
+	Mesh->SetNaniteSettings(Settings);
+	// Given OutErrors the build does not go async: the render data is there when this returns.
+	TArray<FText> Errors;
+	Mesh->Build(/*bInSilent*/ true, &Errors);
+	return Mesh;
+}
+
+// The instances drawn in place of the network's buildings: their component per instance, in world space.
+struct FCSCityTests_Instance
+{
+	UCSGpuInstancedMeshComponent* Component = nullptr;
+	FTransform Transform;
+};
+
+TArray<FCSCityTests_Instance> CSCityTests_Instances(ACSRoadNetworkActor* Network)
+{
+	TArray<FCSCityTests_Instance> Out;
+	for (UCSGpuInstancedMeshComponent* Component : CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network))
 	{
-		FCSGpuMeshCPUData Data;
-		if (!Component->GetName().StartsWith(TEXT("BuildingTile")) || !Component->GetGpuMesh() || !Component->GetGpuMesh()->ReadbackMeshSync(Data)) continue;
-		Out.Append(Data.Positions);
+		for (int32 I = 0; I < Component->GetInstanceCount(); I++)
+		{
+			FCSCityTests_Instance& Instance = Out.AddDefaulted_GetRef();
+			Instance.Component = Component;
+			Component->GetInstanceTransform(I, Instance.Transform, /*bWorldSpace*/ true);
+		}
 	}
 	return Out;
 }
 
-TMap<FString, uint32> CSCityTests_BuildingGenerations(ACSRoadNetworkActor* Network)
+// The eight corners of Bounds under Transform.
+TArray<FVector> CSCityTests_Corners(const FBox& Bounds, const FTransform& Transform)
 {
-	TMap<FString, uint32> Out;
-	TArray<UCSMeshRenderComponent*> Components = CSRoadTest::Built<UCSMeshRenderComponent>(Network);
-	for (const UCSMeshRenderComponent* Component : Components) if (Component->GetName().StartsWith(TEXT("BuildingTile")) && Component->GetGpuMesh()) Out.Add(Component->GetName(), Component->GetGpuMesh()->GetGeneration());
-	return Out;
+	TArray<FVector> Corners;
+	for (const FVector& Point : { Bounds.Min, FVector(Bounds.Max.X, Bounds.Min.Y, Bounds.Min.Z), FVector(Bounds.Min.X, Bounds.Max.Y, Bounds.Min.Z), FVector(Bounds.Max.X, Bounds.Max.Y, Bounds.Min.Z),
+		FVector(Bounds.Min.X, Bounds.Min.Y, Bounds.Max.Z), FVector(Bounds.Max.X, Bounds.Min.Y, Bounds.Max.Z), FVector(Bounds.Min.X, Bounds.Max.Y, Bounds.Max.Z), Bounds.Max })
+	{
+		Corners.Add(Transform.TransformPosition(Point));
+	}
+	return Corners;
 }
+}
+
+// A mesh on a plot: its box stays inside the plot and stands on its base; its front faces the plot's road and lies on
+// the near edge; it shrinks to fit, as a whole, and never grows; a pivot off the box's middle, as on the
+// real houses, and any front direction change none of that. Which mesh a plot takes depends on its id and the seed.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityLotInstanceTest, "PCGPlugins.CSRoadNet.City.LotInstance",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSCityLotInstanceTest::RunTest(const FString& Parameters)
+{
+	CSCity::FLotSettings Settings;
+	const TArray<CSCity::FRoadLine> Streets = { CSCityTests_Street(1, FVector(0.0, 0.0, 300.0), FVector(16000.0, 0.0, 300.0), 400.0), CSCityTests_Street(2, FVector(30000.0, 0.0, 300.0), FVector(42000.0, 9000.0, 300.0), 800.0) };
+	const TArray<CSCity::FLot> Lots = CSCity::LayoutLots(Streets, Streets, {}, Settings);
+	if (!TestTrue(TEXT("plots laid out"), Lots.Num() >= 8)) return false;
+
+	struct FCase
+	{
+		const TCHAR* Name;
+		FBox Bounds;
+		double FrontYaw;
+		bool bShrinks;
+	};
+	const FCase Cases[] =
+	{
+		{ TEXT("fits, front +Y"), FBox(FVector(-600.0, -400.0, 0.0), FVector(600.0, 400.0, 1500.0)), 90.0, false },
+		{ TEXT("fits, front -X"), FBox(FVector(-400.0, -600.0, 0.0), FVector(400.0, 600.0, 1500.0)), 180.0, false },
+		{ TEXT("pivot off the middle, below the bottom"), FBox(FVector(-12.0, -1200.0, 34.0), FVector(1188.0, -400.0, 1534.0)), 90.0, false },
+		{ TEXT("too wide"), FBox(FVector(-2000.0, -500.0, 0.0), FVector(2000.0, 500.0, 2000.0)), 90.0, true },
+		{ TEXT("too deep"), FBox(FVector(-500.0, -4000.0, 0.0), FVector(500.0, 4000.0, 2000.0)), 90.0, true },
+		{ TEXT("front turned 30 degrees"), FBox(FVector(-300.0, -300.0, 0.0), FVector(300.0, 300.0, 900.0)), 30.0, false },
+	};
+	for (const FCase& Case : Cases)
+	{
+		int32 Outside = 0;
+		int32 BaseOff = 0;
+		int32 FrontOff = 0;
+		int32 NearOff = 0;
+		int32 SizeOff = 0;
+		for (const CSCity::FLot& Lot : Lots)
+		{
+			const FTransform Transform = CSCity::LotInstance(Lot, Case.Bounds, Case.FrontYaw);
+			const FVector Scale = Transform.GetScale3D();
+			const CSCity::FPolygon Kept = CSCity::Grow(Lot.Corners, 1.0);
+			double Bottom = TNumericLimits<double>::Max();
+			double Nearest = TNumericLimits<double>::Lowest();
+			for (const FVector& Corner : CSCityTests_Corners(Case.Bounds, Transform))
+			{
+				Outside += CSCity::Contains(Kept, FVector2D(Corner)) ? 0 : 1;
+				Bottom = FMath::Min(Bottom, Corner.Z);
+				Nearest = FMath::Max(Nearest, (FVector2D(Corner) - Lot.Centre).Dot(Lot.Front));
+			}
+			BaseOff += FMath::IsNearlyEqual(Bottom, Lot.Base, 0.01) ? 0 : 1;
+			NearOff += FMath::IsNearlyEqual(Nearest, Lot.Depth * 0.5, 0.01) ? 0 : 1;
+			const FVector Front = Transform.TransformVectorNoScale(FVector(FVector2D(1.0, 0.0).GetRotated(Case.FrontYaw), 0.0));
+			FrontOff += FVector2D(Front).Equals(Lot.Front, 1e-6) ? 0 : 1;
+			const bool bAsOne = FMath::IsNearlyEqual(Scale.X, Scale.Y, 1e-9) && FMath::IsNearlyEqual(Scale.X, Scale.Z, 1e-9);
+			SizeOff += bAsOne && Scale.X <= 1.0 && (Case.bShrinks ? Scale.X < 1.0 : FMath::IsNearlyEqual(Scale.X, 1.0, 1e-9)) ? 0 : 1;
+		}
+		TestEqual(FString::Printf(TEXT("%s: corners outside the plot"), Case.Name), Outside, 0);
+		TestEqual(FString::Printf(TEXT("%s: not standing on the base"), Case.Name), BaseOff, 0);
+		TestEqual(FString::Printf(TEXT("%s: front not on the near edge"), Case.Name), NearOff, 0);
+		TestEqual(FString::Printf(TEXT("%s: not facing the road"), Case.Name), FrontOff, 0);
+		TestEqual(FString::Printf(TEXT("%s: wrong size"), Case.Name), SizeOff, 0);
+	}
+
+	// The near edge is the side towards the plot's own road.
+	for (const CSCity::FLot& Lot : Lots)
+	{
+		const double ToNear = CSCityTests_Distance(Lot.Corners, Lot.Centre + Lot.Front * (Lot.Depth * 0.5));
+		TestTrue(TEXT("the near edge's middle lies on the plot"), ToNear < 0.01);
+	}
+
+	TSet<int32> Used;
+	for (uint64 Id = 1; Id <= 200; Id++)
+	{
+		CSCity::FLot Lot;
+		Lot.Id = Id * 0x9E3779B97F4A7C15ull;
+		const int32 Mesh = CSCity::LotMesh(Lot, 1, 6);
+		Used.Add(Mesh);
+		TestEqual(TEXT("the same plot takes the same mesh"), CSCity::LotMesh(Lot, 1, 6), Mesh);
+		TestTrue(TEXT("a mesh of those there are"), Mesh >= 0 && Mesh < 6);
+	}
+	TestEqual(TEXT("every mesh is taken"), Used.Num(), 6);
+	TestEqual(TEXT("no meshes, none taken"), CSCity::LotMesh(CSCity::FLot(), 1, 0), int32(INDEX_NONE));
+	return true;
+}
+
+// A building put together from copies of a module: on each plot the copies fill the Width by Depth rectangle on its
+// front, from its base up by its height, in storeys stacked without gap or overlap, as many as come nearest the storey
+// height; the module's +Y side faces the road; any module box (a pivot off the middle, a flat one) fills it the same.
+// The smallest box around a hull holds it and is the hull for a rectangle.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityAssembleTest, "PCGPlugins.CSRoadNet.City.Assemble",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSCityAssembleTest::RunTest(const FString& Parameters)
+{
+	CSCity::FLotSettings Settings;
+	const TArray<CSCity::FRoadLine> Streets = { CSCityTests_Street(1, FVector(0.0, 0.0, 300.0), FVector(16000.0, 0.0, 300.0), 400.0), CSCityTests_Street(2, FVector(30000.0, 0.0, 300.0), FVector(42000.0, 9000.0, 300.0), 800.0) };
+	const TArray<CSCity::FLot> Lots = CSCity::LayoutLots(Streets, Streets, {}, Settings);
+	if (!TestTrue(TEXT("plots laid out"), Lots.Num() >= 8)) return false;
+
+	const FBox Modules[] = { FBox(FVector(-50.0), FVector(50.0)), FBox(FVector(-12.0, -1200.0, 34.0), FVector(1188.0, -400.0, 334.0)) };
+	const double StoreyHeight = 300.0;
+	for (const FBox& Bounds : Modules)
+	{
+		int32 Outside = 0;
+		int32 StoreysOff = 0;
+		int32 StackOff = 0;
+		int32 FrontOff = 0;
+		int32 Pieces = 0;
+		for (const CSCity::FLot& Lot : Lots)
+		{
+			TArray<FTransform> Out;
+			CSCity::AssembleBlock(CSCity::LotBlock(Lot), Bounds, StoreyHeight, Out);
+			Pieces += Out.Num();
+			StoreysOff += Out.Num() == FMath::Max(1, FMath::RoundToInt32(Lot.Height / StoreyHeight)) ? 0 : 1;
+			const CSCity::FPolygon Kept = CSCity::Grow(Lot.Corners, 1.0);
+			double Top = Lot.Base;
+			for (const FTransform& Piece : Out)
+			{
+				double Bottom = TNumericLimits<double>::Max();
+				double High = TNumericLimits<double>::Lowest();
+				FBox2D Plan(ForceInit);
+				for (const FVector& Corner : CSCityTests_Corners(Bounds, Piece))
+				{
+					Outside += CSCity::Contains(Kept, FVector2D(Corner)) ? 0 : 1;
+					Bottom = FMath::Min(Bottom, Corner.Z);
+					High = FMath::Max(High, Corner.Z);
+					const FVector2D Local(FVector2D(Corner - FVector(Lot.Centre, 0.0)).Dot(FVector2D(-Lot.Front.Y, Lot.Front.X)), FVector2D(Corner - FVector(Lot.Centre, 0.0)).Dot(Lot.Front));
+					Plan += Local;
+				}
+				// Each storey on the last, the plot's rectangle in plan.
+				StackOff += FMath::IsNearlyEqual(Bottom, Top, 0.01) && Plan.Min.Equals(FVector2D(-Lot.Width, -Lot.Depth) * 0.5, 0.01) && Plan.Max.Equals(FVector2D(Lot.Width, Lot.Depth) * 0.5, 0.01) ? 0 : 1;
+				Top = High;
+				const FVector Front = Piece.TransformVectorNoScale(FVector::YAxisVector);
+				FrontOff += FVector2D(Front).Equals(Lot.Front, 1e-6) ? 0 : 1;
+			}
+			StackOff += FMath::IsNearlyEqual(Top, Lot.Base + Lot.Height, 0.01) ? 0 : 1;
+		}
+		const FString Case = FString::Printf(TEXT("module %s"), *Bounds.ToString());
+		TestTrue(Case + TEXT(": pieces"), Pieces > Lots.Num());
+		TestEqual(Case + TEXT(": corners outside the plot"), Outside, 0);
+		TestEqual(Case + TEXT(": storey counts"), StoreysOff, 0);
+		TestEqual(Case + TEXT(": not stacked on the plot's rectangle up to its height"), StackOff, 0);
+		TestEqual(Case + TEXT(": not facing the road"), FrontOff, 0);
+	}
+
+	TArray<FTransform> None;
+	CSCity::AssembleBlock(CSCity::FBlock(), Modules[0], StoreyHeight, None);
+	CSCity::AssembleBlock(CSCity::HullBlock({ FVector2D(0.0), FVector2D(1.0, 0.0) }, 0.0, 1000.0), Modules[0], StoreyHeight, None);
+	TestEqual(TEXT("an empty box: no pieces"), None.Num(), 0);
+	TArray<FTransform> Low;
+	CSCity::FLot Short = Lots[0];
+	Short.Height = 100.0;
+	CSCity::AssembleBlock(CSCity::LotBlock(Short), Modules[0], StoreyHeight, Low);
+	TestEqual(TEXT("lower than a storey: one"), Low.Num(), 1);
+
+	// The smallest box around a turned rectangle is the rectangle; around a triangle it holds every corner.
+	const CSCity::FPolygon Rectangle = CSCityTests_Box(FVector2D(500.0, -300.0), FVector2D(1000.0, 700.0), 20.0);
+	const CSCity::FBlock Box = CSCity::HullBlock(Rectangle, 50.0, 900.0);
+	TestTrue(TEXT("rectangle: its size"), FMath::IsNearlyEqual(FMath::Min(Box.Width, Box.Depth), 1400.0, 0.01) && FMath::IsNearlyEqual(FMath::Max(Box.Width, Box.Depth), 2000.0, 0.01));
+	TestTrue(TEXT("rectangle: its middle"), Box.Base.Equals(FVector(500.0, -300.0, 50.0), 0.01));
+	const CSCity::FPolygon Triangle = CSCity::ConvexHull({ FVector2D(0.0, 0.0), FVector2D(3000.0, 200.0), FVector2D(800.0, 1900.0) });
+	const CSCity::FBlock Around = CSCity::HullBlock(Triangle, 0.0, 600.0);
+	TArray<FTransform> One;
+	CSCity::AssembleBlock(Around, Modules[0], 1000.0, One);
+	if (TestEqual(TEXT("triangle: one storey"), One.Num(), 1))
+	{
+		// In the piece's own space, within the module's box.
+		int32 Out = 0;
+		for (const FVector2D& Corner : Triangle)
+		{
+			const FVector Local = One[0].InverseTransformPosition(FVector(Corner, 0.0));
+			Out += Local.X >= Modules[0].Min.X - 0.01 && Local.X <= Modules[0].Max.X + 0.01 && Local.Y >= Modules[0].Min.Y - 0.01 && Local.Y <= Modules[0].Max.Y + 0.01 ? 0 : 1;
+		}
+		TestEqual(TEXT("triangle: corners outside the box"), Out, 0);
+	}
+	return true;
+}
+
+// Plots laid out along two streets and written as a build writes them, with no prefab data, so it runs anywhere: two
+// Nanite meshes draw them as GPU instances through Nanite, one component per mesh, every instance within its plot.
+// Fewer plots rewrite the components in place; a mesh no plot takes loses its component; no meshes, the tile goes
+// to the default module's copies (Nanite, a storey each), and back. No mesh is ever made for the buildings.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityInstancedTileTest, "PCGPlugins.CSRoadNet.City.InstancedTile",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSCityInstancedTileTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("editor world"), World)) return false;
+	UStaticMesh* First = CSCityTests_NaniteCube(TEXT("SM_CSCityTestHouseA"));
+	UStaticMesh* Second = CSCityTests_NaniteCube(TEXT("SM_CSCityTestHouseB"));
+	if (!TestNotNull(TEXT("first mesh"), First) || !TestNotNull(TEXT("second mesh"), Second)) return false;
+	if (!TestTrue(TEXT("the meshes have Nanite data"), First->HasValidNaniteData() && Second->HasValidNaniteData())) return false;
+
+	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>();
+	if (!TestNotNull(TEXT("network actor"), Network)) return false;
+	Network->bBuildOnLoad = false;
+	Network->BuildingMeshes = { First, Second };
+
+	CSCity::FLotSettings Settings;
+	const TArray<CSCity::FRoadLine> Streets = { CSCityTests_Street(1, FVector(0.0, 0.0, 0.0), FVector(32000.0, 0.0, 0.0), 400.0), CSCityTests_Street(2, FVector(0.0, 9000.0, 0.0), FVector(32000.0, 9000.0, 0.0), 400.0) };
+	const TArray<CSCity::FLot> Lots = CSCity::LayoutLots(Streets, Streets, {}, Settings);
+	if (!TestTrue(TEXT("plots laid out"), Lots.Num() >= 16)) return false;
+	const FIntPoint Tile(0, 0);
+	Network->WriteBuildingTileForTest(Tile, Lots);
+
+	TArray<UCSGpuInstancedMeshComponent*> Components = CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network);
+	TestEqual(TEXT("written: a component per mesh"), Components.Num(), 2);
+	const TArray<FCSCityTests_Instance> Instances = CSCityTests_Instances(Network);
+	TestEqual(TEXT("written: an instance per plot"), Instances.Num(), Lots.Num());
+	FlushRenderingCommands();
+	for (UCSGpuInstancedMeshComponent* Component : Components)
+	{
+		TestTrue(TEXT("written: drawn by Nanite"), Component->IsNaniteRenderPath());
+		UCSGpuInstancedNaniteComponent* Nanite = Component->GetNaniteComponent();
+		if (!TestNotNull(TEXT("written: the Nanite stand-in"), Nanite)) continue;
+		TestEqual(TEXT("written: GPU-Scene slots"), Nanite->GetGpuSceneSlotCount(), uint32(Component->GetInstanceCount()));
+		const FString Mismatch = Component->DebugGetDrawnAssetMismatchSync();
+		TestTrue(FString::Printf(TEXT("written: draws what it should (%s)"), *Mismatch), Mismatch.IsEmpty());
+		TestNull(TEXT("written: no proxy of its own, the stand-in draws"), Component->GetSceneProxy());
+	}
+	TestEqual(TEXT("written: no building meshes"), CSCityTests_BuildingMeshes(Network), 0);
+
+	// Every plot holds exactly one instance, whole.
+	TArray<int32> Holding;
+	Holding.SetNumZeroed(Lots.Num());
+	int32 Outside = 0;
+	for (const FCSCityTests_Instance& Instance : Instances)
+	{
+		const FVector Middle = Instance.Component->BaseMesh->GetBoundingBox().GetCenter();
+		const FVector2D At(Instance.Transform.TransformPosition(Middle));
+		const int32 Plot = Lots.IndexOfByPredicate([&At](const CSCity::FLot& Lot) { return CSCity::Contains(Lot.Corners, At); });
+		if (Plot == INDEX_NONE)
+		{
+			Outside++;
+			continue;
+		}
+		Holding[Plot]++;
+		const CSCity::FPolygon Kept = CSCity::Grow(Lots[Plot].Corners, 1.0);
+		for (const FVector& Corner : CSCityTests_Corners(Instance.Component->BaseMesh->GetBoundingBox(), Instance.Transform)) Outside += CSCity::Contains(Kept, FVector2D(Corner)) ? 0 : 1;
+	}
+	TestEqual(TEXT("written: instances outside their plots"), Outside, 0);
+	int32 NotOne = 0;
+	for (const int32 Count : Holding) NotOne += Count == 1 ? 0 : 1;
+	TestEqual(TEXT("written: plots without exactly one instance"), NotOne, 0);
+
+	// Fewer plots: the same components, written again.
+	const TArray<CSCity::FLot> Half(Lots.GetData(), Lots.Num() / 2);
+	Network->WriteBuildingTileForTest(Tile, Half);
+	TArray<UCSGpuInstancedMeshComponent*> Again = CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network);
+	TestEqual(TEXT("half: instances"), CSCityTests_Instances(Network).Num(), Half.Num());
+	TestTrue(TEXT("half: the same components"), Again.Num() == 2 && Again.Contains(Components[0]) && Again.Contains(Components[1]));
+
+	// Plots all taking one mesh: the other's component goes.
+	TArray<CSCity::FLot> OneMesh;
+	for (const CSCity::FLot& Lot : Lots) if (CSCity::LotMesh(Lot, Network->Lots.Seed, 2) == 0) OneMesh.Add(Lot);
+	if (TestTrue(TEXT("plots on the first mesh"), OneMesh.Num() > 0))
+	{
+		Network->WriteBuildingTileForTest(Tile, OneMesh);
+		Again = CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network);
+		TestEqual(TEXT("one mesh: one component"), Again.Num(), 1);
+		if (Again.Num() == 1) TestTrue(TEXT("one mesh: the first"), Again[0]->BaseMesh == First);
+		TestEqual(TEXT("one mesh: instances"), CSCityTests_Instances(Network).Num(), OneMesh.Num());
+	}
+
+	// No meshes: the default module's copies, and back.
+	UStaticMesh* Module = ACSCityBuildingActor::DefaultModule();
+	if (!TestNotNull(TEXT("the default module (Scripts/CS2Road/MakeCityBlock.py)"), Module)) return false;
+	TestTrue(TEXT("the default module has Nanite data"), Module->HasValidNaniteData());
+	Network->BuildingMeshes.Reset();
+	Network->WriteBuildingTileForTest(Tile, Lots);
+	Again = CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network);
+	TestTrue(TEXT("module: one component, the module's"), Again.Num() == 1 && Again[0]->BaseMesh == Module);
+	int32 Storeys = 0;
+	for (const CSCity::FLot& Lot : Lots) Storeys += FMath::Max(1, FMath::RoundToInt32(Lot.Height / (double(Network->StoreyHeight) * 100.0)));
+	TestEqual(TEXT("module: a copy per storey"), CSCityTests_Instances(Network).Num(), Storeys);
+	if (Again.Num() == 1) TestTrue(TEXT("module: drawn by Nanite"), Again[0]->IsNaniteRenderPath());
+	TestEqual(TEXT("module: no building meshes"), CSCityTests_BuildingMeshes(Network), 0);
+	Network->BuildingMeshes = { First };
+	Network->WriteBuildingTileForTest(Tile, Lots);
+	Again = CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network);
+	TestTrue(TEXT("meshes again: the module's component gone"), Again.Num() == 1 && Again[0]->BaseMesh == First);
+	TestEqual(TEXT("meshes again: every plot on the one mesh"), CSCityTests_Instances(Network).Num(), Lots.Num());
+	return true;
+}
+
+// The whole of it: a network of alleys and batch buildings drawn as Nanite instances. A main road across some alleys
+// rewrites the building tiles near it only and takes houses from under it; moved back and gone, every house
+// is where it was. Needs the CS2 prefab data.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityInstancedBuildingsTest, "PCGPlugins.CSRoadNet.City.InstancedBuildings",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSCityInstancedBuildingsTest::RunTest(const FString& Parameters)
+{
+	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
+	if (!Lib.bLoaded)
+	{
+		AddWarning(Lib.Error + TEXT(" (skipped)"));
+		return true;
+	}
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("editor world"), World)) return false;
+	UStaticMesh* First = CSCityTests_NaniteCube(TEXT("SM_CSCityTestHouseA"));
+	UStaticMesh* Second = CSCityTests_NaniteCube(TEXT("SM_CSCityTestHouseB"));
+	if (!TestNotNull(TEXT("first mesh"), First) || !TestNotNull(TEXT("second mesh"), Second)) return false;
+	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>();
+	if (!TestNotNull(TEXT("network actor"), Network)) return false;
+	Network->bLocalUpdate = true;
+	Network->bBakeNanite = false;
+	Network->TileSize = 128.0f;
+	Network->MaxTilesPerBatch = 0;
+	Network->bBatchBuildings = true;
+	Network->BuildingMeshes = { First, Second };
+	ACSCityAlleyRegion* Region = World->SpawnActor<ACSCityAlleyRegion>();
+	if (!TestNotNull(TEXT("alley region"), Region)) return false;
+	Region->Bounds->SetBoxExtent(FVector(12000.0, 8000.0, 500.0));
+	Region->Generate();
+
+	// Every instance's place, sorted: what a layout comes out as, whichever component draws it.
+	auto Places = [&]()
+	{
+		TArray<FVector> Out;
+		for (const FCSCityTests_Instance& Instance : CSCityTests_Instances(Network)) Out.Add(Instance.Transform.GetTranslation());
+		Out.Sort([](const FVector& A, const FVector& B) { return A.X != B.X ? A.X < B.X : A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z; });
+		return Out;
+	};
+	auto Serials = [&]()
+	{
+		TMap<const UCSGpuInstancedMeshComponent*, int32> Out;
+		for (const UCSGpuInstancedMeshComponent* Component : CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network)) Out.Add(Component, Component->GetInstancePackSerial());
+		return Out;
+	};
+
+	Network->Rebuild();
+	TestEqual(TEXT("built: error"), Network->LastError, FString());
+	TestTrue(TEXT("built: batch buildings"), Network->NumBuildings > 0);
+	TestEqual(TEXT("built: no building meshes"), CSCityTests_BuildingMeshes(Network), 0);
+	const TArray<FVector> Built = Places();
+	TestEqual(TEXT("built: an instance per building"), Built.Num(), Network->NumBuildings);
+	for (const UCSGpuInstancedMeshComponent* Component : CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network)) TestTrue(TEXT("built: drawn by Nanite"), Component->IsNaniteRenderPath());
+	const TMap<const UCSGpuInstancedMeshComponent*, int32> Before = Serials();
+	AddInfo(FString::Printf(TEXT("%d roads, %d batch buildings as instances in %d components"), Network->NumRoads, Network->NumBuildings, Before.Num()));
+
+	Network->Rebuild();
+	TestEqual(TEXT("unchanged: building tiles rebuilt"), Network->BuildingTilesRebuilt, 0);
+	TestTrue(TEXT("unchanged: instances not written"), Serials().OrderIndependentCompareEqual(Before));
+
+	// A main road over the north-west corner of the region.
+	ACSRoadSplineActor* Main = World->SpawnActor<ACSRoadSplineActor>();
+	Main->AttachToActor(Network, FAttachmentTransformRules::KeepRelativeTransform);
+	Main->Spline->Prefab = TEXT("Medium Road");
+	Main->Spline->SetSplinePoints({ FVector(-16000.0, 3000.0, 0.0), FVector(-3000.0, 11000.0, 0.0) }, ESplineCoordinateSpace::Local);
+	CSRoadTest::TickBuild(Network);
+	TestEqual(TEXT("main road: error"), Network->LastError, FString());
+	TestTrue(TEXT("main road: some building tiles rebuilt"), Network->BuildingTilesRebuilt > 0);
+	const TArray<FVector> Crossed = Places();
+	TestEqual(TEXT("main road: an instance per building"), Crossed.Num(), Network->NumBuildings);
+	TestTrue(TEXT("main road: the houses changed"), Crossed != Built);
+	int32 Untouched = 0;
+	const TMap<const UCSGpuInstancedMeshComponent*, int32> After = Serials();
+	for (const TPair<const UCSGpuInstancedMeshComponent*, int32>& Pair : Before) Untouched += After.Find(Pair.Key) && After[Pair.Key] == Pair.Value ? 1 : 0;
+	TestTrue(TEXT("main road: components away from it not written"), Untouched > 0);
+	AddInfo(FString::Printf(TEXT("main road: %d batch buildings, %d building tiles rebuilt, %d of %d components untouched"), Network->NumBuildings, Network->BuildingTilesRebuilt, Untouched, Before.Num()));
+
+	// Gone: every house back where it was.
+	Main->Destroy();
+	CSRoadTest::TickBuild(Network);
+	TestEqual(TEXT("gone: error"), Network->LastError, FString());
+	TestTrue(TEXT("gone: every house where it was"), Places() == Built);
+
+	// Switched off: the instances go.
+	Network->bBatchBuildings = false;
+	Network->Rebuild();
+	TestEqual(TEXT("switched off: instances"), CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network).Num(), 0);
+	TestEqual(TEXT("switched off: batch buildings"), Network->NumBuildings, 0);
+	return true;
 }
 
 // A region with two reserved plots, one of them across its middle: the alleys keep out of both (by
@@ -458,7 +888,7 @@ bool FCSCityLotsWindowsTest::RunTest(const FString& Parameters)
 		for (const FVector& P : Line.Points) Box += FVector2D(P);
 		return Box;
 	};
-	auto Same = [](const CSCity::FLot& A, const CSCity::FLot& B) { return A.Id == B.Id && A.Corners == B.Corners && A.Base == B.Base && A.Height == B.Height && A.Color == B.Color; };
+	auto Same = [](const CSCity::FLot& A, const CSCity::FLot& B) { return A.Id == B.Id && A.Corners == B.Corners && A.Base == B.Base && A.Height == B.Height; };
 	const FBox2D Windows[] = {
 		FBox2D(FVector2D(-6000.0, -6000.0), FVector2D(6000.0, 6000.0)),
 		FBox2D(FVector2D(2000.0, 3000.0), FVector2D(9000.0, 9000.0)),
@@ -547,22 +977,24 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	{
 		const CSCity::FPolygon Plot = CSCity::Grow(Special->Reservation(), -1.0);
 		int32 Count = 0;
-		for (const FVector3f& P : CSCityTests_BuildingVertices(Network)) Count += CSCity::Contains(Plot, FVector2D(P.X, P.Y)) ? 1 : 0;
+		for (const FVector3f& P : CSRoadTest::BuildingCorners(Network)) Count += CSCity::Contains(Plot, FVector2D(P.X, P.Y)) ? 1 : 0;
 		return Count;
 	};
 	Network->Rebuild();
 	TestEqual(TEXT("built: error"), Network->LastError, FString());
 	TestTrue(TEXT("built: roads"), Network->NumRoads > 0);
 	TestTrue(TEXT("built: batch buildings"), Network->NumBuildings > 0);
-	TestTrue(TEXT("built: the special building drawn"), Special->Mesh && Special->Mesh->GetGpuMesh() != nullptr);
+	TestTrue(TEXT("built: the special building a copy per storey"), Special->Blocks && Special->Blocks->GetStaticMesh() == ACSCityBuildingActor::DefaultModule()
+		&& Special->Blocks->GetInstanceCount() == FMath::RoundToInt32(Special->Height / Special->StoreyHeight));
+	TestEqual(TEXT("built: no building meshes"), CSCityTests_BuildingMeshes(Network), 0);
 	TestEqual(TEXT("built: batch buildings in the special building's plot"), InPlot(), 0);
-	const TMap<FString, uint32> Before = CSCityTests_BuildingGenerations(Network);
+	const TMap<FString, uint32> Before = CSCityTests_BuildingSerials(Network);
 	TestTrue(TEXT("built: several building tiles"), Before.Num() >= 3);
 	AddInfo(FString::Printf(TEXT("%d alleys, %d roads in %d tiles, %d batch buildings in %d tiles"), Region->Generated.Num(), Network->NumRoads, Network->NumTiles, Network->NumBuildings, Before.Num()));
 
 	Network->Rebuild();
 	TestEqual(TEXT("unchanged: building tiles rebuilt"), Network->BuildingTilesRebuilt, 0);
-	TestTrue(TEXT("unchanged: building meshes untouched"), CSCityTests_BuildingGenerations(Network).OrderIndependentCompareEqual(Before));
+	TestTrue(TEXT("unchanged: building meshes untouched"), CSCityTests_BuildingSerials(Network).OrderIndependentCompareEqual(Before));
 
 	// A main road over the north-west corner of the region.
 	ACSRoadSplineActor* Main = World->SpawnActor<ACSRoadSplineActor>();
@@ -573,7 +1005,7 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	CSRoadTest::TickBuild(Network);
 	TestEqual(TEXT("main road: error"), Network->LastError, FString());
 	TestTrue(TEXT("main road: some building tiles rebuilt"), Network->BuildingTilesRebuilt > 0);
-	const TMap<FString, uint32> After = CSCityTests_BuildingGenerations(Network);
+	const TMap<FString, uint32> After = CSCityTests_BuildingSerials(Network);
 	int32 Unchanged = 0;
 	for (const TPair<FString, uint32>& Pair : Before) Unchanged += After.FindRef(Pair.Key) == Pair.Value ? 1 : 0;
 	TestTrue(TEXT("main road: building tiles away from it untouched"), Unchanged >= 2);
@@ -591,7 +1023,7 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	// and they end as one rebuild with no limit draws them.
 	auto Sorted = [&]()
 	{
-		TArray<FVector3f> Vertices = CSCityTests_BuildingVertices(Network);
+		TArray<FVector3f> Vertices = CSRoadTest::BuildingCorners(Network);
 		Vertices.Sort([](const FVector3f& A, const FVector3f& B) { return A.X != B.X ? A.X < B.X : A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z; });
 		return Vertices;
 	};
@@ -612,7 +1044,7 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	// Batch buildings switched off: their tiles go.
 	Network->bBatchBuildings = false;
 	Network->Rebuild();
-	TestEqual(TEXT("switched off: building tiles"), CSCityTests_BuildingGenerations(Network).Num(), 0);
+	TestEqual(TEXT("switched off: building tiles"), CSCityTests_BuildingSerials(Network).Num(), 0);
 	TestEqual(TEXT("switched off: batch buildings"), Network->NumBuildings, 0);
 	return true;
 }
@@ -650,7 +1082,7 @@ bool FCSCityLocalUpdateTest::RunTest(const FString& Parameters)
 
 	auto Sorted = [&]()
 	{
-		TArray<FVector3f> Vertices = CSCityTests_BuildingVertices(Network);
+		TArray<FVector3f> Vertices = CSRoadTest::BuildingCorners(Network);
 		Vertices.Sort([](const FVector3f& A, const FVector3f& B) { return A.X != B.X ? A.X < B.X : A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z; });
 		return Vertices;
 	};
@@ -671,7 +1103,7 @@ bool FCSCityLocalUpdateTest::RunTest(const FString& Parameters)
 		TestEqual(Case + TEXT(": error"), Network->LastError, FString());
 		const int32 LaidOut = Network->BuildingTilesLaidOut;
 		const int32 Written = Network->BuildingTilesRebuilt;
-		const int32 Tiles = CSCityTests_BuildingGenerations(Network).Num();
+		const int32 Tiles = CSCityTests_BuildingSerials(Network).Num();
 		const TArray<FVector3f> Local = Sorted();
 		TestTrue(Case + TEXT(": the buildings changed"), Local != Current);
 		TestTrue(Case + TEXT(": tiles laid out"), LaidOut > 0);

@@ -5,6 +5,7 @@
 #include "CSCityBuildingActor.h"
 #include "CSCityGarage.h"
 #include "CSCityLayout.h"
+#include "CSGpuInstancedMeshComponent.h"
 #include "CSGpuMemoryBudget.h"
 #include "CSGpuMeshTypes.h"
 #include "CSMesh.h"
@@ -72,6 +73,11 @@ int64 CSRoadNetworkActor_StreamBytes(uint32 Vertices, uint32 Indices)
 int64 CSRoadNetworkActor_GpuMeshBytes(uint32 Vertices, uint32 Indices)
 {
 	return CSRoadNetworkActor_StreamBytes(Vertices, Indices) + int64(Indices / 3) * 31;
+}
+
+void CSRoadNetworkActor_DestroyBuildings(const FCSCityBuildingTile& Tile)
+{
+	for (UCSGpuInstancedMeshComponent* Instanced : Tile.Instances) if (Instanced) Instanced->DestroyComponent();
 }
 
 // Where the refinement warning points: the node whose mesh left the most leaves unconverged (world cm).
@@ -2297,7 +2303,9 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	Settings.bFill = Lots.bFillBlocks;
 	Settings.FillDepth = double(Lots.FillDepth) * 100.0;
 	Settings.Seed = Lots.Seed;
-	UMaterialInterface* Surface = BuildingMaterial ? BuildingMaterial.Get() : ACSCityBuildingActor::DefaultMaterial();
+	UStaticMesh* Module = ResolveBuildingModule();
+	const TArray<UStaticMesh*> Meshes = ResolveBuildingMeshes();
+	if (!Module && Meshes.Num() == 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: no building module (and the default one is missing): the plots stay empty"), *GetName());
 	if (!LotState) LotState = MakeUnique<CSCity::FLotState>();
 	CSCity::FLotState& State = *LotState;
 
@@ -2308,7 +2316,10 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	for (const double Value : { Settings.Frontage, Settings.Gap, Settings.Setback, Settings.MinDepth, Settings.MaxDepth, Settings.MinHeight, Settings.MaxHeight, Settings.FillDepth, TileCm }) Sign(Value);
 	Sign(Settings.bFill);
 	Sign(Settings.Seed);
-	Sign(Surface);
+	Sign(Module);
+	Sign(StoreyHeight);
+	for (const UStaticMesh* House : Meshes) Sign(House);
+	Sign(BuildingMeshFrontYaw);
 	const FMatrix Placement = NetworkToWorld.ToMatrixWithScale();
 	Sign(Placement);
 	const uint64 TerrainSerial = Terrain ? Terrain->Serial : 0;
@@ -2544,7 +2555,13 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	};
 	auto Place = [Terrain, &GroundAt](CSCity::FLot& Lot)
 	{
-		if (!Terrain) return true;
+		if (!Terrain)
+		{
+			// The ground usually lies a little under the road's curve, and a mesh has a floor to show the gap under
+			// it: it goes as far into the ground as on terrain.
+			Lot.Base -= 50.0;
+			return true;
+		}
 		double Lowest = TNumericLimits<double>::Max();
 		double Highest = TNumericLimits<double>::Lowest();
 		for (const FVector2D& Corner : Lot.Corners)
@@ -2586,49 +2603,41 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		{
 			FCSCityBuildingTile Gone;
 			if (!BuildingTiles.RemoveAndCopyValue(Key, Gone)) continue;
-			if (Gone.Component) Gone.Component->DestroyComponent();
+			CSRoadNetworkActor_DestroyBuildings(Gone);
 			Removed++;
 			continue;
 		}
 		TileLots->Sort([](const CSCity::FLot& A, const CSCity::FLot& B) { return A.Id < B.Id; });
 		FXxHash64Builder Hash;
-		Hash.Update(&Surface, sizeof(Surface));
+		Hash.Update(&Module, sizeof(Module));
+		Hash.Update(&StoreyHeight, sizeof(StoreyHeight));
+		for (const UStaticMesh* House : Meshes) Hash.Update(&House, sizeof(House));
+		Hash.Update(&BuildingMeshFrontYaw, sizeof(BuildingMeshFrontYaw));
 		for (const CSCity::FLot* Lot : *TileLots)
 		{
 			Hash.Update(&Lot->Id, sizeof(Lot->Id));
 			Hash.Update(&Lot->Base, sizeof(Lot->Base));
 			Hash.Update(&Lot->Height, sizeof(Lot->Height));
-			Hash.Update(&Lot->Color, sizeof(Lot->Color));
 			Hash.Update(Lot->Corners.GetData(), Lot->Corners.Num() * sizeof(FVector2D));
 		}
 		const uint64 Value = Hash.Finalize().Hash;
 		const FCSCityBuildingTile* Known = BuildingTiles.Find(Key);
-		if (Known && Known->Component && Known->Mesh && Known->Hash == Value) continue;
+		if (Known && Known->Hash == Value && Known->Instances.Num() > 0) continue;
 		if (MaxTilesPerBatch > 0 && Written >= MaxTilesPerBatch)
 		{
 			State.Pending.Add(Key);
 			continue;
 		}
-		FCSCityBuildingTile& Tile = BuildingTiles.FindOrAdd(Key);
-		if (!Tile.Component)
+		// Short of video memory: the tile waits as it is.
+		if (VideoMemoryShort(0))
 		{
-			// As the road tiles: made at build time, never saved or copied.
-			const FName Name = MakeUniqueObjectName(Content, UCSMeshRenderComponent::StaticClass(), *FString::Printf(TEXT("BuildingTile_%d_%d"), Key.X, Key.Y));
-			Tile.Component = NewObject<UCSMeshRenderComponent>(Content, Name, RF_Transient | RF_DuplicateTransient);
-			Tile.Component->SetupAttachment(Content->GetRootComponent());
-			Tile.Component->RegisterComponent();
+			bWaitingForVideoMemory = true;
+			State.Pending.Add(Key);
+			continue;
 		}
-		if (!Tile.Mesh || Tile.Mesh->GetOuter() != Tile.Component) Tile.Mesh = NewObject<UCSMesh>(Tile.Component);
-		FCSGpuMeshCPUData Data;
-		for (const CSCity::FLot* Lot : *TileLots) CSCity::AppendPrism(Data, Lot->Corners, Lot->Base, Lot->Height, Lot->Color);
-		Tile.Mesh->Materials = { Surface };
-		Tile.Mesh->NotifyMaterialsChanged();
-		Tile.Component->MeshMaterial = Surface;
-		const bool bCopied = UCSMeshOps::CopyFromMeshSnapshot(Tile.Mesh, Data);
-		Tile.Component->SetGpuMesh(bCopied ? Tile.Mesh.Get() : nullptr);
-		// A failed copy is written again when the tile is next laid out.
-		if (!bCopied) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: the batch buildings of tile (%d, %d) could not be uploaded"), *GetName(), Key.X, Key.Y);
-		Tile.Hash = bCopied ? Value : 0;
+		FCSCityBuildingTile& Tile = BuildingTiles.FindOrAdd(Key);
+		WriteBuildingTile(Key, Tile, *TileLots, Module, Meshes);
+		Tile.Hash = Value;
 		Tile.Buildings = TileLots->Num();
 		Written++;
 	}
@@ -2647,9 +2656,71 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		BuildingTilesRebuilt, PendingBuildingTiles, (FPlatformTime::Seconds() - StartTime) * 1000.0);
 }
 
+TArray<UStaticMesh*> ACSRoadNetworkActor::ResolveBuildingMeshes() const
+{
+	TArray<UStaticMesh*> Meshes;
+	for (UStaticMesh* House : BuildingMeshes) if (House) Meshes.AddUnique(House);
+	return Meshes;
+}
+
+UStaticMesh* ACSRoadNetworkActor::ResolveBuildingModule() const
+{
+	return BuildingModule ? BuildingModule.Get() : ACSCityBuildingActor::DefaultModule();
+}
+
+void ACSRoadNetworkActor::WriteBuildingTile(const FIntPoint& Key, FCSCityBuildingTile& Tile, const TArray<const CSCity::FLot*>& TileLots, UStaticMesh* Module, const TArray<UStaticMesh*>& Meshes)
+{
+	// What stands on the plots: a whole mesh each, else the module's copies.
+	const TArray<UStaticMesh*> Used = Meshes.Num() > 0 ? Meshes : Module ? TArray<UStaticMesh*>{ Module } : TArray<UStaticMesh*>();
+	TArray<TArray<FTransform>> ByMesh;
+	ByMesh.SetNum(Used.Num());
+	for (const CSCity::FLot* Lot : TileLots)
+	{
+		if (Meshes.Num() > 0)
+		{
+			const int32 Index = CSCity::LotMesh(*Lot, Lots.Seed, Meshes.Num());
+			ByMesh[Index].Add(CSCity::LotInstance(*Lot, Meshes[Index]->GetBoundingBox(), BuildingMeshFrontYaw));
+		}
+		else if (Module) CSCity::AssembleBlock(CSCity::LotBlock(*Lot), Module->GetBoundingBox(), double(StoreyHeight) * 100.0, ByMesh[0]);
+	}
+	TArray<TObjectPtr<UCSGpuInstancedMeshComponent>> Kept;
+	for (int32 M = 0; M < Used.Num(); M++)
+	{
+		if (ByMesh[M].Num() == 0) continue;
+		UCSGpuInstancedMeshComponent* Component = nullptr;
+		for (UCSGpuInstancedMeshComponent* Existing : Tile.Instances) if (Existing && Existing->BaseMesh == Used[M]) Component = Existing;
+		if (!Component)
+		{
+			// As the road tiles: made at build time, never saved or copied, world space with an absolute transform.
+			const FName Name = MakeUniqueObjectName(Content, UCSGpuInstancedMeshComponent::StaticClass(), *FString::Printf(TEXT("BuildingTile_%d_%d"), Key.X, Key.Y));
+			Component = NewObject<UCSGpuInstancedMeshComponent>(Content, Name, RF_Transient | RF_DuplicateTransient);
+			Component->SetupAttachment(Content->GetRootComponent());
+			Component->SetUsingAbsoluteLocation(true);
+			Component->SetUsingAbsoluteRotation(true);
+			Component->SetUsingAbsoluteScale(true);
+			Component->RegisterComponent();
+			Component->SetBaseMesh(Used[M]);
+		}
+		Component->SetInstances(ByMesh[M]);
+		Kept.Add(Component);
+	}
+	for (UCSGpuInstancedMeshComponent* Existing : Tile.Instances) if (Existing && !Kept.Contains(Existing)) Existing->DestroyComponent();
+	Tile.Instances = MoveTemp(Kept);
+}
+
+void ACSRoadNetworkActor::WriteBuildingTileForTest(const FIntPoint& Key, const TArray<CSCity::FLot>& TileLots)
+{
+	if (!EnsureContent()) return;
+	TArray<const CSCity::FLot*> Pointers;
+	for (const CSCity::FLot& Lot : TileLots) Pointers.Add(&Lot);
+	FCSCityBuildingTile& Tile = BuildingTiles.FindOrAdd(Key);
+	WriteBuildingTile(Key, Tile, Pointers, ResolveBuildingModule(), ResolveBuildingMeshes());
+	Tile.Buildings = Pointers.Num();
+}
+
 void ACSRoadNetworkActor::ClearBuildingTiles()
 {
-	for (const TPair<FIntPoint, FCSCityBuildingTile>& Pair : BuildingTiles) if (Pair.Value.Component) Pair.Value.Component->DestroyComponent();
+	for (TPair<FIntPoint, FCSCityBuildingTile>& Pair : BuildingTiles) CSRoadNetworkActor_DestroyBuildings(Pair.Value);
 	BuildingTiles.Reset();
 	if (LotState) LotState->Reset();
 	NumBuildings = 0;

@@ -3,8 +3,12 @@
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 
 #include "AssetCompilingManager.h"
+#include "Async/TaskGraphInterfaces.h"
+#include "CSCityBuildingActor.h"
+#include "CSGpuInstancedMeshComponent.h"
 #include "CSMesh.h"
 #include "CSMeshRenderComponent.h"
+#include "CSRoadMeshWrite.h"
 #include "CSRoadNetworkActor.h"
 #include "CSRoadSplineActor.h"
 #include "CSRoadTestUtils.h"
@@ -578,6 +582,126 @@ bool FCSRoadTilesNaniteHeldTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("held three seconds: tiles baked"), Network->NumNaniteTiles, 0);
 	Slate.ProcessMouseButtonUpEvent(FPointerEvent(0, Away, Away, TSet<FKey>(), EKeys::LeftMouseButton, 0.0f, FModifierKeysState()));
 	TestTrue(TEXT("let go: baked within a minute"), CSRoadTileTests_Drive(Network, 60.0, [&]() { return Network->NumTiles > 0 && Network->NumNaniteTiles == Network->NumTiles; }));
+	return true;
+}
+
+// The network's tick never waits for the render thread or the GPU (no flush through UCSMesh::CountedBlockingFlush, which
+// the network's blocking helpers go through too): edits drawn in tiles, with batch buildings and a city building, and
+// whole; meshes written in place and into new ones (a road added grows its tiles' meshes), a whole build's refinement
+// counts, the preview made again once edits settle. What they draw is what a build that waits draws; the buildings are
+// the default module's instances through Nanite, with no mesh of their own.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadTilesNoWaitTest, "PCGPlugins.CSRoadNet.Tiles.NoWait",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSRoadTilesNoWaitTest::RunTest(const FString& Parameters)
+{
+	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
+	if (!Lib.bLoaded)
+	{
+		AddWarning(Lib.Error + TEXT(" (skipped)"));
+		return true;
+	}
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("editor world"), World)) return false;
+	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>(FVector(40000.0, -20000.0, 0.0), FRotator(0.0, 15.0, 0.0));
+	if (!TestNotNull(TEXT("network actor"), Network)) return false;
+	Network->TileSize = 128.0f;
+	Network->MaxTilesPerBatch = 0;
+	Network->bLocalUpdate = true;
+	Network->bBakeNanite = false;
+	// Whatever else holds video memory on the machine.
+	Network->MinFreeVideoMemory = 0;
+	Network->bBatchBuildings = true;
+	const TArray<ACSRoadSplineActor*> Roads = CSRoadTileTests_Grid(World, Network);
+	ACSCityBuildingActor* Special = World->SpawnActor<ACSCityBuildingActor>(Network->GetActorTransform().TransformPosition(FVector(-12000.0, 4500.0, 0.0)), Network->GetActorRotation());
+	if (!TestNotNull(TEXT("city building"), Special)) return false;
+	Network->Rebuild();
+	Network->FinishWrites();
+	TestEqual(TEXT("built: error"), Network->LastError, FString());
+	TestTrue(TEXT("built: batch buildings"), Network->NumBuildings > 0);
+
+	// Frames as the editor runs them: the network's tick, then the render thread and the game thread's tasks (the GPU
+	// round trips and the writes landing), until nothing is left to build, write or settle. Returns the ticks' waits.
+	int32 Frames = 0;
+	auto Drive = [&]()
+	{
+		int64 Waits = 0;
+		for (Frames = 0; Frames < 3000; Frames++)
+		{
+			const int64 Before = UCSMesh::GetBlockingFlushCount();
+			Network->Tick(0.0f);
+			Waits += UCSMesh::GetBlockingFlushCount() - Before;
+			if (!Network->IsBuilding() && !Network->IsPreviewPending() && Network->PendingTiles == 0 && CSRoad::MeshWritesInFlight() == 0) break;
+			FlushRenderingCommands();
+			if (!FTaskGraphInterface::Get().IsThreadProcessingTasks(ENamedThreads::GameThread)) FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
+			FPlatformProcess::Sleep(0.002f);
+		}
+		return Waits;
+	};
+	// What a whole build that waits draws; then the network as it was, built again waiting.
+	auto Waited = [&]()
+	{
+		const bool bTiles = Network->bLocalUpdate;
+		Network->bLocalUpdate = false;
+		Network->Rebuild();
+		const FCSRoadTileTests_Output Out = CSRoadTileTests_Read(Network);
+		Network->bLocalUpdate = bTiles;
+		Network->Rebuild();
+		Network->FinishWrites();
+		return Out;
+	};
+	// The meshes the network draws, by component.
+	auto Meshes = [&]()
+	{
+		TMap<FString, const UCSMesh*> Out;
+		for (const UCSMeshRenderComponent* Component : CSRoadTest::Built<UCSMeshRenderComponent>(Network)) Out.Add(Component->GetName(), Component->GetGpuMesh());
+		return Out;
+	};
+	auto Edit = [&](const FString& Case, TFunctionRef<void()> Change)
+	{
+		const TMap<FString, const UCSMesh*> Before = Meshes();
+		const int64 BeforeEdit = UCSMesh::GetBlockingFlushCount();
+		Change();
+		TestEqual(Case + TEXT(": waits in the edit"), UCSMesh::GetBlockingFlushCount() - BeforeEdit, int64(0));
+		TestEqual(Case + TEXT(": waits in the ticks"), Drive(), int64(0));
+		TestEqual(Case + TEXT(": error"), Network->LastError, FString());
+		TestFalse(Case + TEXT(": preview made"), Network->IsPreviewPending());
+		// The buildings: instances through Nanite, no mesh of their own.
+		int32 Drawn = 0;
+		int32 Buildings = 0;
+		int32 Replaced = 0;
+		for (const UCSGpuInstancedMeshComponent* Component : CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network))
+		{
+			if (!Component->GetName().StartsWith(TEXT("BuildingTile"))) continue;
+			Buildings++;
+			Drawn += Component->GetInstanceCount() > 0 && Component->IsNaniteRenderPath() ? 1 : 0;
+		}
+		for (const TPair<FString, const UCSMesh*>& Pair : Meshes()) Replaced += Before.Contains(Pair.Key) && Before[Pair.Key] && Pair.Value && Before[Pair.Key] != Pair.Value ? 1 : 0;
+		TestTrue(Case + TEXT(": building tiles drawn"), Buildings > 0 && Drawn == Buildings);
+		int32 BuildingMeshes = 0;
+		for (const TPair<FString, const UCSMesh*>& Pair : Meshes()) BuildingMeshes += Pair.Key.StartsWith(TEXT("BuildingTile")) ? 1 : 0;
+		TestEqual(Case + TEXT(": building meshes"), BuildingMeshes, 0);
+		AddInfo(FString::Printf(TEXT("%s: %d frames, %d tiles rebuilt, %d building tiles, %d meshes written anew in place of the last"), *Case, Frames, Network->TilesRebuilt, Buildings, Replaced));
+		const FCSRoadTileTests_Output Ticked = CSRoadTileTests_Read(Network);
+		CSRoadTileTests_Compare(*this, Case, Ticked, Waited());
+		return Replaced;
+	};
+
+	Edit(TEXT("street end moved"), [&]() { Roads.Last()->Spline->SetLocationAtSplinePoint(2, FVector(18000.0 + 4000.0, 15000.0, 0.0), ESplineCoordinateSpace::Local); });
+	const int32 Grown = Edit(TEXT("road added"), [&]() { CSRoadTileTests_Road(World, Network, { FVector(-21000.0, -4000.0, 0.0), FVector(21000.0, 4500.0, 0.0) }, TEXT("Medium Road")); });
+	TestTrue(TEXT("road added: tiles grown into new meshes"), Grown > 0);
+	const FVector Place = Network->GetActorTransform().TransformPosition(FVector(-11000.0, -4500.0, 0.0));
+	Edit(TEXT("city building moved"), [&]()
+	{
+		Special->SetActorLocation(Place);
+		Special->Rebuild();
+	});
+	TestTrue(TEXT("city building moved: drawn where it went"), Special->Blocks->GetInstanceCount() > 0 && FVector::Dist2D(Special->Blocks->CalcBounds(Special->Blocks->GetComponentTransform()).Origin, Place) < 2000.0);
+
+	Network->bLocalUpdate = false;
+	Network->Rebuild();
+	Network->FinishWrites();
+	Edit(TEXT("whole: street end moved back"), [&]() { Roads.Last()->Spline->SetLocationAtSplinePoint(2, FVector(18000.0 + 1500.0, 16000.0, 0.0), ESplineCoordinateSpace::Local); });
 	return true;
 }
 

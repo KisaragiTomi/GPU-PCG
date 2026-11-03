@@ -2,9 +2,11 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "CSGpuInstancedMeshComponent.h"
 #include "CSRoadMeshWrite.h"
 #include "CSRoadNet.h"
 #include "CSRoadNetworkActor.h"
+#include "Engine/StaticMesh.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformProcess.h"
@@ -27,6 +29,23 @@ void TickBuild(ACSRoadNetworkActor* Network)
 	}
 	// The meshes it wrote without waiting, landed and drawn.
 	CSRoad::LandMeshWrites();
+}
+
+TArray<FVector3f> BuildingCorners(const ACSRoadNetworkActor* Network)
+{
+	TArray<FVector3f> Out;
+	for (const UCSGpuInstancedMeshComponent* Component : Built<UCSGpuInstancedMeshComponent>(Network))
+	{
+		if (!Component->GetName().StartsWith(TEXT("BuildingTile")) || !Component->BaseMesh) continue;
+		const FBox Box = Component->BaseMesh->GetBoundingBox();
+		for (int32 I = 0; I < Component->GetInstanceCount(); I++)
+		{
+			FTransform Transform;
+			Component->GetInstanceTransform(I, Transform, /*bWorldSpace*/ true);
+			for (int32 Corner = 0; Corner < 8; Corner++) Out.Add(FVector3f(Transform.TransformPosition(FVector((Corner & 1) ? Box.Max.X : Box.Min.X, (Corner & 2) ? Box.Max.Y : Box.Min.Y, (Corner & 4) ? Box.Max.Z : Box.Min.Z))));
+		}
+	}
+	return Out;
 }
 
 FString PrefabDir()

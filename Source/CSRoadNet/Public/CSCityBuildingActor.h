@@ -1,6 +1,8 @@
-// A building placed by hand in the city layout, for now the convex hull of its outline pushed up to a
-// height. Its footprint grown by Setback is the plot it reserves: alleys laid out afterwards
-// (ACSCityAlleyRegion) keep out of it, and a road network's batch buildings leave it free.
+// A building placed by hand in the city layout: copies of a module on the smallest box around its outline's convex hull,
+// as the batch buildings are put together (CSCity::AssembleBlock), drawn as instances; it makes no mesh of its own. Its
+// footprint grown by Setback is the plot it reserves: alleys laid out afterwards
+// (ACSCityAlleyRegion) keep out of it, and a road network's batch buildings leave it free. A garage on it the network
+// joins to the nearest main road with a driveway it derives on every build (CSCityGarage).
 #pragma once
 
 #include "CoreMinimal.h"
@@ -8,9 +10,8 @@
 #include "GameFramework/Actor.h"
 #include "CSCityBuildingActor.generated.h"
 
-class UCSMesh;
-class UCSMeshRenderComponent;
-class UMaterialInterface;
+class UInstancedStaticMeshComponent;
+class UStaticMesh;
 
 /** The outline of an ACSCityBuildingActor: a closed loop; only its points' x and y count. */
 UCLASS(ClassGroup = (CS2Road))
@@ -44,12 +45,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building", meta = (ClampMin = "0", Units = "m"))
 	float Setback = 4.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building")
-	FLinearColor Color = FLinearColor(0.78f, 0.55f, 0.42f);
-
-	/** Empty: /PCGPlugins/MeshBoolean/M_VertexColor. */
+	/** What it is put together from, as ACSRoadNetworkActor::BuildingModule. Empty: DefaultModule. */
 	UPROPERTY(EditAnywhere, Category = "City Building")
-	TObjectPtr<UMaterialInterface> Material;
+	TObjectPtr<UStaticMesh> Module;
+
+	/** The storeys Module's copies stack in come nearest this height. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building", meta = (ClampMin = "0.5", Units = "m"))
+	float StoreyHeight = 3.0f;
 
 	/** A garage: the road network joins it to the nearest main road in front of it (within GarageReach) with a driveway of
 	 *  GarageRoad, which batch buildings keep clear of but do not line. */
@@ -73,8 +75,9 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "City Building|Garage")
 	FString GarageStatus;
 
+	/** The module's copies (and the garage door's). */
 	UPROPERTY(VisibleAnywhere, Category = "City Building")
-	TObjectPtr<UCSMeshRenderComponent> Mesh;
+	TObjectPtr<UInstancedStaticMeshComponent> Blocks;
 
 	// World space (cm), counter-clockwise from above.
 	TArray<FVector2D> Footprint() const;
@@ -84,11 +87,12 @@ public:
 	// without a garage or a footprint.
 	bool GarageDoor(FVector& OutDoor, FVector& OutFacing) const;
 
-	// Builds the prism again and tells the road network its plot may have moved.
+	// Puts the copies where they go again, and tells the road network its plot may have moved.
 	void Rebuild();
 
-	// What buildings with no material of their own are drawn with: vertex colours.
-	static UMaterialInterface* DefaultMaterial();
+	// What buildings are put together from when nothing else is set: /PCGPlugins/CSRoadNet/Houses/SM_CityBlock, a 1 m box
+	// with Nanite on (Scripts/CS2Road/MakeCityBlock.py makes it).
+	static UStaticMesh* DefaultModule();
 
 	UFUNCTION()
 	TArray<FString> GetRoadPrefabOptions() const;
@@ -102,8 +106,5 @@ public:
 #endif
 
 private:
-	UPROPERTY(Transient)
-	TObjectPtr<UCSMesh> Prism;
-
 	void NotifyNetwork() const;
 };

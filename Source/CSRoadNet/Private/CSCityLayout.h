@@ -6,8 +6,6 @@
 
 #include "CoreMinimal.h"
 
-struct FCSGpuMeshCPUData;
-
 namespace CSCity
 {
 // Convex polygons run counter-clockwise seen from above.
@@ -106,7 +104,6 @@ struct FLot
 	double Height = 0.0;
 	// The middle of the Width by Depth rectangle on its front, which lies within Corners.
 	FVector2D Centre = FVector2D::ZeroVector;
-	FLinearColor Color = FLinearColor::White;
 	// Towards the road it faces; its size along that road (the stretch of its slot it takes) and away from it (the
 	// shallower side of a slanted plot).
 	FVector2D Front = FVector2D::UnitX();
@@ -157,7 +154,37 @@ struct FLotState
 	}
 };
 
-// A convex footprint pushed up from Base by Height into Out (world space, one material slot): the
-// sides and the top, flat shaded, coloured Color; no floor.
-void AppendPrism(FCSGpuMeshCPUData& Out, const FPolygon& Footprint, double Base, double Height, const FLinearColor& Color);
+// A box standing on the ground (world cm): the middle of its bottom, which way its front faces, and its size along the
+// front (Width), back from it (Depth) and up (Height).
+struct FBlock
+{
+	FVector Base = FVector::ZeroVector;
+	FVector2D Front = FVector2D::UnitX();
+	double Width = 0.0;
+	double Depth = 0.0;
+	double Height = 0.0;
+};
+
+// A plot's building as a box: the Width by Depth rectangle on its front, from its base up by its height.
+FBlock LotBlock(const FLot& Lot);
+// The smallest box around a convex footprint with a side along one of the footprint's, from Base up by Height; its front
+// faces out of that side. Fewer than three corners: an empty box.
+FBlock HullBlock(const FPolygon& Footprint, double Base, double Height);
+
+// A module stretched to fill Block, as an instance's transform. Bounds is the module's local box; its +Y side is its
+// front and +X runs along it (as BuildingMeshFrontYaw's default).
+FTransform BlockPiece(const FBlock& Block, const FBox& Bounds);
+
+// A building put together from copies of a module (Bounds as BlockPiece's), appended to Out: the rule for which copies
+// make a building and where. For now one copy per storey, stretched to the block's footprint: as many storeys as come
+// nearest StoreyHeight (one at least), sharing Height evenly. An empty block: none.
+void AssembleBlock(const FBlock& Block, const FBox& Bounds, double StoreyHeight, TArray<FTransform>& Out);
+
+// Which of Count meshes stands on a plot: drawn from its id, so an edit elsewhere leaves it as it was.
+int32 LotMesh(const FLot& Lot, int32 Seed, int32 Count);
+
+// A mesh on a plot as an instance's transform, the plot's Height aside: turned so that its front (Bounds is its
+// local box; it faces FrontYaw degrees from +X towards +Y) faces the plot's road, shrunk as a whole until it
+// fits the plot (never grown), its front on the plot's near edge, its bottom on Base. It stays within the plot.
+FTransform LotInstance(const FLot& Lot, const FBox& Bounds, double FrontYaw);
 }

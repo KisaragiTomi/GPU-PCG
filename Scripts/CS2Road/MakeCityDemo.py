@@ -77,13 +77,12 @@ def build():
     # 1. Special buildings first: their plots are reserved before any alley is laid out.
     building_class = unreal.load_class(None, "/Script/CSRoadNet.CSCityBuildingActor")
 
-    def building(label, centre, size, yaw, height, setback, colour):
+    def building(label, centre, size, yaw, height, setback):
         """A rectangular outline of size (cm) turned by yaw, pushed up height (m)."""
         actor = ACTORS.spawn_actor_from_class(building_class, unreal.Vector(centre[0], centre[1], 0.0), unreal.Rotator(0.0, 0.0, yaw))
         actor.set_actor_label(label)
         actor.set_editor_property("height", height, notify_mode=NEVER)
         actor.set_editor_property("setback", setback, notify_mode=NEVER)
-        actor.set_editor_property("color", unreal.LinearColor(*colour), notify_mode=NEVER)
         outline = actor.get_editor_property("outline")
         outline.clear_spline_points(False)
         half_x, half_y = size[0] * 0.5, size[1] * 0.5
@@ -94,8 +93,8 @@ def build():
         outline.update_spline()
         return actor
 
-    building("Town Hall", (-6000.0, 3500.0), (4000.0, 2800.0), 0.0, 22.0, 6.0, (0.80, 0.52, 0.38, 1.0))
-    building("Tower", (8000.0, -4000.0), (1800.0, 1800.0), 30.0, 48.0, 5.0, (0.45, 0.55, 0.70, 1.0))
+    building("Town Hall", (-6000.0, 3500.0), (4000.0, 2800.0), 0.0, 22.0, 6.0)
+    building("Tower", (8000.0, -4000.0), (1800.0, 1800.0), 30.0, 48.0, 5.0)
 
     # 2. The alleys, laid out once around the reserved plots.
     region = ACTORS.spawn_actor_from_class(unreal.load_class(None, "/Script/CSRoadNet.CSCityAlleyRegion"), unreal.Vector(0.0, 0.0, 0.0))

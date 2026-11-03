@@ -17,6 +17,7 @@
 class ACSRoadNetworkContent;
 class UCSRoadTerrainRenderer;
 class ULevel;
+class UCSGpuInstancedMeshComponent;
 class UCSMesh;
 class UCSMeshRenderComponent;
 class UMaterialInterface;
@@ -51,6 +52,7 @@ struct FTerrainFootprint;
 }
 namespace CSCity
 {
+struct FLot;
 struct FLotState;
 }
 
@@ -129,17 +131,15 @@ struct FCSCityLotSettings
 	int32 Seed = 1;
 };
 
-/** The batch buildings of one tile. */
+/** The batch buildings of one tile: instances only, no mesh of their own. */
 USTRUCT()
 struct FCSCityBuildingTile
 {
 	GENERATED_BODY()
 
+	/** One component for each mesh standing in the tile. */
 	UPROPERTY(Transient)
-	TObjectPtr<UCSMeshRenderComponent> Component;
-
-	UPROPERTY(Transient)
-	TObjectPtr<UCSMesh> Mesh;
+	TArray<TObjectPtr<UCSGpuInstancedMeshComponent>> Instances;
 
 	// What its buildings came out as: equal hashes, same buildings.
 	uint64 Hash = 0;
@@ -328,7 +328,7 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 RoadsGraphed = 0;
 
-	/** Fill the plots along the roads with buildings (convex hulls pushed up), clear of the roads, of each other and
+	/** Fill the plots along the roads with buildings (copies of BuildingModule, or BuildingMeshes), clear of the roads, of each other and
 	 *  of the plots ACSCityBuildingActors reserve. Only roads CS2 zones along have plots (not highways or bridges);
 	 *  on the snapshot's terrain the buildings stand on the ground, and none front a road 3 m above or below it. A
 	 *  plot belongs to the spline it faces (its segment, side and place along it), so editing one road leaves the
@@ -340,9 +340,27 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Buildings", meta = (EditCondition = "bBatchBuildings"))
 	FCSCityLotSettings Lots;
 
-	/** Empty: /PCGPlugins/MeshBoolean/M_VertexColor. */
+	/** What the buildings are put together from: copies of it, each stretched to fill its part of the building
+	 *  (CSCity::AssembleBlock: for now one a storey, on the plot's Width by Depth rectangle), its +Y side towards the road.
+	 *  Drawn as GPU instances (UCSGpuInstancedMeshComponent, per tile and mesh): with Nanite on, as it should be, they go
+	 *  into GPU-Scene and the buildings make no mesh at all; without, each tile's component uploads a copy of it and waits
+	 *  for the render thread to. Empty: ACSCityBuildingActor::DefaultModule. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Buildings", meta = (EditCondition = "bBatchBuildings"))
-	TObjectPtr<UMaterialInterface> BuildingMaterial;
+	TObjectPtr<UStaticMesh> BuildingModule;
+
+	/** The storeys BuildingModule's copies stack in come nearest this height. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Buildings", meta = (EditCondition = "bBatchBuildings", ClampMin = "0.5", Units = "m"))
+	float StoreyHeight = 3.0f;
+
+	/** Whole buildings in place of BuildingModule's copies: on each plot one of these, drawn from its id, as a GPU instance.
+	 *  It faces the plot's road, with its front on the plot's near edge, shrunk as a whole until it fits and never grown,
+	 *  so the plot's height does not apply. Empty: BuildingModule. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Buildings", meta = (EditCondition = "bBatchBuildings"))
+	TArray<TObjectPtr<UStaticMesh>> BuildingMeshes;
+
+	/** Which way the BuildingMeshes' fronts face in their own space, from +X towards +Y. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Buildings", meta = (EditCondition = "bBatchBuildings", Units = "deg"))
+	float BuildingMeshFrontYaw = 90.0f;
 
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumBuildings = 0;
@@ -534,6 +552,8 @@ public:
 	// Tests: whether the preview is still to be made again for the network as last built (edits settling), or its GPU
 	// round trip is on its way.
 	bool IsPreviewPending() const;
+	// Tests: TileLots written into one building tile as a build writes them, with no roads and no prefab data.
+	void WriteBuildingTileForTest(const FIntPoint& Key, const TArray<CSCity::FLot>& TileLots);
 	// Tests: the spline roads (the garages' driveways after the drawn ones) and the network the last build in tiles made
 	// of them; null before one.
 	const TArray<CSRoad::FSplineRoad>* SplinesForTest() const { return LastSplines.Get(); }
@@ -754,4 +774,10 @@ private:
 	// plots there come out as a full layout's would.
 	void BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>& Splines, const TArray<CSRoad::FRoadSpec>& Roads, CSRoad::FAssets& Assets, const CSRoad::FSavedTerrain* Terrain);
 	void ClearBuildingTiles();
+	// BuildingMeshes that are set.
+	TArray<UStaticMesh*> ResolveBuildingMeshes() const;
+	// BuildingModule, else the default one.
+	UStaticMesh* ResolveBuildingModule() const;
+	// The tile's components as TileLots stand: instances of Meshes, one a plot, or without any, Module's copies.
+	void WriteBuildingTile(const FIntPoint& Key, FCSCityBuildingTile& Tile, const TArray<const CSCity::FLot*>& TileLots, UStaticMesh* Module, const TArray<UStaticMesh*>& Meshes);
 };
