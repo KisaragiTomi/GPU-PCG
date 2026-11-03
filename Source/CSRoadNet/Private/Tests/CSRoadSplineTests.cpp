@@ -1014,10 +1014,10 @@ bool FCSRoadSplinesActorTest::RunTest(const FString& Parameters)
 		TestTrue(Case + TEXT(": bounds centred on the crossing"), FVector::Dist2D(Bounds.GetCenter(), Network->GetActorLocation()) < 500.0);
 	}
 
-	// A spline edited (by the editor's spline tools, or code) has the network rebuild on its next tick.
+	// A spline edited (by the editor's spline tools, or code) has the network rebuild from its next tick on.
 	const FVector Moved(6000.0, 0.0, 0.0);
 	Roads[0]->Spline->SetLocationAtSplinePoint(1, Moved, ESplineCoordinateSpace::Local);
-	Network->Tick(0.0f);
+	CSRoadTest::TickBuild(Network);
 	TestEqual(TEXT("edited: error"), Network->LastError, FString());
 	TestTrue(TEXT("edited: bounds hold the moved end"), Network->GetContent()->RoadMesh->Bounds.GetBox().IsInside(Network->GetActorTransform().TransformPosition(Moved)));
 	return true;

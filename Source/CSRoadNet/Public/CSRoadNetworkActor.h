@@ -27,6 +27,8 @@ class UStaticMeshComponent;
 struct FCSRoadNetworkPreview;
 struct FCSRoadNetworkActor_SplineCache;
 struct FCSRoadNetworkActor_TileJob;
+struct FCSRoadNetworkActor_WholeJob;
+struct FCSRoadNetworkActor_PreviewJob;
 namespace CSRoad
 {
 class FAssets;
@@ -524,11 +526,14 @@ public:
 	// The renderer of the landscape edit layer LayerGuid, when the network shapes the terrain through it.
 	UCSRoadTerrainRenderer* TerrainRendererOf(const FGuid& LayerGuid) const;
 
-	// Tests: waits until every tile mesh edit on its way has run and every decal fit has landed, and
+	// Tests: waits until every mesh write on its way has run and every decal fit has landed, and
 	// draws them.
 	void FinishWrites();
-	// Tests: whether a build in tiles waits for the GPU between ticks (Tick ends it).
+	// Tests: whether a build waits for the GPU between ticks (Tick ends it).
 	bool IsBuilding() const;
+	// Tests: whether the preview is still to be made again for the network as last built (edits settling), or its GPU
+	// round trip is on its way.
+	bool IsPreviewPending() const;
 	// Tests: the spline roads (the garages' driveways after the drawn ones) and the network the last build in tiles made
 	// of them; null before one.
 	const TArray<CSRoad::FSplineRoad>* SplinesForTest() const { return LastSplines.Get(); }
@@ -615,7 +620,11 @@ private:
 	// The roads and nodes as last built, and the snapshot lending the terrain (null: none).
 	TSharedPtr<const CSRoad::FSavedNetwork> PreviewRoads;
 	TSharedPtr<const CSRoad::FSavedNetwork> PreviewTerrain;
+	// Starts making the preview again: its GPU round trip (PreviewJob), polled by TickPreviewJob, which makes it once it
+	// has landed. A build that starts first drops it.
 	void RefreshPreview();
+	void TickPreviewJob();
+	TUniquePtr<FCSRoadNetworkActor_PreviewJob> PreviewJob;
 
 	// Tiles by (column, row) of the network's ground plane, when it builds in tiles. Kept out of undo:
 	// the tiles are rebuilt outside transactions, so a restored map would name components gone since.
@@ -636,7 +645,7 @@ private:
 	void TickBakes();
 	// NumNaniteTiles and GpuMeshMiB as the tiles stand.
 	void UpdateBakeStats();
-	// What a tile's GPU mesh holds as GpuMeshBudget counts it, and all of them.
+	// What a tile's GPU meshes hold (the one drawn, and a newer one on its way) as GpuMeshBudget counts it, and all of them.
 	static int64 TileGpuBytes(const FCSRoadTile& Tile);
 	int64 GpuMeshBytes() const;
 	// What a tile of Roads roads will hold: as its last build (Known), else TrianglesPerRoad a road.
@@ -661,6 +670,8 @@ private:
 		TSharedPtr<const CSRoad::FGpuRoadMeshInput> SharedMesh;
 		TSharedPtr<const CSRoad::FGpuDecalInput> SharedDecals;
 		TSharedPtr<CSRoad::FDecalFitReadback> Fit;
+		// With SharedMesh: runs once the edit has run, with the mesh written (null: gone first), to draw it.
+		TFunction<void(UCSMesh*)> OnLanded;
 		double AllocationMs = 0.0;
 		double RoadMs = 0.0;
 		// The GPU mesh refused to grow for want of video memory: nothing of the mesh was changed.
@@ -676,8 +687,8 @@ private:
 	// The city buildings' garages joined to the main roads among Splines: a driveway spline for each that needs one,
 	// after the drawn ones (CSCityGarage). Sets NumGarages, NumJoinedGarages and the buildings' GarageStatus.
 	void AddGarageRoads(TArray<CSRoad::FSplineRoad>& Splines, CSRoad::FAssets& Assets);
-	// Rebuild's work. bWait: every GPU round trip waited for. Else (Tick) a build in tiles waits for the
-	// GPU a tick at a time (TileJob) and writes the tiles without waiting for the render thread.
+	// Rebuild's work. bWait: every GPU round trip waited for. Else (Tick) a build waits for the GPU a tick
+	// at a time (TileJob, WholeJob) and writes its meshes without waiting for the render thread.
 	void RunBuild(bool bWait);
 	// What a build that ended leaves: its error, the stats, the next build its pending tiles ask for.
 	void EndBuild(bool bBuilt, const FString& Error, double Milliseconds);
@@ -687,8 +698,13 @@ private:
 	bool AdvanceTiles(FCSRoadNetworkActor_TileJob& Job, FString& OutError);
 	// The build in tiles waiting for the GPU between ticks.
 	TUniquePtr<FCSRoadNetworkActor_TileJob> TileJob;
-	// Allocates the target and records the road mesh into it, on the build's geometry when
-	// SharedGeometry holds it (else the graph runs it again).
+	// A whole build (not in tiles) once its refinement counts and geometry have landed: the mesh, the decals, the preview.
+	bool FinishWholeBuild(FCSRoadNetworkActor_WholeJob& Job, FString& OutError);
+	// The whole build waiting for the GPU between ticks.
+	TUniquePtr<FCSRoadNetworkActor_WholeJob> WholeJob;
+	// Records the road mesh into the target, on the build's geometry when SharedGeometry holds it (else the graph
+	// runs it again): with SharedMesh without waiting (CSRoad::WriteMeshAsync, Targets.OnLanded drawing it), else
+	// allocating and editing it there and then.
 	bool WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry, const CSRoad::FPooledGeometry& SharedGeometry, const CSRoad::FGpuRoadMeshInput& MeshInput,
 		const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FAssets& Assets, FMeshTargets& Targets, FString& OutError);
 	// The decals' instances into Components (made or dropped to fit, named Name_<n>); returns how many.
@@ -700,9 +716,11 @@ private:
 	// Draws whichever queued decals have landed; the latest of them wins. Returns whether any did.
 	bool TickDecalFits(TArray<TSharedPtr<CSRoad::FDecalFitReadback>>& Fits, TArray<TObjectPtr<UInstancedStaticMeshComponent>>& Components, const FString& Name, int32& OutInstances);
 	void TickAllDecalFits();
-	// Runs the tiles' mesh edits still on their way to the end (their game-thread ends included).
-	void LandTileEdits();
-	bool AnyTileEditInFlight() const;
+	// Runs the mesh writes still on their way to the end (their game-thread ends included): every network's and
+	// city building's (CSRoad::LandMeshWrites).
+	void LandWrites();
+	// A tile's latest road mesh drawn once it has landed (Landed: the mesh that did), and its bake gone.
+	void ShowTile(const FIntPoint& Key, UCSMesh* Landed);
 	// DecalMaterial and FittedDecalMaterial with the albedo and tint of each of the decals' surfaces'
 	// M_CS2 materials, made now for when the decals draw (MissingMarkingSurfaces: those without).
 	void ResolveDecalMaterials(const CSRoad::FGpuDecalInput& Decals, const TMap<FString, UMaterialInterface*>& ByBaseColor, const CSRoad::FAssets& Assets);

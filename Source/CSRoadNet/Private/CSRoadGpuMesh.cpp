@@ -1,5 +1,6 @@
 #include "CSRoadGpuMesh.h"
 
+#include "CSMesh.h"
 #include "CSRoadGpuShaders.h"
 #include "DataDrivenShaderPlatformInfo.h"
 #include "GlobalShader.h"
@@ -243,7 +244,8 @@ bool RunGraphBlocking(TFunctionRef<TArray<FRDGBufferRef>(FRDGBuilder&)> Record, 
 			Readbacks[I]->Unlock();
 		}
 	});
-	FlushRenderingCommands();
+	// Counted (UCSMesh::GetBlockingFlushCount), as every wait for the render thread is.
+	UCSMesh::CountedBlockingFlush();
 	return bRead;
 }
 
@@ -658,7 +660,7 @@ void FRefineCountsReadback::Wait()
 	{
 		ENQUEUE_RENDER_COMMAND(CSRoadRefineCountsWait)([](FRHICommandListImmediate& RHICmdList) { RHICmdList.SubmitAndBlockUntilGPUIdle(); });
 		Poll();
-		FlushRenderingCommands();
+		UCSMesh::CountedBlockingFlush();
 	}
 }
 

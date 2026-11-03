@@ -186,7 +186,8 @@ bool FCSRoadTilesActorTest::RunTest(const FString& Parameters)
 		Network->FinishWrites();
 		TMap<FString, uint32> Out;
 		TArray<UCSMeshRenderComponent*> Components = CSRoadTest::Built<UCSMeshRenderComponent>(Network);
-		for (const UCSMeshRenderComponent* Component : Components) if (Component->GetName().StartsWith(TEXT("RoadTile")) && Component->GetGpuMesh()) Out.Add(Component->GetName(), Component->GetGpuMesh()->GetGeneration());
+		// A mesh written anew in place of the last one (no room in it) changed too, whatever its generation.
+		for (const UCSMeshRenderComponent* Component : Components) if (Component->GetName().StartsWith(TEXT("RoadTile")) && Component->GetGpuMesh()) Out.Add(Component->GetName(), HashCombine(GetTypeHash(Component->GetGpuMesh()), Component->GetGpuMesh()->GetGeneration()));
 		return Out;
 	};
 
@@ -284,7 +285,7 @@ bool FCSRoadTilesSubgraphTest::RunTest(const FString& Parameters)
 		TMap<FString, uint32> Out;
 		TArray<UCSMeshRenderComponent*> Components = CSRoadTest::Built<UCSMeshRenderComponent>(Network);
 		const FString Prefix = FString::Printf(TEXT("RoadTile_%d_"), X);
-		for (const UCSMeshRenderComponent* Component : Components) if (Component->GetName().StartsWith(Prefix) && Component->GetGpuMesh()) Out.Add(Component->GetName(), Component->GetGpuMesh()->GetGeneration());
+		for (const UCSMeshRenderComponent* Component : Components) if (Component->GetName().StartsWith(Prefix) && Component->GetGpuMesh()) Out.Add(Component->GetName(), HashCombine(GetTypeHash(Component->GetGpuMesh()), Component->GetGpuMesh()->GetGeneration()));
 		return Out;
 	};
 	const FCSRoadTileTests_Output Whole = Build(false);
@@ -312,9 +313,15 @@ bool FCSRoadTilesSubgraphTest::RunTest(const FString& Parameters)
 		}
 		AddInfo(FString::Printf(TEXT("%s: %d of %d tiles rebuilt, %d roads graphed of %d"), *Case, Network->TilesRebuilt, Network->NumTiles, Graphed, Roads));
 		const FCSRoadTileTests_Output Edited = CSRoadTileTests_Read(Network);
-		// The traffic preview, stale while edits go on, made again once they settle.
+		// The traffic preview, stale while edits go on, made again once they settle (its GPU geometry a frame or two later).
 		FPlatformProcess::Sleep(0.35f);
 		Network->Tick(0.0f);
+		for (int32 Frame = 0; Frame < 500 && Network->IsPreviewPending(); Frame++)
+		{
+			FlushRenderingCommands();
+			Network->Tick(0.0f);
+		}
+		TestFalse(Case + TEXT(": preview made"), Network->IsPreviewPending());
 		const int32 Lanes = Network->NumTrafficLanes;
 		CSRoadTileTests_Compare(*this, Case, Edited, Build(false));
 		TestEqual(Case + TEXT(": traffic lanes once edits settle"), Lanes, Network->NumTrafficLanes);

@@ -2,6 +2,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "CSRoadMeshWrite.h"
 #include "CSRoadNet.h"
 #include "CSRoadNetworkActor.h"
 #include "HAL/FileManager.h"
@@ -24,6 +25,8 @@ void TickBuild(ACSRoadNetworkActor* Network)
 		FPlatformProcess::Sleep(0.001f);
 		Network->Tick(0.0f);
 	}
+	// The meshes it wrote without waiting, landed and drawn.
+	CSRoad::LandMeshWrites();
 }
 
 FString PrefabDir()

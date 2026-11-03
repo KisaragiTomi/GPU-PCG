@@ -1,6 +1,7 @@
 #include "CSRoadGpuGeometry.h"
 
 #include "CSRoadNet.h"
+#include "CSMesh.h"
 #include "CSRoadGpuShaders.h"
 #include "CSRoadNetworkFile.h"
 #include "DataDrivenShaderPlatformInfo.h"
@@ -384,7 +385,8 @@ bool RunGeometryBlocking(const FGpuGeometryInput& Input, FGpuGeometryResult& Out
 			delete Readbacks[Index];
 		}
 	});
-	FlushRenderingCommands();
+	// Counted (UCSMesh::GetBlockingFlushCount), as every wait for the render thread is.
+	UCSMesh::CountedBlockingFlush();
 	OutResult.Milliseconds = (FPlatformTime::Seconds() - StartTime) * 1000.0;
 	if (!bRead)
 	{

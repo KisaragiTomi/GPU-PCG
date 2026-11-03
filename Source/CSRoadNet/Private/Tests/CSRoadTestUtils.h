@@ -36,8 +36,8 @@ TArray<FString> GoldenScenarioIds();
 TArray<double> Numbers(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field);
 TArray<double> Numbers(const TArray<TSharedPtr<FJsonValue>>& Values);
 
-// Ticks the network as the editor's frames would until the build a tick starts has ended: a build in
-// tiles waits for the GPU between ticks.
+// Ticks the network as the editor's frames would until the build a tick starts has ended (a build waits
+// for the GPU between ticks), then lands the meshes it wrote without waiting.
 void TickBuild(ACSRoadNetworkActor* Network);
 
 // The components of a class the network has built (on its content actor; none before it built).

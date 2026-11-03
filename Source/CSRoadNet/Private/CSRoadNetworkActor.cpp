@@ -13,6 +13,7 @@
 #include "CSRoadDecalInstances.h"
 #include "CSRoadGpuDecals.h"
 #include "CSRoadGpuMesh.h"
+#include "CSRoadMeshWrite.h"
 #include "CSRoadNanite.h"
 #include "CSRoadNet.h"
 #include "CSRoadNetworkContent.h"
@@ -57,15 +58,20 @@ namespace
 TAutoConsoleVariable<int32> CVarCSRoadBakeLog(TEXT("CSRoad.BakeLog"), 0,
 	TEXT("1: road networks log the game-thread time their tick spends past 2 ms (rebuilds and Nanite bakes, by step), and once a second the frame's game, render, RHI and GPU times."));
 
-// What a road mesh of that many vertices and indices takes in VRAM as the budget counts it: its eight
-// streams (positions, tangents, one UV set, colours, indices, material ids, draw args, counters) in the
-// pools' 64 KiB granules, and its ray tracing BLAS, about 31 bytes a triangle on Palmsland.
-int64 CSRoadNetworkActor_GpuMeshBytes(uint32 Vertices, uint32 Indices)
+// What the streams of a road mesh of that many vertices and indices take in VRAM as the budget counts them: eight
+// (positions, tangents, one UV set, colours, indices, material ids, draw args, counters) in the pools' 64 KiB granules.
+int64 CSRoadNetworkActor_StreamBytes(uint32 Vertices, uint32 Indices)
 {
 	const int64 Granule = 64 << 10;
-	int64 Bytes = int64(Indices / 3) * 31;
+	int64 Bytes = 0;
 	for (const int64 Stream : { int64(Vertices) * 12, int64(Vertices) * 8, int64(Vertices) * 8, int64(Vertices) * 4, int64(Indices) * 4, int64(Indices / 3) * 4, int64(1), int64(1) }) Bytes += Align(Stream, Granule);
 	return Bytes;
+}
+
+// The streams, and the mesh's ray tracing BLAS: about 31 bytes a triangle on Palmsland.
+int64 CSRoadNetworkActor_GpuMeshBytes(uint32 Vertices, uint32 Indices)
+{
+	return CSRoadNetworkActor_StreamBytes(Vertices, Indices) + int64(Indices / 3) * 31;
 }
 
 // Where the refinement warning points: the node whose mesh left the most leaves unconverged (world cm).
@@ -381,6 +387,8 @@ struct FCSRoadNetworkActor_TileJob
 	FCSRoadNetworkActor_Subgraph Drawing;
 	// Detected, or Drawing when it was needed.
 	FCSRoadNetworkActor_Subgraph* Graphed = nullptr;
+	// Drawing was made again to count the whole batch, which its first sub-graph had not.
+	bool bRecounted = false;
 
 	// Game-thread time: before the tiles (OtherMs), in them (GameMs), and per stage, where waiting for
 	// the GPU (WaitMs, bWait) is not counted; ticks waiting for it (not bWait).
@@ -395,6 +403,48 @@ struct FCSRoadNetworkActor_TileJob
 
 	const CSRoad::FSavedTerrain* Terrain() const { return Snapshot && Snapshot->Terrain.IsValid() ? &Snapshot->Terrain : nullptr; }
 	FCSRoadNetworkActor_Subgraph* Waiting() { return Detected.Readback ? &Detected : Drawing.Readback ? &Drawing : nullptr; }
+};
+
+// A whole build (not in tiles) from its graph on: the GPU round trip of its refinement counts and geometry, waited for
+// (Rebuild) or left on its way for Tick to finish once it has landed (WholeJob).
+struct FCSRoadNetworkActor_WholeJob
+{
+	// What it builds from, held while it waits: the prefab data (the graph points into it), the snapshot lending the
+	// terrain (null: none).
+	TSharedPtr<FCSRoadNetworkActor_Library> Library;
+	TSharedPtr<const CSRoad::FSavedNetwork> Snapshot;
+	TMap<FString, UMaterialInterface*> ByBaseColor;
+	bool bMarkings = false;
+	bool bWait = true;
+	CSRoad::FGraph Graph;
+	// Holds the geometry and mesh inputs until it has landed.
+	TUniquePtr<CSRoad::FRefineCountsReadback> Readback;
+
+	// Game-thread time before the round trip (GameMs, and by step), and the ticks it waited.
+	double GameMs = 0.0;
+	double LibraryMs = 0.0;
+	double NetworkMs = 0.0;
+	double GraphMs = 0.0;
+	double InputMs = 0.0;
+	double MeshMs = 0.0;
+	// Waiting for the round trip (bWait).
+	double WaitMs = 0.0;
+	int32 Frames = 0;
+
+	const CSRoad::FSavedTerrain* Terrain() const { return Snapshot && Snapshot->Terrain.IsValid() ? &Snapshot->Terrain : nullptr; }
+};
+
+// RefreshPreview's GPU round trip, the whole network's geometry, on its way: the preview is made once it has landed.
+struct FCSRoadNetworkActor_PreviewJob
+{
+	TSharedPtr<FCSRoadNetworkActor_Library> Library;
+	TSharedPtr<const CSRoad::FSavedNetwork> Snapshot;
+	CSRoad::FGraph Graph;
+	TUniquePtr<CSRoad::FRefineCountsReadback> Readback;
+	double GameMs = 0.0;
+	double StartSeconds = 0.0;
+
+	const CSRoad::FSavedTerrain* Terrain() const { return Snapshot && Snapshot->Terrain.IsValid() ? &Snapshot->Terrain : nullptr; }
 };
 
 ACSRoadNetworkActor::ACSRoadNetworkActor()
@@ -529,7 +579,9 @@ ACSRoadNetworkContent* ACSRoadNetworkActor::EnsureContent()
 void ACSRoadNetworkActor::DestroyContent()
 {
 	TileJob.Reset();
-	LandTileEdits();
+	WholeJob.Reset();
+	PreviewJob.Reset();
+	LandWrites();
 	Tiles.Reset();
 	BuildingTiles.Reset();
 	if (TileState) TileState->Reset();
@@ -576,11 +628,28 @@ void ACSRoadNetworkActor::Tick(float DeltaSeconds)
 			EndBuild(bBuilt, Error, Milliseconds);
 		}
 	}
+	else if (WholeJob)
+	{
+		// A whole build waiting for the GPU goes on once its round trip has landed.
+		if (WholeJob->Readback->Poll())
+		{
+			const double FinishStart = FPlatformTime::Seconds();
+			const TUniquePtr<FCSRoadNetworkActor_WholeJob> Job = MoveTemp(WholeJob);
+			FString Error;
+			const bool bBuilt = FinishWholeBuild(*Job, Error);
+			EndBuild(bBuilt, Error, Job->GameMs + (FPlatformTime::Seconds() - FinishStart) * 1000.0);
+		}
+		else WholeJob->Frames++;
+	}
 	else if (bRebuildRequested)
 	{
-		// Tiles left pending wait until bakes free room in the budget for the next one.
+		// Tiles left pending wait until bakes free room in the budget for the next one; edits and tiles alike wait
+		// while video memory is short. A whole build waits while the last one's mesh edit is on its way: writing
+		// behind it would wait for it.
 		const int64 Held = bPendingOnly ? GpuMeshBytes() : 0;
-		if (!bPendingOnly || Held == 0 || Held + NextTileBytes <= GpuMeshBudgetBytes())
+		if (!bLocalUpdate && Mesh && Mesh->IsEditInFlight()) {}
+		else if (VideoMemoryShort(bPendingOnly ? NextTileBytes : 0)) bWaitingForVideoMemory = true;
+		else if (!bPendingOnly || Held == 0 || Held + NextTileBytes <= GpuMeshBudgetBytes())
 		{
 			bReuseNetwork = bPendingOnly;
 			RunBuild(false);
@@ -588,7 +657,8 @@ void ACSRoadNetworkActor::Tick(float DeltaSeconds)
 		}
 	}
 	// Edits have settled and no tiles wait: the preview of the whole network as last built.
-	else if (bPreviewStale && FPlatformTime::Seconds() - LastBuildSeconds > 0.3) RefreshPreview();
+	else if (bPreviewStale && !PreviewJob && FPlatformTime::Seconds() - LastBuildSeconds > 0.3) RefreshPreview();
+	TickPreviewJob();
 	if (CVarCSRoadBakeLog.GetValueOnGameThread() != 0)
 	{
 		const double TickMs = (FPlatformTime::Seconds() - Start) * 1000.0;
@@ -974,21 +1044,29 @@ void ACSRoadNetworkActor::Rebuild()
 {
 	// A build waiting for the GPU gives way: it has written nothing yet.
 	TileJob.Reset();
+	WholeJob.Reset();
 	RunBuild(true);
 }
 
 bool ACSRoadNetworkActor::IsBuilding() const
 {
-	return TileJob.IsValid();
+	return TileJob.IsValid() || WholeJob.IsValid();
+}
+
+bool ACSRoadNetworkActor::IsPreviewPending() const
+{
+	return bPreviewStale || PreviewJob.IsValid();
 }
 
 void ACSRoadNetworkActor::RunBuild(bool bWait)
 {
 	const double StartTime = FPlatformTime::Seconds();
 	// What spline roads asked for until now is in this build. The build makes the preview again, or,
-	// building in tiles, RefreshPreview does once edits settle; until then the last one stays up.
+	// building in tiles, RefreshPreview does once edits settle; until then the last one stays up (one on its
+	// way is of the network before this build, and goes).
 	bRebuildRequested = false;
 	bWaitingForVideoMemory = false;
+	PreviewJob.Reset();
 	FString Error;
 	const bool bBuilt = BuildRoads(bWait, Error);
 	const double Milliseconds = (FPlatformTime::Seconds() - StartTime) * 1000.0;
@@ -996,6 +1074,11 @@ void ACSRoadNetworkActor::RunBuild(bool bWait)
 	if (bBuilt && TileJob)
 	{
 		TileJob->OtherMs = Milliseconds - TileJob->GameMs;
+		return;
+	}
+	if (bBuilt && WholeJob)
+	{
+		WholeJob->GameMs = Milliseconds;
 		return;
 	}
 	EndBuild(bBuilt, Error, Milliseconds);
@@ -1025,6 +1108,7 @@ void ACSRoadNetworkActor::EndBuild(bool bBuilt, const FString& Error, double Mil
 void ACSRoadNetworkActor::RefreshPreview()
 {
 	bPreviewStale = false;
+	PreviewJob.Reset();
 	if (!PreviewRoads || PreviewRoads->Roads.Num() == 0)
 	{
 		ClearPreview();
@@ -1032,24 +1116,44 @@ void ACSRoadNetworkActor::RefreshPreview()
 	}
 	const double StartTime = FPlatformTime::Seconds();
 	FString Error;
-	const TSharedPtr<FCSRoadNetworkActor_Library> Library = CSRoadNetworkActor_Library(ResolveAssetDirectory(), Error);
-	const CSRoad::FSavedTerrain* Terrain = PreviewTerrain && PreviewTerrain->Terrain.IsValid() ? &PreviewTerrain->Terrain : nullptr;
-	CSRoad::FGraph Graph;
-	Graph.bLeftHandTraffic = PreviewRoads->bLeftHandTraffic;
+	TUniquePtr<FCSRoadNetworkActor_PreviewJob> Job = MakeUnique<FCSRoadNetworkActor_PreviewJob>();
+	Job->Library = CSRoadNetworkActor_Library(ResolveAssetDirectory(), Error);
+	Job->Snapshot = PreviewTerrain && PreviewTerrain->Terrain.IsValid() ? PreviewTerrain : nullptr;
+	Job->Graph.bLeftHandTraffic = PreviewRoads->bLeftHandTraffic;
+	CSRoad::FGpuGeometryInput Geometry;
+	if (!Job->Library || !Job->Graph.Build(Job->Library->Assets, PreviewRoads->Roads, PreviewRoads->Nodes, Error) || !Geometry.Build(Job->Graph, Job->Library->Assets, Job->Terrain(), Error))
+	{
+		UE_LOG(LogCSRoadNet, Warning, TEXT("%s: the traffic and bridge preview could not be made: %s"), *GetName(), *Error);
+		return;
+	}
+	// The roads' geometry comes back from the GPU a frame or two later (TickPreviewJob); nothing waits for it.
+	Job->Readback = MakeUnique<CSRoad::FRefineCountsReadback>(MoveTemp(Geometry), CSRoad::FGpuRoadMeshInput(), Job->Snapshot);
+	Job->StartSeconds = StartTime;
+	Job->GameMs = (FPlatformTime::Seconds() - StartTime) * 1000.0;
+	PreviewJob = MoveTemp(Job);
+}
+
+void ACSRoadNetworkActor::TickPreviewJob()
+{
+	if (!PreviewJob || !PreviewJob->Readback->Poll()) return;
+	const double StartTime = FPlatformTime::Seconds();
+	const TUniquePtr<FCSRoadNetworkActor_PreviewJob> Job = MoveTemp(PreviewJob);
+	FString Error;
 	CSRoad::FGpuGeometryInput Geometry;
 	CSRoad::FGpuRoadMeshInput NoInstances;
 	CSRoad::FGpuGeometryResult Result;
-	if (!Library || !Graph.Build(Library->Assets, PreviewRoads->Roads, PreviewRoads->Nodes, Error) || !Geometry.Build(Graph, Library->Assets, Terrain, Error)
-		|| !CSRoad::RunRefineCountsBlocking(Geometry, NoInstances, Error, &Result))
+	CSRoad::FPooledGeometry Kept;
+	if (!Job->Readback->Finish(Geometry, NoInstances, Result, Kept, Error))
 	{
 		UE_LOG(LogCSRoadNet, Warning, TEXT("%s: the traffic and bridge preview could not be made: %s"), *GetName(), *Error);
 		return;
 	}
 	CSRoad::FRoadLanes Lanes;
-	Lanes.Build(Graph, Library->Assets, Result);
+	Lanes.Build(Job->Graph, Job->Library->Assets, Result);
 	ClearPreview();
-	BuildPreview(Graph, Lanes, Result, Terrain);
-	UE_LOG(LogCSRoadNet, Log, TEXT("%s: traffic and bridge preview of %d roads made again; %.0f ms"), *GetName(), Graph.Roads.Num(), (FPlatformTime::Seconds() - StartTime) * 1000.0);
+	BuildPreview(Job->Graph, Lanes, Result, Job->Terrain());
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: traffic and bridge preview of %d roads made again; %.0f ms (graph %.0f ms, then the GPU geometry %.0f ms later)"), *GetName(), Job->Graph.Roads.Num(),
+		Job->GameMs + (FPlatformTime::Seconds() - StartTime) * 1000.0, Job->GameMs, (StartTime - Job->StartSeconds) * 1000.0);
 }
 
 bool ACSRoadNetworkActor::BuildRoads(bool bWait, FString& OutError)
@@ -1158,26 +1262,71 @@ bool ACSRoadNetworkActor::BuildRoads(bool bWait, FString& OutError)
 	LastSplines.Reset();
 	PreviewTerrain.Reset();
 	bPreviewStale = false;
-	CSRoad::FGraph Graph;
-	Graph.bLeftHandTraffic = bLeftHand;
+	TUniquePtr<FCSRoadNetworkActor_WholeJob> Job = MakeUnique<FCSRoadNetworkActor_WholeJob>();
+	Job->Library = Library;
+	Job->Snapshot = Terrain ? Snapshot : nullptr;
+	Job->ByBaseColor = ByBaseColor;
+	Job->bMarkings = bMarkings;
+	Job->bWait = bWait;
+	Job->LibraryMs = LibraryMs;
+	Job->NetworkMs = NetworkMs;
+	Job->Graph.bLeftHandTraffic = bLeftHand;
+	if (!Job->Graph.Build(Library->Assets, Specs, Nodes, OutError)) return false;
+	Job->GraphMs = Lap();
 	CSRoad::FGpuGeometryInput Geometry;
-	if (!Graph.Build(Library->Assets, Specs, Nodes, OutError)) return false;
-	const double GraphMs = Lap();
-	if (!Geometry.Build(Graph, Library->Assets, Terrain, OutError)) return false;
-	const double InputMs = Lap();
+	if (!Geometry.Build(Job->Graph, Library->Assets, Terrain, OutError)) return false;
+	Job->InputMs = Lap();
 	CSRoad::FGpuRoadMeshInput MeshInput;
-	if (!MeshInput.Build(Graph, Library->Assets, OutError)) return false;
-	const double MeshMs = Lap();
-	// First graph: the refined node meshes' size is decided on the GPU, and the lane graph and the
-	// decal setup run on the CPU from the GPU geometry. The geometry is kept for the mesh graph.
+	if (!MeshInput.Build(Job->Graph, Library->Assets, OutError)) return false;
+	Job->MeshMs = Lap();
+	// First graph: the refined node meshes' size is decided on the GPU, and the lane graph and the decal setup
+	// run on the CPU from the GPU geometry (the lane graph even with markings and traffic hidden, so that
+	// switching them on is instant). The geometry is kept for the mesh graph. Rebuild waits for it here; else
+	// Tick finishes the build once it has landed.
+	Job->Readback = MakeUnique<CSRoad::FRefineCountsReadback>(MoveTemp(Geometry), MoveTemp(MeshInput), Job->Snapshot);
+	if (!bWait)
+	{
+		WholeJob = MoveTemp(Job);
+		return true;
+	}
+	Job->Readback->Wait();
+	Job->WaitMs = Lap();
+	return FinishWholeBuild(*Job, OutError);
+}
+
+bool ACSRoadNetworkActor::FinishWholeBuild(FCSRoadNetworkActor_WholeJob& Job, FString& OutError)
+{
+	double LapStart = FPlatformTime::Seconds();
+	auto Lap = [&LapStart]()
+	{
+		const double Now = FPlatformTime::Seconds();
+		const double Milliseconds = (Now - LapStart) * 1000.0;
+		LapStart = Now;
+		return Milliseconds;
+	};
+	if (!EnsureContent())
+	{
+		OutError = TEXT("No world to build in");
+		return false;
+	}
+	CSRoad::FAssets& Assets = Job.Library->Assets;
+	const CSRoad::FGraph& Graph = Job.Graph;
+	const bool bMarkings = Job.bMarkings;
+	// Shared: an edit that does not wait keeps them until it has run.
+	const TSharedRef<CSRoad::FGpuRoadMeshInput> SharedMesh = MakeShared<CSRoad::FGpuRoadMeshInput>();
+	const TSharedRef<CSRoad::FGpuDecalInput> SharedDecals = MakeShared<CSRoad::FGpuDecalInput>();
+	CSRoad::FGpuRoadMeshInput& MeshInput = *SharedMesh;
+	CSRoad::FGpuDecalInput& Decals = *SharedDecals;
+	CSRoad::FGpuGeometryInput Geometry;
 	CSRoad::FGpuGeometryResult GeometryResult;
 	CSRoad::FPooledGeometry SharedGeometry;
-	// Cache the lane graph even with markings/traffic hidden, so the visibility switch is instant.
-	if (!CSRoad::RunRefineCountsBlocking(Geometry, MeshInput, OutError, &GeometryResult, &SharedGeometry)) return false;
+	const TUniquePtr<CSRoad::FRefineCountsReadback> Readback = MoveTemp(Job.Readback);
+	if (!Readback->Finish(Geometry, MeshInput, GeometryResult, SharedGeometry, OutError)) return false;
 	if (MeshInput.NumUnconverged > 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %u node mesh triangles did not converge in 20 refinement passes%s"), *GetName(), MeshInput.NumUnconverged, *CSRoadNetworkActor_Unconverged(Graph, MeshInput, GetActorTransform()));
 	const double RefineMs = Lap();
-	CSRoad::FGpuDecalInput Decals;
-	if (bMarkings && !Decals.Build(Graph, Library->Assets, GeometryResult, MeshInput, ResolveAssetDirectory(), OutError)) return false;
+	// The materials as they stand now, for a job that waited ticks for the GPU.
+	if (Job.Frames > 0) Job.ByBaseColor = CSRoadNetworkActor_Materials(MaterialFolder.Path);
+	if (bMarkings && !Decals.Build(Graph, Assets, GeometryResult, MeshInput, OutError)) return false;
 	const double DecalSetupMs = Lap();
 	if (MeshInput.NumVertices == 0 || MeshInput.NumIndices == 0)
 	{
@@ -1188,12 +1337,24 @@ bool ACSRoadNetworkActor::BuildRoads(bool bWait, FString& OutError)
 	FMeshTargets Targets;
 	Targets.Road = Content->RoadMesh;
 	Targets.RoadMesh = &Mesh;
+	if (!Job.bWait)
+	{
+		Targets.SharedMesh = SharedMesh;
+		Targets.OnLanded = [Network = TWeakObjectPtr<ACSRoadNetworkActor>(this)](UCSMesh* Landed)
+		{
+			const ACSRoadNetworkActor* This = Network.Get();
+			CSRoad::ShowLatest(This && This->Content ? This->Content->RoadMesh.Get() : nullptr, This ? This->Mesh.Get() : nullptr, Landed);
+		};
+	}
 	if (bMarkings)
 	{
-		ResolveDecalMaterials(Decals, ByBaseColor, Library->Assets);
+		ResolveDecalMaterials(Decals, Job.ByBaseColor, Assets);
 		Targets.Decals = &Decals;
+		if (!Job.bWait) Targets.SharedDecals = SharedDecals;
 	}
-	if (!WriteMeshes(Geometry, SharedGeometry, MeshInput, ByBaseColor, Library->Assets, Targets, OutError)) return false;
+	// A write that waits lands those still on their way first, whose state would land after its own.
+	if (Job.bWait) LandWrites();
+	if (!WriteMeshes(Geometry, SharedGeometry, MeshInput, Job.ByBaseColor, Assets, Targets, OutError)) return false;
 	(void)Lap();
 	if (bMarkings)
 	{
@@ -1206,17 +1367,17 @@ bool ACSRoadNetworkActor::BuildRoads(bool bWait, FString& OutError)
 		DestroyComponents(Content->MarkingDecals);
 	}
 	const double DecalMs = Lap();
-	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads, %u vertices, %u triangles, %d compositions, %d decals (%d lanes, %d instances); prefab data %.0f ms, splines %.0f ms, graph and compositions %.0f ms, geometry input %.0f ms, composition meshes %.0f ms, refinement counts %.0f ms, lanes and decal setup %.0f ms, allocation %.0f ms, road GPU build %.0f ms, decals %.0f ms"),
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d roads, %u vertices, %u triangles, %d compositions, %d decals (%d lanes, %d instances); prefab data %.0f ms, splines %.0f ms, graph and compositions %.0f ms, geometry input %.0f ms, composition meshes %.0f ms, refinement counts %.0f ms (%d ticks waiting for them), lanes and decal setup %.0f ms, allocation %.0f ms, road GPU build %.0f ms, decals %.0f ms"),
 		*GetName(), Graph.Roads.Num(), MeshInput.NumVertices, MeshInput.NumIndices / 3, Graph.Compositions.Num() - 1, Decals.Items.Num(), Decals.Lanes.Lanes.Num(), NumMarkingInstances,
-		LibraryMs, NetworkMs, GraphMs, InputMs, MeshMs, RefineMs, DecalSetupMs, Targets.AllocationMs, Targets.RoadMs, DecalMs);
+		Job.LibraryMs, Job.NetworkMs, Job.GraphMs, Job.InputMs, Job.MeshMs, Job.WaitMs + RefineMs, Job.Frames, DecalSetupMs, Targets.AllocationMs, Targets.RoadMs, DecalMs);
 
 	NumRoads = Graph.Roads.Num();
 	NumVertices = int32(MeshInput.NumVertices);
 	NumTriangles = int32(MeshInput.NumIndices / 3);
 	CSRoad::FRoadLanes PreviewLanes;
-	if (!bMarkings) PreviewLanes.Build(Graph, Library->Assets, GeometryResult);
+	if (!bMarkings) PreviewLanes.Build(Graph, Assets, GeometryResult);
 	ClearPreview();
-	BuildPreview(Graph, bMarkings ? Decals.Lanes : PreviewLanes, GeometryResult, Terrain);
+	BuildPreview(Graph, bMarkings ? Decals.Lanes : PreviewLanes, GeometryResult, Job.Terrain());
 	return true;
 }
 
@@ -1427,18 +1588,32 @@ bool ACSRoadNetworkActor::AdvanceTiles(FCSRoadNetworkActor_TileJob& Job, FString
 				}
 			}
 		}
-		// Counted with the sub-graph; a batch past what it counted (rare) is counted again here, waiting.
+		// Counted with the sub-graph. A batch past what it counted (rare) has the sub-graph made again counting all of it, a
+		// GPU round trip more that the job waits a tick at a time for; a job that waits counts it here.
 		CSRoad::FGpuRoadMeshInput Recounted;
 		const CSRoad::FGpuRoadMeshInput* Counted = &Recounted;
 		if (Graphed->Counts(All)) Counted = &Graphed->Counted;
+		else if (All.Num() > 0 && !Job.bWait && !Job.bRecounted)
+		{
+			TArray<int32> Counting;
+			for (const CSRoad::FGpuInstanceRef& Ref : All) Counting.AddUnique(Graphed->Specs[Graph.Roads[Ref.Road].SpecIndex]);
+			FCSRoadNetworkActor_Subgraph Again;
+			if (!CSRoadNetworkActor_BuildSubgraph(Assets, Specs, Nodes, bLeftHand, Terrain, Job.Snapshot, Graphed->Specs, Again, OutError, &Counting, &TileState->Compositions)) return Fail();
+			Job.Drawing = MoveTemp(Again);
+			Job.Graphed = &Job.Drawing;
+			Job.bRecounted = true;
+			Job.GraphMs += Lap();
+			continue;
+		}
 		else if (All.Num() > 0 && (!Recounted.BuildSubset(Graph, Assets, All, {}, &TileState->Compositions, OutError) || !CSRoad::RunRefineCountsBlocking(Graphed->Input, Recounted, OutError, nullptr, &Job.Graphed->Shared))) return Fail();
 		if (Counted->NumUnconverged > 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: %u node mesh triangles did not converge in 20 refinement passes%s"), *GetName(), Counted->NumUnconverged, *CSRoadNetworkActor_Unconverged(Graph, *Counted, GetActorTransform()));
 		const double CountMs = Lap();
 
 		// Each tile: the roads in it drawn, and their decals. A tile whose GPU mesh, its size now known, does
-		// not fit the budget while another GPU mesh holds some stops the batch: it and the rest stay pending.
-		// Writes that wait land the edits still on their way first, whose state would land after theirs.
-		if (Job.bWait) LandTileEdits();
+		// not fit the budget while another GPU mesh holds some, or would leave too little video memory, stops the
+		// batch: it and the rest stay pending. Writes that wait land the edits still on their way first, whose
+		// state would land after theirs.
+		if (Job.bWait) LandWrites();
 		int32 Done = 0;
 		// Of the tiles' time, allocating and editing their GPU meshes (with Rebuild, waiting for the render thread).
 		double EditMs = 0.0;
@@ -1483,7 +1658,15 @@ bool ACSRoadNetworkActor::AdvanceTiles(FCSRoadNetworkActor_TileJob& Job, FString
 			FMeshTargets Targets;
 			Targets.Road = Tile.Road;
 			Targets.RoadMesh = &Tile.RoadMesh;
-			if (!Job.bWait) Targets.SharedMesh = SharedMesh;
+			if (!Job.bWait)
+			{
+				Targets.SharedMesh = SharedMesh;
+				Targets.OnLanded = [Network = TWeakObjectPtr<ACSRoadNetworkActor>(this), Key = Item.Key](UCSMesh* Landed)
+				{
+					if (ACSRoadNetworkActor* This = Network.Get()) This->ShowTile(Key, Landed);
+					else if (Landed) Landed->ReleaseDeferred();
+				};
+			}
 			if (bMarkings)
 			{
 				ResolveDecalMaterials(Decals, ByBaseColor, Assets);
@@ -1508,12 +1691,13 @@ bool ACSRoadNetworkActor::AdvanceTiles(FCSRoadNetworkActor_TileJob& Job, FString
 			}
 			VideoMemoryTaken += FMath::Max<int64>(Bytes - Held, 0);
 			EditMs += Targets.AllocationMs + Targets.RoadMs;
-			// A new GPU mesh: whatever was baked or baking is of the old one.
+			// A new GPU mesh: whatever was baked or baking is of the old one, and goes once it is drawn (ShowTile; now,
+			// written waiting).
 			Tile.WrittenSeconds = FPlatformTime::Seconds();
 			Tile.bBakeFailed = false;
 			Tile.Bake.Reset();
 			Tile.Baking = nullptr;
-			if (Tile.Nanite) Tile.Nanite->SetStaticMesh(nullptr);
+			if (Tile.Nanite && Job.bWait) Tile.Nanite->SetStaticMesh(nullptr);
 			Tile.Roads = Item.Roads.Num();
 			Tile.Vertices = int32(MeshInput.NumDrawnVertices);
 			Tile.Triangles = int32(MeshInput.NumDrawnIndices / 3);
@@ -1599,19 +1783,8 @@ bool ACSRoadNetworkActor::WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry,
 
 	UCSMeshRenderComponent* RoadComponent = Targets.Road;
 	TObjectPtr<UCSMesh>& RoadObject = *Targets.RoadMesh;
-	if (!RoadObject || RoadObject->GetOuter() != RoadComponent) RoadObject = NewObject<UCSMesh>(RoadComponent);
-	RoadObject->Materials = Materials;
-	RoadObject->NotifyMaterialsChanged();
 	RoadComponent->MeshMaterial = Materials.Num() > 0 ? Materials[0].Get() : FallbackMaterial.Get();
 	const int32 NumSlots = FMath::Max(1, Materials.Num());
-	if (!RoadObject->EnsureCapacitySync(int32(MeshInput.NumVertices), int32(MeshInput.NumIndices)))
-	{
-		OutError = FString::Printf(TEXT("Could not allocate %u vertices / %u indices"), MeshInput.NumVertices, MeshInput.NumIndices);
-		return false;
-	}
-	RoadObject->EnsureIndirectDrawCapacitySync(NumSlots);
-	RoadComponent->SetGpuMesh(RoadObject);
-	Targets.AllocationMs = Lap();
 
 	// One graph: the road surface; the heights its connectors and crosswalks lie at, from its triangles
 	// by their place in the index stream; then its material sections, which reorder them.
@@ -1623,29 +1796,56 @@ bool ACSRoadNetworkActor::WriteMeshes(const CSRoad::FGpuGeometryInput& Geometry,
 	TSharedPtr<CSRoad::FDecalFitReadback> Fit;
 	if (Decals) Fit = MakeShared<CSRoad::FDecalFitReadback>();
 	Targets.Fit = Fit;
-	// Without waiting: the edit holds what it reads, and publishes the sections once it has run. Behind
-	// an edit of this mesh still on its way, it waits for both (EditMeshSync).
+	// Without waiting: the edit holds what it reads; once it has run, the sections are published and the mesh is drawn
+	// (OnLanded). A mesh without the room is written into a new one that the render thread allocates with the edit,
+	// and that takes its place then (CSRoad::WriteMeshAsync): no flush for the room either.
 	const TSharedPtr<const CSRoad::FGpuDecalInput> SharedDecals = Decals ? Targets.SharedDecals : nullptr;
-	if (Targets.SharedMesh && (!Decals || SharedDecals) && SharedGeometry.IsValid() && !RoadObject->IsEditInFlight())
+	if (Targets.SharedMesh && (!Decals || SharedDecals) && SharedGeometry.IsValid())
 	{
 		const TSharedRef<FCSRoadNetworkActor_Recorded> Recorded = MakeShared<FCSRoadNetworkActor_Recorded>();
-		const bool bAccepted = RoadObject->EditMeshAsync(
+		const CSRoad::EMeshWrite Write = CSRoad::WriteMeshAsync(*RoadComponent, RoadObject, Materials, MeshInput.NumVertices, MeshInput.NumIndices, NumSlots,
 			[Shared = SharedGeometry, Mesh = Targets.SharedMesh, SharedDecals, Fit, LocalToWorld, WorldToLocal, WorldBounds, NumSlots, Recorded](FCSMeshEditContext& Context)
 			{
 				Recorded->bRecorded = CSRoadNetworkActor_RecordRoadMesh(Context, nullptr, Shared, *Mesh, SharedDecals.Get(), Fit, LocalToWorld, WorldToLocal, WorldBounds, NumSlots, Recorded->bSorted);
 			},
-			[Written = TWeakObjectPtr<UCSMesh>(RoadObject), Recorded, Name = GetName()](bool bBuilt)
+			[Recorded, Name = GetName(), OnLanded = Targets.OnLanded](UCSMesh* Landed)
 			{
-				if (!bBuilt || !Written.IsValid()) return;
-				if (Recorded->bSorted) UCSMeshOps::PublishMaterialSections(Written.Get());
-				if (!Recorded->bRecorded) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: a road tile mesh has no vertex streams"), *Name);
+				// The sections before the mesh is drawn: its component makes one proxy for both.
+				if (Landed && Recorded->bSorted) UCSMeshOps::PublishMaterialSections(Landed);
+				if (Landed && !Recorded->bRecorded) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: a road tile mesh has no vertex streams"), *Name);
+				if (OnLanded) OnLanded(Landed);
 			});
-		if (bAccepted)
+		Targets.RoadMs = Lap();
+		if (Write == CSRoad::EMeshWrite::Queued) return true;
+		if (Write == CSRoad::EMeshWrite::Refused)
 		{
-			Targets.RoadMs = Lap();
-			return true;
+			Targets.bRefused = true;
+			OutError = FString::Printf(TEXT("Could not allocate %u vertices / %u indices"), MeshInput.NumVertices, MeshInput.NumIndices);
 		}
+		else OutError = TEXT("The road mesh's last write is still on its way");
+		return false;
 	}
+
+	// Waiting (Rebuild): the room, then the edit, drawn at once.
+	if (!RoadObject || RoadObject->GetOuter() != RoadComponent) RoadObject = NewObject<UCSMesh>(RoadComponent);
+	// The arg sets of a mesh not yet allocated are only declared, and its allocation makes them: one flush, not two.
+	const FCSMeshResident* Resident = RoadObject->GetResidentPtr();
+	if (!Resident || !Resident->IsAllocated()) RoadObject->EnsureIndirectDrawCapacitySync(NumSlots);
+	// The room first: a mesh refused it (its video memory check) keeps what it drew, materials and all.
+	if (!RoadObject->EnsureCapacitySync(int32(MeshInput.NumVertices), int32(MeshInput.NumIndices)))
+	{
+		Targets.bRefused = true;
+		OutError = FString::Printf(TEXT("Could not allocate %u vertices / %u indices"), MeshInput.NumVertices, MeshInput.NumIndices);
+		return false;
+	}
+	RoadObject->Materials = Materials;
+	RoadObject->NotifyMaterialsChanged();
+	RoadObject->EnsureIndirectDrawCapacitySync(NumSlots);
+	// One written without waiting may be drawn in its place, or be about to: it goes.
+	UCSMesh* Shown = RoadComponent->GetGpuMesh();
+	RoadComponent->SetGpuMesh(RoadObject);
+	if (Shown && Shown != RoadObject && Shown->GetOuter() == RoadComponent) Shown->ReleaseDeferred();
+	Targets.AllocationMs = Lap();
 	bool bSorted = false;
 	bool bRecorded = false;
 	RoadObject->EditMeshSync([&](FCSMeshEditContext& Context)
@@ -1771,26 +1971,22 @@ void ACSRoadNetworkActor::TickAllDecalFits()
 	for (const TPair<FIntPoint, FCSRoadTile>& Pair : Tiles) NumMarkingInstances += Pair.Value.DecalInstances;
 }
 
-bool ACSRoadNetworkActor::AnyTileEditInFlight() const
+void ACSRoadNetworkActor::LandWrites()
 {
-	for (const TPair<FIntPoint, FCSRoadTile>& Pair : Tiles) if (Pair.Value.RoadMesh && Pair.Value.RoadMesh->IsEditInFlight()) return true;
-	return false;
+	CSRoad::LandMeshWrites();
 }
 
-void ACSRoadNetworkActor::LandTileEdits()
+void ACSRoadNetworkActor::ShowTile(const FIntPoint& Key, UCSMesh* Landed)
 {
-	// Each round: the render thread done with the edits, then their ends on the game thread (a flush
-	// runs game-thread tasks only while it waits).
-	for (int32 Round = 0; Round < 100 && AnyTileEditInFlight(); Round++)
-	{
-		FlushRenderingCommands();
-		if (!FTaskGraphInterface::Get().IsThreadProcessingTasks(ENamedThreads::GameThread)) FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
-	}
+	FCSRoadTile* Tile = Tiles.Find(Key);
+	CSRoad::ShowLatest(Tile ? Tile->Road.Get() : nullptr, Tile ? Tile->RoadMesh.Get() : nullptr, Landed);
+	// Drawn from its GPU mesh again: the bake of what it was goes.
+	if (Tile && Tile->Road && Tile->RoadMesh && Tile->Road->GetGpuMesh() == Tile->RoadMesh && Tile->Nanite && Tile->Nanite->GetStaticMesh()) Tile->Nanite->SetStaticMesh(nullptr);
 }
 
 void ACSRoadNetworkActor::FinishWrites()
 {
-	LandTileEdits();
+	LandWrites();
 	auto Pending = [this]()
 	{
 		if (MarkingFits.Num() > 0) return true;
@@ -1801,9 +1997,9 @@ void ACSRoadNetworkActor::FinishWrites()
 	for (int32 Round = 0; Round < 100 && Pending(); Round++)
 	{
 		ENQUEUE_RENDER_COMMAND(CSRoadFinishWrites)([](FRHICommandListImmediate& RHICmdList) { RHICmdList.BlockUntilGPUIdle(); });
-		FlushRenderingCommands();
+		UCSMesh::CountedBlockingFlush();
 		TickAllDecalFits();
-		FlushRenderingCommands();
+		UCSMesh::CountedBlockingFlush();
 		TickAllDecalFits();
 	}
 }
@@ -1930,8 +2126,10 @@ void ACSRoadNetworkActor::TickBakes()
 			Tile.Bake.Reset();
 			Tile.Baking = nullptr;
 			// The GPU mesh goes with its component (removing the primitive drops whatever the renderer
-			// cached of it); the tile gets a new one when it is next written.
+			// cached of it), and so does the one baked if not drawn yet; the tile gets a new one when it is
+			// next written.
 			Tile.Road->DestroyComponent();
+			if (Tile.RoadMesh) Tile.RoadMesh->ReleaseDeferred();
 			Tile.Road = nullptr;
 			Tile.RoadMesh = nullptr;
 			if (CVarCSRoadBakeLog.GetValueOnGameThread() != 0 && FPlatformTime::Seconds() - SwapStart > 0.002) UE_LOG(LogCSRoadNet, Log, TEXT("%s: tile (%d, %d) swap took %.1f ms"), *GetName(), Key.X, Key.Y, (FPlatformTime::Seconds() - SwapStart) * 1000.0);
@@ -1951,13 +2149,17 @@ void ACSRoadNetworkActor::UpdateBakeStats()
 
 int64 ACSRoadNetworkActor::TileGpuBytes(const FCSRoadTile& Tile)
 {
-	const FCSMeshResident* Resident = Tile.RoadMesh ? Tile.RoadMesh->GetResidentPtr() : nullptr;
-	if (!Resident) return 0;
-	// The streams as the pools hand them out (64 KiB granules, rhi.DumpResourceMemory), and the ray
-	// tracing BLAS of the mesh: about 31 bytes a triangle on Palmsland.
-	int64 Bytes = int64(Tile.Triangles) * 31;
-	for (const FCSMeshResident::FStream& Stream : Resident->Streams) if (Stream.Pooled.IsValid()) Bytes += Align(int64(Stream.Pooled->GetAlignedSize()), int64(64 << 10));
-	return Bytes;
+	// The streams of the meshes the tile holds, the one drawn and a newer one on its way to take its place, from
+	// the capacities the game thread knows (a new mesh's buffers are made on the render thread, unfenced), in the
+	// pools' 64 KiB granules (rhi.DumpResourceMemory); and the ray tracing BLAS of what it draws: about 31 bytes a
+	// triangle on Palmsland.
+	int64 Bytes = 0;
+	auto Add = [&Bytes](const UCSMesh* Held) { if (Held && Held->GetVertexCapacity() > 0) Bytes += CSRoadNetworkActor_StreamBytes(uint32(Held->GetVertexCapacity()), uint32(Held->GetIndexCapacity())); };
+	const UCSMesh* Latest = Tile.RoadMesh.Get();
+	const UCSMesh* Shown = Tile.Road ? Tile.Road->GetGpuMesh() : nullptr;
+	Add(Latest);
+	if (Shown != Latest) Add(Shown);
+	return Bytes > 0 ? Bytes + int64(Tile.Triangles) * 31 : 0;
 }
 
 int64 ACSRoadNetworkActor::GpuMeshBytes() const
@@ -2018,8 +2220,9 @@ void ACSRoadNetworkActor::RemoveTile(const FIntPoint& Key)
 {
 	FCSRoadTile Tile;
 	if (!Tiles.RemoveAndCopyValue(Key, Tile)) return;
-	// A component frees the meshes it owns when destroyed.
+	// A component frees the mesh it draws when destroyed; a newer one written for it goes too, now if it has landed.
 	if (Tile.Road) Tile.Road->DestroyComponent();
+	if (Tile.RoadMesh) Tile.RoadMesh->ReleaseDeferred();
 	if (Tile.Nanite) Tile.Nanite->DestroyComponent();
 	DestroyComponents(Tile.Decals);
 }
