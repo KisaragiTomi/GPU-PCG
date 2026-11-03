@@ -96,7 +96,8 @@ struct FCSCityLotSettings
 	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (ClampMin = "0", Units = "m"))
 	float Gap = 2.0f;
 
-	/** From the road's edge to the plot. Plots keep half of it from every other road too. */
+	/** From the road's edge to the plot, for roads that set none of their own (a custom road's "plots" in
+	 *  Data/CustomRoads.json). Plots keep half of a road's setback from it. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (ClampMin = "0", Units = "m"))
 	float Setback = 3.0f;
 
@@ -105,6 +106,16 @@ struct FCSCityLotSettings
 
 	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (ClampMin = "2", Units = "m"))
 	float MaxDepth = 18.0f;
+
+	/** Plots in a block the roads close in run back until FillDepth or whatever stops them sooner: halfway to the plots of
+	 *  another road, a Gap short, a road or a reserved plot; their backs slant to meet corners. Plots with nothing within
+	 *  FillDepth take MinDepth..MaxDepth, and a filled plot shallower than half MinDepth is left out. Off: every plot
+	 *  takes MinDepth..MaxDepth and one in the way of a road or another plot is left out. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road")
+	bool bFillBlocks = true;
+
+	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (ClampMin = "2", Units = "m", EditCondition = "bFillBlocks"))
+	float FillDepth = 40.0f;
 
 	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (ClampMin = "1", Units = "m"))
 	float MinHeight = 6.0f;

@@ -1,0 +1,9 @@
+{
+  "Alley 2m": {
+    "copy": "Alley",
+    "sections": [0, 1, 3, 5, 6],
+    "underground": [],
+    "zoning": false,
+    "plots": { "setback": 0.5, "frontage": 9 }
+  }
+}

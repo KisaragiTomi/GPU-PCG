@@ -40,6 +40,9 @@ struct FRoadSpec
 	int32 SourceEnd = INDEX_NONE;
 	bool bHasElevation = false;
 	float2 Elevation;
+	// The spline it was cut from (FSplineRoad::Id), for the batch buildings; 0 when unknown. Not part of what the road
+	// builds into.
+	uint64 Spline = 0;
 };
 
 struct FRoadInstance

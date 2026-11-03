@@ -79,12 +79,14 @@ FString CSRoadNetworkActor_Unconverged(const CSRoad::FGraph& Graph, const CSRoad
 }
 
 // The prefab data is large (pieces.bin is ~120 MB) and never changes: loaded once per directory
-// and shared by every network actor. FAssets keeps pointers into the byte arrays.
+// and shared by every network actor. FAssets keeps pointers into the byte arrays. The plugin's
+// custom roads (Data/CustomRoads.json, made from the prefabs' roads) join every directory's.
 struct FCSRoadNetworkActor_Library
 {
 	TArray<uint8> Prefabs;
 	TArray<uint8> Raw;
 	TArray64<uint8> Pieces;
+	TArray<uint8> CustomRoads;
 	CSRoad::FAssets Assets;
 };
 
@@ -101,7 +103,8 @@ TSharedPtr<FCSRoadNetworkActor_Library> CSRoadNetworkActor_Library(const FString
 		OutError = FString::Printf(TEXT("prefabs.json, raw-prefabs.json or pieces.bin missing in %s"), *Key);
 		return nullptr;
 	}
-	if (!Library->Assets.Load(Library->Prefabs, Library->Raw, &Library->Pieces, OutError)) return nullptr;
+	FFileHelper::LoadFileToArray(Library->CustomRoads, *FPaths::Combine(FPaths::GetPath(CSRoadDataDir()), TEXT("CustomRoads.json")), FILEREAD_Silent);
+	if (!Library->Assets.Load(Library->Prefabs, Library->Raw, &Library->Pieces, OutError, &Library->CustomRoads)) return nullptr;
 	Cache.Add(Key, Library);
 	UE_LOG(LogCSRoadNet, Log, TEXT("CS2 road prefabs loaded from %s"), *Key);
 	return Library;
@@ -2034,6 +2037,8 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	Settings.MaxDepth = double(FMath::Max(Lots.MinDepth, Lots.MaxDepth)) * 100.0;
 	Settings.MinHeight = double(Lots.MinHeight) * 100.0;
 	Settings.MaxHeight = double(FMath::Max(Lots.MinHeight, Lots.MaxHeight)) * 100.0;
+	Settings.bFill = Lots.bFillBlocks;
+	Settings.FillDepth = double(Lots.FillDepth) * 100.0;
 	Settings.Seed = Lots.Seed;
 	UMaterialInterface* Surface = BuildingMaterial ? BuildingMaterial.Get() : ACSCityBuildingActor::DefaultMaterial();
 	if (!LotState) LotState = MakeUnique<CSCity::FLotState>();
@@ -2043,7 +2048,8 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	// again.
 	FXxHash64Builder SignatureHash;
 	auto Sign = [&SignatureHash](const auto& Value) { SignatureHash.Update(&Value, sizeof(Value)); };
-	for (const double Value : { Settings.Frontage, Settings.Gap, Settings.Setback, Settings.MinDepth, Settings.MaxDepth, Settings.MinHeight, Settings.MaxHeight, TileCm }) Sign(Value);
+	for (const double Value : { Settings.Frontage, Settings.Gap, Settings.Setback, Settings.MinDepth, Settings.MaxDepth, Settings.MinHeight, Settings.MaxHeight, Settings.FillDepth, TileCm }) Sign(Value);
+	Sign(Settings.bFill);
 	Sign(Settings.Seed);
 	Sign(Surface);
 	const FMatrix Placement = NetworkToWorld.ToMatrixWithScale();
@@ -2054,6 +2060,17 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	const bool bFull = !State.bValid || State.Signature != Signature;
 
 	auto HalfWidth = [&Assets](const FString& Prefab) { return double(Assets.Geometry(Prefab).m_DefaultWidth) * 50.0; };
+	// A custom road's own setback and frontage (Data/CustomRoads.json "plots"), else the network's.
+	auto SetbackOf = [&Assets, &Settings](const FString& Prefab)
+	{
+		const CSRoad::FAssets::FPlots* Custom = Assets.Plots(Prefab);
+		return Custom && Custom->Setback >= 0.0 ? Custom->Setback * 100.0 : Settings.Setback;
+	};
+	auto FrontageOf = [&Assets](const FString& Prefab)
+	{
+		const CSRoad::FAssets::FPlots* Custom = Assets.Plots(Prefab);
+		return Custom && Custom->Frontage > 0.0 ? Custom->Frontage * 100.0 : -1.0;
+	};
 	auto Combine = [](uint64 A, uint64 B)
 	{
 		const uint64 Values[] = { A, B };
@@ -2090,17 +2107,26 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		FIntRect Tiles;
 		FVector3d Curve[4];
 		double HalfWidth = 0.0;
+		double Setback = 0.0;
+		double Frontage = -1.0;
 		uint64 LineId = 0;
+		// The spline it is part of (CSCity::FRoadLine::Group).
+		uint64 Group = 0;
+		bool bZoned = true;
 		int32 Plot = INDEX_NONE;
 	};
 	TArray<FInput> Inputs;
 	TArray<CSCity::FPolygon> Plots;
-	auto AddCurve = [&](EInput Kind, uint64 LineId, double Half, const FVector3d& A, const FVector3d& B, const FVector3d& C, const FVector3d& D)
+	auto AddCurve = [&](EInput Kind, uint64 LineId, uint64 Group, const FString& Prefab, bool bZoned, const FVector3d& A, const FVector3d& B, const FVector3d& C, const FVector3d& D)
 	{
 		FInput& Input = Inputs.AddDefaulted_GetRef();
 		Input.Kind = Kind;
 		Input.LineId = LineId;
-		Input.HalfWidth = Half;
+		Input.Group = Group;
+		Input.HalfWidth = HalfWidth(Prefab);
+		Input.Setback = SetbackOf(Prefab);
+		Input.Frontage = FrontageOf(Prefab);
+		Input.bZoned = bZoned;
 		Input.Curve[0] = A;
 		Input.Curve[1] = B;
 		Input.Curve[2] = C;
@@ -2108,13 +2134,17 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		FXxHash64Builder Hash;
 		Hash.Update(&Kind, sizeof(Kind));
 		Hash.Update(&LineId, sizeof(LineId));
-		Hash.Update(&Half, sizeof(Half));
+		Hash.Update(&Group, sizeof(Group));
+		Hash.Update(&Input.HalfWidth, sizeof(Input.HalfWidth));
+		Hash.Update(&Input.Setback, sizeof(Input.Setback));
+		Hash.Update(&Input.Frontage, sizeof(Input.Frontage));
+		Hash.Update(&bZoned, sizeof(bZoned));
 		Hash.Update(Input.Curve, sizeof(Input.Curve));
 		Input.Key = Hash.Finalize().Hash;
 		// A cubic Bezier lies within its control points' box.
 		FBox2D Box(ForceInit);
 		for (const FVector3d& Control : Input.Curve) Box += FVector2D(NetworkToWorld.TransformPosition(CSRoadNetworkActor_ToUnreal(Control)));
-		Input.Tiles = TilesOf(Box, Kind == EInput::Anchor ? CSCity::AnchorReach(Settings, Half) : CSCity::RoadReach(Settings, Half));
+		Input.Tiles = TilesOf(Box, Kind == EInput::Anchor ? CSCity::AnchorReach(Settings, Input.HalfWidth, Input.Setback) : CSCity::RoadReach(Settings, Input.HalfWidth, Input.Setback));
 	};
 	// The roads as built, which the plots keep clear of.
 	for (const CSRoad::FRoadSpec& Road : Roads) AddCurve(EInput::Road, 0, HalfWidth(Road.Prefab), Point(Road.Curve.a), Point(Road.Curve.b), Point(Road.Curve.c), Point(Road.Curve.d));
@@ -2125,13 +2155,12 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	auto Zoned = [&Assets, &Zoning](const FString& Prefab)
 	{
 		if (const bool* Known = Zoning.Find(Prefab)) return *Known;
-		return Zoning.Add(Prefab, Assets.HasRoad(Prefab) && (Assets.Road(Prefab).m_Flags & CSRoad::RoadFlags_EnableZoning) != 0);
+		return Zoning.Add(Prefab, Assets.HasRoad(Prefab) && ((Assets.Road(Prefab).m_Flags & CSRoad::RoadFlags_EnableZoning) != 0 || Assets.Plots(Prefab)));
 	};
 	for (const CSRoad::FSplineRoad& Spline : Splines)
 	{
 		if (!Zoned(Spline.Prefab)) continue;
 		const int32 Count = Spline.Points.Num();
-		const double Half = HalfWidth(Spline.Prefab);
 		for (int32 I = 0; I < (Spline.bClosed ? Count : Count - 1); I++)
 		{
 			const int32 J = (I + 1) % Count;
@@ -2139,7 +2168,7 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 			const FVector3d& D = Spline.Points[J];
 			const bool bLinear = Spline.Linear.IsValidIndex(I) && Spline.Linear[I];
 			// A USplineComponent segment's Hermite tangents as Bezier handles.
-			AddCurve(EInput::Anchor, Combine(Spline.Id, uint64(I)), Half, A, bLinear ? FMath::Lerp(A, D, 1.0 / 3.0) : A + Spline.Leave[I] / 3.0, bLinear ? FMath::Lerp(A, D, 2.0 / 3.0) : D - Spline.Arrive[J] / 3.0, D);
+			AddCurve(EInput::Anchor, Combine(Spline.Id, uint64(I)), Spline.Id, Spline.Prefab, true, A, bLinear ? FMath::Lerp(A, D, 1.0 / 3.0) : A + Spline.Leave[I] / 3.0, bLinear ? FMath::Lerp(A, D, 2.0 / 3.0) : D - Spline.Arrive[J] / 3.0, D);
 		}
 	}
 	if (UWorld* World = GetWorld())
@@ -2234,7 +2263,11 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		}
 		CSCity::FRoadLine& Line = (Input.Kind == EInput::Anchor ? Anchors : Lines).AddDefaulted_GetRef();
 		Line.Id = Input.LineId;
+		Line.Group = Input.Group;
 		Line.HalfWidth = Input.HalfWidth;
+		Line.Setback = Input.Setback;
+		Line.Frontage = Input.Frontage;
+		Line.bZoned = Input.bZoned;
 		Sample(Input.Curve, Line.Points);
 	}
 	// On the snapshot's terrain a plot stands on the ground, half a metre into it below its lowest corner,

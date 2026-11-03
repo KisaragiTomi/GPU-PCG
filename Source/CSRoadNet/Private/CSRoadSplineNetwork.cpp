@@ -642,6 +642,8 @@ bool CSRoadSplineNetwork_ClipAlleys(FAssets& Assets, const TArray<const FSplineR
 			if (To - From < 1e-6) continue;
 			FSplineRoad Part;
 			Part.Name = FString::Printf(TEXT("%s (part %d)"), *Road.Name, P + 1);
+			// Still the drawn spline's road, for what derives from it.
+			Part.Id = Road.Id;
 			Part.Prefab = Road.Prefab;
 			Part.Upgrade = Road.Upgrade;
 			Part.bAdjust = Road.bAdjust;
@@ -1253,6 +1255,7 @@ void CSRoadSplineNetwork_Records(FAssets& Assets, const FCSRoadSplineNetwork_Con
 		Edge.PartBox = PartBoxes[Piece.Origin];
 		FRoadSpec& Road = Edge.Spec;
 		Road.Prefab = Spline.Prefab;
+		Road.Spline = Spline.Id;
 		Road.Curve = Bezier4x3(CSRoadSplineNetwork_Float(Piece.Curve.A), CSRoadSplineNetwork_Float(Piece.Curve.B), CSRoadSplineNetwork_Float(Piece.Curve.C), CSRoadSplineNetwork_Float(Piece.Curve.D));
 		Road.Upgrade = Spline.Upgrade;
 		Road.bHasSource = true;

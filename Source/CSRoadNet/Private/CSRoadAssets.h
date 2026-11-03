@@ -56,10 +56,25 @@ struct FLaneDecalMesh
 class FAssets
 {
 public:
-	// The byte arrays must outlive this object (they are owned by UCSRoadPrefabLibrary).
-	bool Load(const TArray<uint8>& PrefabsJson, const TArray<uint8>& RawPrefabsJson, const TArray64<uint8>* PiecesBin, FString& OutError);
+	// The byte arrays must outlive this object (they are owned by UCSRoadPrefabLibrary). CustomRoadsJson (the plugin's
+	// Data/CustomRoads.json, optional): roads made from others, each {"copy": road, "sections": [indices into its
+	// sections, or {"road": another road, "index": one of its, "invert"/"flip"/"median": set}], "underground": [the same
+	// for its pipes, which keep a composition at least as wide], "zoning": false to give it no zone block, "plots":
+	// {"setback": m, "frontage": m} to give it the batch buildings' plots anyway}, joining the roads as copies of their base
+	// with only the sections listed (all of a list not given). A road's shoulders are what its junctions are made of
+	// (a shoulder becomes a ramp up to a sidewalk there): keep one either side.
+	bool Load(const TArray<uint8>& PrefabsJson, const TArray<uint8>& RawPrefabsJson, const TArray64<uint8>* PiecesBin, FString& OutError,
+		const TArray<uint8>* CustomRoadsJson = nullptr);
 
 	const TArray<FString>& RoadNames() const { return Names; }
+	// A custom road's "plots": how far from its edge the batch buildings along it stand and how much of it each takes (m;
+	// negative: the network's). Null for a road without: plots go by its zoning.
+	struct FPlots
+	{
+		double Setback = -1.0;
+		double Frontage = -1.0;
+	};
+	const FPlots* Plots(const FString& Name) const { return PlotSettings.Find(Name); }
 	bool HasRoad(const FString& Name) const { return RoadIds.Contains(Name); }
 	int32 RoadId(const FString& Name) const { return RoadIds.FindChecked(Name); }
 	const FString& RoadName(int32 Id) const { return IdNames.FindChecked(Id); }
@@ -100,6 +115,7 @@ private:
 	TMap<int32, TSharedPtr<FPieceMesh>> MeshCache;
 	TArray<FString> AtlasNames;
 	TArray<FString> Names;
+	TMap<FString, FPlots> PlotSettings;
 	TMap<FString, int32> RoadIds;
 	TMap<int32, FString> IdNames;
 	TArray<FString> RequirementNames;

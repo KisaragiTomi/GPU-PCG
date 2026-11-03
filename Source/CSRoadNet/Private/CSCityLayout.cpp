@@ -94,6 +94,74 @@ void CSCityLayout_Extents(const FPolygon& Polygon, double& OutLong, double& OutS
 	}
 }
 
+// The deepest a plot can be.
+double CSCityLayout_Deepest(const FLotSettings& Settings)
+{
+	return FMath::Max3(Settings.MinDepth, Settings.MaxDepth, Settings.bFill ? Settings.FillDepth : 0.0);
+}
+
+// The slants a filled plot's back is tried at (across over back): -1.5 to 1.5.
+constexpr int32 CSCityLayout_NumSlopes = 13;
+double CSCityLayout_Slope(int32 J) { return (J - CSCityLayout_NumSlopes / 2) * 0.25; }
+
+// A small convex polygon (a plot's frame: S as X, T as Y).
+using FCSCityLayout_Small = TArray<FVector2D, TInlineAllocator<10>>;
+
+// Keeps what of Polygon lies where A S + B T + C <= 0.
+void CSCityLayout_Keep(FCSCityLayout_Small& Polygon, double A, double B, double C)
+{
+	FCSCityLayout_Small Out;
+	for (int32 I = 0; I < Polygon.Num(); I++)
+	{
+		const FVector2D& P = Polygon[I];
+		const FVector2D& Q = Polygon[(I + 1) % Polygon.Num()];
+		const double DP = A * P.X + B * P.Y + C;
+		const double DQ = A * Q.X + B * Q.Y + C;
+		if (DP <= 0.0) Out.Add(P);
+		if ((DP <= 0.0) != (DQ <= 0.0)) Out.Add(P + (Q - P) * (DP / (DP - DQ)));
+	}
+	Polygon = MoveTemp(Out);
+}
+
+// A plot in its own frame: S across it (S0..S1, 0 at its slot's middle), T back from its front, its back T = A + B S.
+// The farthest back A may lie with the plot outside the disc of Radius about (SR, TR), the disc clear of the front
+// (T = 0): where the back first touches it, along its length or at a corner.
+double CSCityLayout_ClearLimit(double SR, double TR, double Radius, double B, double S0, double S1)
+{
+	double Limit = TNumericLimits<double>::Max();
+	if (TR + Radius <= 0.0) return Limit;
+	const double Slant = FMath::Sqrt(1.0 + B * B);
+	// The back's point nearest the disc's middle as it touches.
+	const double FootS = SR + B * Radius / Slant;
+	const double FootT = TR - Radius / Slant;
+	if (FootS >= S0 && FootS <= S1 && FootT >= 0.0) Limit = TR - B * SR - Radius * Slant;
+	for (const double Corner : { S0, S1 })
+	{
+		const double Off = Corner - SR;
+		if (FMath::Abs(Off) >= Radius) continue;
+		// A side meets the disc from below at Low; a disc reaching under the front there would take in the front.
+		const double Low = TR - FMath::Sqrt(Radius * Radius - Off * Off);
+		if (Low >= 0.0) Limit = FMath::Min(Limit, Low - B * Corner);
+	}
+	return Limit;
+}
+
+// Whether convex polygons A and B lie Gap or more apart: no overlap, and no corner of one within Gap of a side of the
+// other.
+bool CSCityLayout_Apart(const FPolygon& A, const FPolygon& B, double Gap)
+{
+	if (Overlap(A, B)) return false;
+	for (const FPolygon* From : { &A, &B })
+	{
+		const FPolygon& To = From == &A ? B : A;
+		for (const FVector2D& P : *From)
+		{
+			for (int32 I = 0; I < To.Num(); I++) if (FVector2D::DistSquared(P, FMath::ClosestPointOnSegment2D(P, To[I], To[(I + 1) % To.Num()])) < Gap * Gap) return false;
+		}
+	}
+	return true;
+}
+
 // The infinite line through Point along Direction, inside the convex polygon.
 bool CSCityLayout_Chord(const FPolygon& Polygon, const FVector2D& Point, const FVector2D& Direction, FVector2D& OutA, FVector2D& OutB)
 {
@@ -456,6 +524,9 @@ TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine
 	TArray<FLot> Out;
 	if (Settings.Frontage <= Settings.Gap) return Out;
 	const uint64 Seed = CSCityLayout_Mix(uint64(uint32(Settings.Seed)) + 0x5EEDull);
+	const bool bFill = Settings.bFill;
+	auto SetbackOf = [&Settings](const FRoadLine& Line) { return Line.Setback >= 0.0 ? Line.Setback : Settings.Setback; };
+	auto GroupOf = [](const FRoadLine& Line) { return Line.Group != 0 ? Line.Group : Line.Id; };
 
 	// The roads as points a metre or less apart, by 10 m cells.
 	constexpr double Cell = 1000.0;
@@ -463,14 +534,25 @@ TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine
 	{
 		FVector2D Point;
 		double HalfWidth = 0.0;
+		double Setback = 0.0;
+		uint64 Group = 0;
+		bool bZoned = true;
+		// Along the road, and how far along it either way the point stands for.
+		FVector2D Tangent = FVector2D::UnitX();
+		double Reach = 0.0;
 	};
 	TArray<FRoadPoint> Points;
 	TMap<FIntPoint, TArray<int32>> Grid;
-	double MaxHalfWidth = 0.0;
+	// The farthest a road point keeps a plot (half width and half setback) and claims ground for its own (half width
+	// and setback).
+	double MaxClearance = 0.0;
+	double MaxClaim = 0.0;
 	auto CellOf = [](const FVector2D& P) { return FIntPoint(FMath::FloorToInt32(P.X / Cell), FMath::FloorToInt32(P.Y / Cell)); };
 	for (const FRoadLine& Road : Roads)
 	{
-		MaxHalfWidth = FMath::Max(MaxHalfWidth, Road.HalfWidth);
+		const double Setback = SetbackOf(Road);
+		MaxClearance = FMath::Max(MaxClearance, Road.HalfWidth + Setback * 0.5);
+		MaxClaim = FMath::Max(MaxClaim, Road.HalfWidth + Setback);
 		for (int32 I = 0; I + 1 < Road.Points.Num(); I++)
 		{
 			const FVector2D A(Road.Points[I]);
@@ -480,31 +562,283 @@ TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine
 			{
 				const FVector2D P = FMath::Lerp(A, B, double(S) / Steps);
 				Grid.FindOrAdd(CellOf(P)).Add(Points.Num());
-				Points.Add({ P, Road.HalfWidth });
+				// Half a step, and a little more so that the stretches overlap.
+				Points.Add({ P, Road.HalfWidth, Setback, GroupOf(Road), Road.bZoned, (B - A).GetSafeNormal(), FVector2D::Distance(A, B) / Steps * 0.501 });
 			}
 		}
 	}
+	// Visit goes through the road points in the cells within Reach of Box, each once, until it returns false.
+	auto Near = [&Grid, &CellOf](const FBox2D& Box, double Reach, TFunctionRef<bool(int32)> Visit)
+	{
+		const FIntPoint Min = CellOf(Box.Min - FVector2D(Reach));
+		const FIntPoint Max = CellOf(Box.Max + FVector2D(Reach));
+		for (int32 Y = Min.Y; Y <= Max.Y; Y++)
+		{
+			for (int32 X = Min.X; X <= Max.X; X++)
+			{
+				const TArray<int32>* InCell = Grid.Find(FIntPoint(X, Y));
+				if (!InCell) continue;
+				for (const int32 Index : *InCell) if (!Visit(Index)) return;
+			}
+		}
+	};
+	// A shape keeps half each road's setback from its edge.
+	auto Clear = [&Points, &Near, MaxClearance](const FPolygon& Corners)
+	{
+		const FBox2D Box = CSCityLayout_Box(Corners);
+		bool bClear = true;
+		Near(Box, MaxClearance, [&](int32 Index)
+		{
+			const FRoadPoint& Road = Points[Index];
+			const double Reach = Road.HalfWidth + Road.Setback * 0.5;
+			if (Box.ExpandBy(Reach).IsInside(Road.Point) && CSCityLayout_Distance(Corners, Road.Point) < Reach) bClear = false;
+			return bClear;
+		});
+		return bClear;
+	};
+	// Plots keep clear of the reserved plots, with bFill by half a Gap (and of each other by a Gap, a centimetre spared
+	// for neighbours exactly that far apart).
+	TArray<FPolygon> Kept;
+	TArray<FBox2D> KeptBoxes;
+	for (const FPolygon& Plot : Reserved)
+	{
+		if (Plot.Num() < 3) continue;
+		Kept.Add(Plot);
+		KeptBoxes.Add(CSCityLayout_Box(Plot).ExpandBy(bFill ? Settings.Gap * 0.5 : 0.0));
+	}
+	const double ReservedGap = Settings.Gap * 0.5;
+	const double RivalGap = FMath::Max(Settings.Gap - 1.0, 0.0);
 
-	// Every plot on both sides of every anchor line.
+	// A plot as its front's middle, the directions along its road and away from it, the stretch S0..S1 of its front it
+	// takes (of its slot, 0 its middle) and its back T = A + B S, T back from the front: the shape it
+	// takes with no plot before it.
+	const double Width = Settings.Frontage - Settings.Gap;
+	const double Deepest = CSCityLayout_Deepest(Settings);
+	const double MinFill = FMath::Max(200.0, Settings.MinDepth * 0.5);
 	struct FCandidate
 	{
 		FLot Lot;
+		FVector2D Front = FVector2D::ZeroVector;
+		FVector2D Along = FVector2D::ZeroVector;
+		FVector2D Back = FVector2D::ZeroVector;
+		double S0 = 0.0;
+		double S1 = 0.0;
+		double A = 0.0;
+		double B = 0.0;
+		// The narrowest stretch of its front it may keep (of its anchor's frontage).
+		double MinWidth = 0.0;
 		FBox2D Box;
 		uint64 Priority = 0;
-		bool bClear = true;
 	};
+	auto Shape = [](const FCandidate& C, double A)
+	{
+		const FVector2D Left = C.Front + C.Along * C.S0;
+		const FVector2D Right = C.Front + C.Along * C.S1;
+		return ConvexHull({ Left, Right, Right + C.Back * (A + C.B * C.S1), Left + C.Back * (A + C.B * C.S0) });
+	};
+	// Its shallower side.
+	auto Shallow = [](const FCandidate& C, double A) { return A + FMath::Min(C.B * C.S0, C.B * C.S1); };
+	auto Finish = [&Shape, &Shallow](FCandidate& C)
+	{
+		FLot& Lot = C.Lot;
+		Lot.Corners = Shape(C, C.A);
+		Lot.Width = C.S1 - C.S0;
+		Lot.Depth = Shallow(C, C.A);
+		Lot.Front = -C.Back;
+		Lot.Centre = C.Front + C.Along * ((C.S0 + C.S1) * 0.5) + C.Back * (Lot.Depth * 0.5);
+	};
+	// The back as far as A or nearer, its shallow side MinFill or more, where Bad (true from some place back on) is not;
+	// false when there is none.
+	auto Shrink = [&Shallow, MinFill](FCandidate& C, double A, TFunctionRef<bool(double)> Bad)
+	{
+		double Low = A - Shallow(C, A) + MinFill;
+		if (A < Low) return false;
+		if (!Bad(A))
+		{
+			C.A = A;
+			return true;
+		}
+		if (Bad(Low)) return false;
+		for (int32 Step = 0; Step < 24; Step++)
+		{
+			const double Middle = (Low + A) * 0.5;
+			if (Bad(Middle)) A = Middle;
+			else Low = Middle;
+		}
+		C.A = Low;
+		return true;
+	};
+	// With bFill: the plot's front gives up what a road's clearance, another road's ground (a Gap short, across too) or a
+	// reserved plot takes of its first MinFill, and keeps the widest stretch left, its MinWidth or more. Its back leaves it
+	// the most ground as far back as it may lie (halfway to the front of every other road with plots, a Gap short; half
+	// each road's setback from its edge; FillDepth), or lies at Depth when nothing is that near. A road claims the ground
+	// beside it, nearer its front than the plot's, not what lies beyond its ends. False when no stretch or no back leaves
+	// enough.
+	struct FProbe
+	{
+		double S = 0.0;
+		double T = 0.0;
+		double Radius = 0.0;
+	};
+	TArray<FProbe> Probes;
+	TArray<FCSCityLayout_Small> Claims;
+	TArray<FVector2D> Taken;
+	auto Fit = [&](FCandidate& C, uint64 Group, double Depth)
+	{
+		Probes.Reset();
+		Claims.Reset();
+		Taken.Reset();
+		const double SlotHalf = C.S1;
+		FBox2D Strip(ForceInit);
+		for (const double S : { -SlotHalf, SlotHalf }) for (const double T : { 0.0, Deepest }) Strip += C.Front + C.Along * S + C.Back * T;
+		const double Front = MinFill + Settings.Gap * 0.5;
+		Near(Strip, MaxClaim + Deepest + Settings.Gap, [&](int32 Index)
+		{
+			const FRoadPoint& Road = Points[Index];
+			const FVector2D Offset = Road.Point - C.Front;
+			FProbe& Probe = Probes.AddDefaulted_GetRef();
+			Probe.S = Offset.Dot(C.Along);
+			Probe.T = Offset.Dot(C.Back);
+			Probe.Radius = Road.HalfWidth + Road.Setback * 0.5;
+			if (Probe.T + Probe.Radius > 0.0 && Probe.T - Probe.Radius < MinFill) Taken.Add(FVector2D(Probe.S - Probe.Radius, Probe.S + Probe.Radius));
+			// A plot leaves ground to the plots of other roads, never to those of its own road's other parts: what lies within
+			// Reach of the point along its road and nearer that road's front (half width and setback across it) than the plot's.
+			if (!Road.bZoned || Road.Group == Group) return true;
+			const FVector2D Normal(-Road.Tangent.Y, Road.Tangent.X);
+			const double U = Road.Tangent.Dot(C.Along);
+			const double V = Road.Tangent.Dot(C.Back);
+			const double W = -Road.Tangent.Dot(Offset);
+			const double NU = Normal.Dot(C.Along);
+			const double NV = Normal.Dot(C.Back);
+			const double NW = -Normal.Dot(Offset);
+			const double K = Road.HalfWidth + Road.Setback;
+			const double Low = -Settings.Gap;
+			const double High = Deepest + Settings.Gap;
+			FCSCityLayout_Small Claimed = { FVector2D(-SlotHalf, Low), FVector2D(SlotHalf, Low), FVector2D(SlotHalf, High), FVector2D(-SlotHalf, High) };
+			CSCityLayout_Keep(Claimed, U, V, W - Road.Reach);
+			CSCityLayout_Keep(Claimed, -U, -V, -W - Road.Reach);
+			CSCityLayout_Keep(Claimed, NU, NV - 1.0, NW - K);
+			CSCityLayout_Keep(Claimed, -NU, -NV - 1.0, -NW - K);
+			if (Claimed.Num() < 3) return true;
+			FCSCityLayout_Small InFront = Claimed;
+			CSCityLayout_Keep(InFront, 0.0, 1.0, -Front);
+			if (InFront.Num() >= 3)
+			{
+				FVector2D Across(TNumericLimits<double>::Max(), TNumericLimits<double>::Lowest());
+				for (const FVector2D& Corner : InFront) Across = FVector2D(FMath::Min(Across.X, Corner.X), FMath::Max(Across.Y, Corner.X));
+				Taken.Add(FVector2D(Across.X - Settings.Gap * 0.5, Across.Y + Settings.Gap * 0.5));
+			}
+			Claims.Add(MoveTemp(Claimed));
+			return true;
+		});
+		for (int32 R = 0; R < Kept.Num(); R++)
+		{
+			if (!KeptBoxes[R].Intersect(Strip)) continue;
+			FVector2D Across(TNumericLimits<double>::Max(), TNumericLimits<double>::Lowest());
+			FVector2D Back = Across;
+			for (const FVector2D& Corner : Kept[R])
+			{
+				const FVector2D Offset = Corner - C.Front;
+				Across = FVector2D(FMath::Min(Across.X, Offset.Dot(C.Along)), FMath::Max(Across.Y, Offset.Dot(C.Along)));
+				Back = FVector2D(FMath::Min(Back.X, Offset.Dot(C.Back)), FMath::Max(Back.Y, Offset.Dot(C.Back)));
+			}
+			if (Back.Y + ReservedGap > 0.0 && Back.X - ReservedGap < MinFill) Taken.Add(FVector2D(Across.X - ReservedGap, Across.Y + ReservedGap));
+		}
+		// The widest stretch of the front left, the nearer the slot's middle of two as wide.
+		Taken.Sort([](const FVector2D& L, const FVector2D& R) { return L.X < R.X; });
+		C.S0 = C.S1 = 0.0;
+		double From = -SlotHalf;
+		for (int32 I = 0; I <= Taken.Num(); I++)
+		{
+			const double To = I < Taken.Num() ? FMath::Min(Taken[I].X, SlotHalf) : SlotHalf;
+			const bool bWider = To - From > C.S1 - C.S0 + 1e-6;
+			const bool bAsWide = FMath::Abs((To - From) - (C.S1 - C.S0)) <= 1e-6 && FMath::Abs(From + To) < FMath::Abs(C.S0 + C.S1);
+			if (To > From && (bWider || bAsWide))
+			{
+				C.S0 = From;
+				C.S1 = To;
+			}
+			if (I < Taken.Num()) From = FMath::Max(From, Taken[I].Y);
+			if (From >= SlotHalf) break;
+		}
+		if (C.S1 - C.S0 < C.MinWidth) return false;
+
+		double Claim[CSCityLayout_NumSlopes];
+		double Clearance[CSCityLayout_NumSlopes];
+		for (int32 J = 0; J < CSCityLayout_NumSlopes; J++) Claim[J] = Clearance[J] = TNumericLimits<double>::Max();
+		for (const FProbe& Probe : Probes)
+		{
+			for (int32 J = 0; J < CSCityLayout_NumSlopes; J++) Clearance[J] = FMath::Min(Clearance[J], CSCityLayout_ClearLimit(Probe.S, Probe.T, Probe.Radius, CSCityLayout_Slope(J), C.S0, C.S1));
+		}
+		// The back may come as near a claim as its corner nearest the back.
+		for (FCSCityLayout_Small& Claimed : Claims)
+		{
+			CSCityLayout_Keep(Claimed, -1.0, 0.0, C.S0);
+			CSCityLayout_Keep(Claimed, 1.0, 0.0, -C.S1);
+			for (const FVector2D& Corner : Claimed)
+			{
+				for (int32 J = 0; J < CSCityLayout_NumSlopes; J++) Claim[J] = FMath::Min(Claim[J], Corner.Y - CSCityLayout_Slope(J) * Corner.X);
+			}
+		}
+		auto Limit = [&Claim, &Clearance, &Settings](int32 J)
+		{
+			const double B = CSCityLayout_Slope(J);
+			return FMath::Min(Claim[J] - Settings.Gap * 0.5 * FMath::Sqrt(1.0 + B * B), Clearance[J]);
+		};
+		constexpr int32 Flat = CSCityLayout_NumSlopes / 2;
+		C.B = 0.0;
+		if (Limit(Flat) >= Settings.FillDepth) C.A = FMath::Min(Depth, Limit(Flat));
+		else
+		{
+			// The most ground; a slant only for a little more of it.
+			const double Middle = (C.S0 + C.S1) * 0.5;
+			double Best = TNumericLimits<double>::Lowest();
+			for (int32 J = 0; J < CSCityLayout_NumSlopes; J++)
+			{
+				const double B = CSCityLayout_Slope(J);
+				const double Deep = FMath::Max(B * C.S0, B * C.S1);
+				const double A = FMath::Min(Limit(J), Settings.FillDepth - Deep);
+				const double Score = (C.S1 - C.S0) * (A + B * Middle - 0.05 * FMath::Abs(B) * Width);
+				if (A + FMath::Min(B * C.S0, B * C.S1) < MinFill || Score <= Best) continue;
+				Best = Score;
+				C.A = A;
+				C.B = B;
+			}
+			if (Best == TNumericLimits<double>::Lowest()) return false;
+		}
+		// The limits look at the back and its corners, the stretch at the front: a road passing a side further back, and
+		// a reserved plot, are caught here.
+		return Shrink(C, C.A, [&](double A)
+		{
+			const FPolygon Tried = Shape(C, A);
+			if (!Clear(Tried)) return true;
+			for (const FPolygon& Plot : Kept) if (!CSCityLayout_Apart(Plot, Tried, ReservedGap)) return true;
+			return false;
+		});
+	};
+
+	// Every plot on both sides of every anchor line.
 	TArray<FCandidate> Candidates;
-	const double Width = Settings.Frontage - Settings.Gap;
 	for (const FRoadLine& Anchor : Anchors)
 	{
 		if (Anchor.Points.Num() < 2) continue;
+		const uint64 Group = GroupOf(Anchor);
+		const double Inner = Anchor.HalfWidth + SetbackOf(Anchor);
+		const double Frontage = Anchor.Frontage > 0.0 ? FMath::Min(Anchor.Frontage, Settings.Frontage) : Settings.Frontage;
+		if (Frontage <= Settings.Gap) continue;
+		const double SlotMinWidth = FMath::Max(400.0, (Frontage - Settings.Gap) * 0.4);
 		TArray<double> Along = { 0.0 };
 		for (int32 I = 1; I < Anchor.Points.Num(); I++) Along.Add(Along.Last() + FVector2D::Distance(FVector2D(Anchor.Points[I - 1]), FVector2D(Anchor.Points[I])));
-		const int32 Slots = FMath::FloorToInt32(Along.Last() / Settings.Frontage);
+		// With bFill the anchor in whole slots as near its frontage as fits (none when shorter than its least width and a
+		// Gap); else one every frontage from its start.
+		const double Length = Along.Last();
+		const int32 Slots = !bFill ? FMath::FloorToInt32(Length / Frontage) : Length < SlotMinWidth + Settings.Gap ? 0 : FMath::Max(1, FMath::RoundToInt32(Length / Frontage));
+		const double Pitch = bFill && Slots > 0 ? Length / Slots : Frontage;
+		const double SlotHalf = (Pitch - Settings.Gap) * 0.5;
 		int32 Segment = 0;
 		for (int32 Slot = 0; Slot < Slots; Slot++)
 		{
-			const double At = (Slot + 0.5) * Settings.Frontage;
+			const double At = (Slot + 0.5) * Pitch;
 			while (Segment + 2 < Anchor.Points.Num() && Along[Segment + 1] < At) Segment++;
 			const double Span = FMath::Max(Along[Segment + 1] - Along[Segment], 1e-6);
 			const FVector Position = FMath::Lerp(Anchor.Points[Segment], Anchor.Points[Segment + 1], (At - Along[Segment]) / Span);
@@ -512,121 +846,120 @@ TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine
 			const FVector2D Normal(-Tangent.Y, Tangent.X);
 			for (const double Side : { 1.0, -1.0 })
 			{
-				FCandidate& Candidate = Candidates.AddDefaulted_GetRef();
+				FCandidate Candidate;
 				FLot& Lot = Candidate.Lot;
 				Lot.Id = CSCityLayout_Mix(Anchor.Id ^ CSCityLayout_Mix(uint64(Slot) * 2 + (Side > 0.0 ? 1 : 0)));
 				const double Depth = FMath::Lerp(Settings.MinDepth, Settings.MaxDepth, CSCityLayout_Unit(Lot.Id ^ Seed ^ 1));
-				const double Inner = Anchor.HalfWidth + Settings.Setback;
-				const FVector2D Base(Position);
-				const FVector2D Near = Base + Normal * (Side * Inner);
-				const FVector2D Far = Base + Normal * (Side * (Inner + Depth));
-				Lot.Corners = ConvexHull({ Near - Tangent * (Width * 0.5), Near + Tangent * (Width * 0.5), Far + Tangent * (Width * 0.5), Far - Tangent * (Width * 0.5) });
-				Lot.Base = Position.Z;
-				Lot.Height = FMath::Lerp(Settings.MinHeight, Settings.MaxHeight, CSCityLayout_Unit(Lot.Id ^ Seed ^ 2));
-				Lot.Centre = (Near + Far) * 0.5;
 				// Plaster, stone and brick tones, a little apart from each other.
 				static const FLinearColor Tones[] = { FLinearColor(0.82f, 0.76f, 0.66f), FLinearColor(0.70f, 0.70f, 0.68f), FLinearColor(0.66f, 0.42f, 0.33f), FLinearColor(0.88f, 0.84f, 0.74f), FLinearColor(0.56f, 0.60f, 0.64f) };
 				const FLinearColor Tone = Tones[CSCityLayout_Mix(Lot.Id ^ Seed ^ 3) % UE_ARRAY_COUNT(Tones)];
 				Lot.Color = Tone * float(0.9 + 0.2 * CSCityLayout_Unit(Lot.Id ^ Seed ^ 4));
 				Lot.Color.A = 1.0f;
-				if (!Place(Lot))
+				Candidate.Front = FVector2D(Position) + Normal * (Side * Inner);
+				Candidate.Along = Tangent * Side;
+				Candidate.Back = Normal * Side;
+				Candidate.S0 = -SlotHalf;
+				Candidate.S1 = SlotHalf;
+				Candidate.MinWidth = SlotMinWidth;
+				Candidate.A = Depth;
+				if (bFill && !Fit(Candidate, Group, Depth)) continue;
+				Finish(Candidate);
+				// Without bFill: clear of every road, by half its setback from its edge (a plot's own road, which it faces
+				// from the whole setback, cannot be told apart from the others), and of every reserved plot, or none.
+				if (!bFill)
 				{
-					Candidates.Pop(EAllowShrinking::No);
-					continue;
+					if (!Clear(Lot.Corners)) continue;
+					bool bReserved = false;
+					for (int32 R = 0; R < Kept.Num() && !bReserved; R++) bReserved = KeptBoxes[R].Intersect(CSCityLayout_Box(Lot.Corners)) && Overlap(Kept[R], Lot.Corners);
+					if (bReserved) continue;
 				}
+				Lot.Base = Position.Z;
+				Lot.Height = FMath::Lerp(Settings.MinHeight, Settings.MaxHeight, CSCityLayout_Unit(Lot.Id ^ Seed ^ 2));
+				if (!Place(Lot)) continue;
 				Candidate.Box = CSCityLayout_Box(Lot.Corners);
 				Candidate.Priority = CSCityLayout_Mix(Lot.Id ^ Seed ^ 5);
+				Candidates.Add(MoveTemp(Candidate));
 			}
 		}
 	}
 
-	// Clear of every road, by half the setback from its edge (a plot's own road, which it faces from
-	// the whole setback, cannot be told apart from the others), and of every reserved plot.
-	const double Clearance = Settings.Setback * 0.5;
-	TArray<FBox2D> ReservedBoxes;
-	for (const FPolygon& Plot : Reserved) ReservedBoxes.Add(CSCityLayout_Box(Plot));
-	for (FCandidate& Candidate : Candidates)
-	{
-		const FBox2D Reach = Candidate.Box.ExpandBy(MaxHalfWidth + Clearance);
-		const FIntPoint Min = CellOf(Reach.Min);
-		const FIntPoint Max = CellOf(Reach.Max);
-		for (int32 Y = Min.Y; Y <= Max.Y && Candidate.bClear; Y++)
-		{
-			for (int32 X = Min.X; X <= Max.X && Candidate.bClear; X++)
-			{
-				const TArray<int32>* Near = Grid.Find(FIntPoint(X, Y));
-				if (!Near) continue;
-				for (const int32 Index : *Near)
-				{
-					const FRoadPoint& Road = Points[Index];
-					if (!Candidate.Box.ExpandBy(Road.HalfWidth + Clearance).IsInside(Road.Point) || CSCityLayout_Distance(Candidate.Lot.Corners, Road.Point) >= Road.HalfWidth + Clearance) continue;
-					Candidate.bClear = false;
-					break;
-				}
-			}
-		}
-		for (int32 R = 0; R < Reserved.Num() && Candidate.bClear; R++) if (ReservedBoxes[R].Intersect(Candidate.Box) && Overlap(Reserved[R], Candidate.Lot.Corners)) Candidate.bClear = false;
-	}
-
-	// Among clear plots that overlap, the one drawn first stands.
+	// Among plots that overlap (with bFill: come within a Gap of each other), the one drawn first stands as it is. The
+	// others give way to every such plot before them, as that plot is drawn and whether or not it stands: with bFill by
+	// coming forward a Gap short of it, else by being left out.
+	auto InTheWay = [bFill, RivalGap](const FPolygon& Rival, const FPolygon& Plot) { return bFill ? !CSCityLayout_Apart(Rival, Plot, RivalGap) : Overlap(Rival, Plot); };
+	TArray<FBox2D> RivalBoxes;
+	for (const FCandidate& Candidate : Candidates) RivalBoxes.Add(Candidate.Box.ExpandBy(bFill ? Settings.Gap : 0.0));
 	TMap<FIntPoint, TArray<int32>> Plots;
 	for (int32 C = 0; C < Candidates.Num(); C++)
 	{
-		if (!Candidates[C].bClear) continue;
-		const FIntPoint Min = CellOf(Candidates[C].Box.Min);
-		const FIntPoint Max = CellOf(Candidates[C].Box.Max);
+		const FIntPoint Min = CellOf(RivalBoxes[C].Min);
+		const FIntPoint Max = CellOf(RivalBoxes[C].Max);
 		for (int32 Y = Min.Y; Y <= Max.Y; Y++) for (int32 X = Min.X; X <= Max.X; X++) Plots.FindOrAdd(FIntPoint(X, Y)).Add(C);
 	}
 	auto First = [&Candidates](int32 A, int32 B) { return Candidates[A].Priority != Candidates[B].Priority ? Candidates[A].Priority > Candidates[B].Priority : Candidates[A].Lot.Id > Candidates[B].Lot.Id; };
 	for (int32 C = 0; C < Candidates.Num(); C++)
 	{
 		const FCandidate& Candidate = Candidates[C];
-		if (!Candidate.bClear) continue;
-		bool bStands = true;
+		TArray<int32> Before;
 		const FIntPoint Min = CellOf(Candidate.Box.Min);
 		const FIntPoint Max = CellOf(Candidate.Box.Max);
-		for (int32 Y = Min.Y; Y <= Max.Y && bStands; Y++)
+		for (int32 Y = Min.Y; Y <= Max.Y; Y++)
 		{
-			for (int32 X = Min.X; X <= Max.X && bStands; X++)
+			for (int32 X = Min.X; X <= Max.X; X++)
 			{
 				for (const int32 Other : Plots.FindRef(FIntPoint(X, Y)))
 				{
-					if (Other == C || !First(Other, C) || !Candidates[Other].Box.Intersect(Candidate.Box) || !Overlap(Candidates[Other].Lot.Corners, Candidate.Lot.Corners)) continue;
-					bStands = false;
-					break;
+					if (Other == C || !First(Other, C) || Before.Contains(Other) || !RivalBoxes[Other].Intersect(Candidate.Box) || !InTheWay(Candidates[Other].Lot.Corners, Candidate.Lot.Corners)) continue;
+					Before.Add(Other);
 				}
 			}
 		}
-		if (bStands) Out.Add(Candidate.Lot);
+		if (Before.Num() == 0)
+		{
+			Out.Add(Candidate.Lot);
+			continue;
+		}
+		if (!bFill) continue;
+		FCandidate Given = Candidate;
+		auto Hits = [&](double A)
+		{
+			const FPolygon Tried = Shape(Given, A);
+			for (const int32 Other : Before) if (InTheWay(Candidates[Other].Lot.Corners, Tried)) return true;
+			return false;
+		};
+		if (!Shrink(Given, Given.A, Hits)) continue;
+		Finish(Given);
+		Out.Add(Given.Lot);
 	}
 	return Out;
 }
 
-// A plot is a Frontage - Gap by depth rectangle centred on its centre: it lies within LotRadius of it.
-// A road point clears a plot within its half width and half the setback of it; a reserved plot clears
-// the plots it overlaps; an anchor line's plots lie within its half width, the setback and the depth
-// of it. Each of these also changes the standing of the plots overlapping the ones it touches: two
-// more radii. The extra metre absorbs rounding.
-double LotRadius(const FLotSettings& Settings)
+double LotStrip(const FLotSettings& Settings)
 {
-	const double Width = Settings.Frontage - Settings.Gap;
-	const double Depth = FMath::Max(Settings.MinDepth, Settings.MaxDepth);
-	return 0.5 * FMath::Sqrt(Width * Width + Depth * Depth);
+	// With bFill a slot is under one and a half Frontage.
+	const double Width = (Settings.bFill ? 1.5 : 1.0) * Settings.Frontage - Settings.Gap;
+	return FMath::Sqrt(Width * Width + FMath::Square(CSCityLayout_Deepest(Settings)));
 }
 
-double AnchorReach(const FLotSettings& Settings, double HalfWidth)
+// A plot and its centre lie in its strip. A road point bears on the plots whose strip lies within its half width,
+// setback, the deepest a plot can be and a Gap (the ground it claims or keeps clear, and whether a plot finds anything
+// within FillDepth); a reserved plot on those whose strip comes within half a Gap of it (mitred: twice that); an anchor
+// line has its plots' strips within its half width, setback and that depth. A plot gives way only to plots whose strips
+// come within a Gap of its own (mitred: four), so whatever bears on a plot bears on those too, a strip further on. The
+// extra metre absorbs rounding.
+double AnchorReach(const FLotSettings& Settings, double HalfWidth, double Setback)
 {
-	return HalfWidth + Settings.Setback + FMath::Max(Settings.MinDepth, Settings.MaxDepth) + 2.0 * LotRadius(Settings) + 100.0;
+	return HalfWidth + (Setback >= 0.0 ? Setback : Settings.Setback) + CSCityLayout_Deepest(Settings) + LotStrip(Settings) + 4.0 * Settings.Gap + 100.0;
 }
 
-double RoadReach(const FLotSettings& Settings, double HalfWidth)
+double RoadReach(const FLotSettings& Settings, double HalfWidth, double Setback)
 {
-	return HalfWidth + Settings.Setback * 0.5 + 3.0 * LotRadius(Settings) + 100.0;
+	return HalfWidth + (Setback >= 0.0 ? Setback : Settings.Setback) + CSCityLayout_Deepest(Settings) + Settings.Gap + 2.0 * LotStrip(Settings) + 4.0 * Settings.Gap + 100.0;
 }
 
 double ReservedReach(const FLotSettings& Settings)
 {
-	return 3.0 * LotRadius(Settings) + 100.0;
+	return 2.0 * LotStrip(Settings) + 6.0 * Settings.Gap + 100.0;
 }
 
 void AppendPrism(FCSGpuMeshCPUData& Out, const FPolygon& Footprint, double Base, double Height, const FLinearColor& Color)

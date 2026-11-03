@@ -108,7 +108,8 @@ void CSRoadAssets_DotNetSort(TArray<T>& Keys, FCompare Compare)
 }
 }
 
-bool FAssets::Load(const TArray<uint8>& PrefabsJson, const TArray<uint8>& RawPrefabsJson, const TArray64<uint8>* PiecesBin, FString& OutError)
+bool FAssets::Load(const TArray<uint8>& PrefabsJson, const TArray<uint8>& RawPrefabsJson, const TArray64<uint8>* PiecesBin, FString& OutError,
+	const TArray<uint8>* CustomRoadsJson)
 {
 	Catalog = CSRoadAssets_Parse(PrefabsJson);
 	Raw = CSRoadAssets_Parse(RawPrefabsJson);
@@ -117,6 +118,97 @@ bool FAssets::Load(const TArray<uint8>& PrefabsJson, const TArray<uint8>& RawPre
 	{
 		OutError = TEXT("prefabs.json or raw-prefabs.json is not valid JSON");
 		return false;
+	}
+
+	// Custom roads: the base road's catalog entry with only some of its sections, under a path id past every raw one,
+	// and a copy of its raw prefab; without zoning it has no zone block, so no plots along it unless it asks for them.
+	if (CustomRoadsJson && CustomRoadsJson->Num() > 0)
+	{
+		const TSharedPtr<FJsonObject> Custom = CSRoadAssets_Parse(*CustomRoadsJson);
+		if (!Custom.IsValid())
+		{
+			OutError = TEXT("CustomRoads.json is not valid JSON");
+			return false;
+		}
+		const TSharedPtr<FJsonObject> RoadEntries = CSRoadAssets_Obj(Catalog, TEXT("roads"));
+		int32 NextId = 0;
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Raw->Values) NextId = FMath::Max(NextId, FCString::Atoi(*Pair.Key) + 1);
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Custom->Values)
+		{
+			const TSharedPtr<FJsonObject> Definition = Pair.Value->AsObject();
+			const FString Base = Definition.IsValid() ? Definition->GetStringField(TEXT("copy")) : FString();
+			const TSharedPtr<FJsonObject> BaseRoad = CSRoadAssets_Obj(RoadEntries, *Base);
+			const TSharedPtr<FJsonObject> BaseRaw = BaseRoad.IsValid() ? RawObject(CSRoadAssets_I(BaseRoad, TEXT("path_id"))) : nullptr;
+			if (!BaseRaw.IsValid() || RoadEntries->HasField(Pair.Key))
+			{
+				OutError = FString::Printf(TEXT("Custom road %s: no road %s to copy, or the name is taken"), *Pair.Key, *Base);
+				return false;
+			}
+			const TSharedPtr<FJsonObject> Road = MakeShared<FJsonObject>();
+			Road->Values = BaseRoad->Values;
+			Road->SetNumberField(TEXT("path_id"), NextId);
+			// The sections listed (the base's road sections, and its underground or overhead ones when those are
+			// listed too: a composition is at least as wide as its pipes): an index into the base's, or {"road": another
+			// road (the base when left out), "index": one of its, and any of "invert", "flip", "median" to set}.
+			for (const TCHAR* Key : { TEXT("sections"), TEXT("underground"), TEXT("overhead") })
+			{
+				if (!Definition->HasField(Key)) continue;
+				TArray<TSharedPtr<FJsonValue>> Kept;
+				for (const TSharedPtr<FJsonValue>& Entry : CSRoadAssets_Arr(Definition, Key))
+				{
+					FString From = Base;
+					double Index = 0.0;
+					const TSharedPtr<FJsonObject>* Borrowed = nullptr;
+					if (Entry->TryGetObject(Borrowed))
+					{
+						(*Borrowed)->TryGetStringField(TEXT("road"), From);
+						(*Borrowed)->TryGetNumberField(TEXT("index"), Index);
+					}
+					else Index = Entry->AsNumber();
+					const TSharedPtr<FJsonObject> FromRoad = CSRoadAssets_Obj(RoadEntries, *From);
+					const TArray<TSharedPtr<FJsonValue>>* FromSections = FromRoad.IsValid() ? &CSRoadAssets_Arr(FromRoad, Key) : nullptr;
+					const int32 I = static_cast<int32>(Index);
+					if (!FromSections || !FromSections->IsValidIndex(I))
+					{
+						OutError = FString::Printf(TEXT("Custom road %s: %s has no %s %d"), *Pair.Key, *From, Key, I);
+						return false;
+					}
+					const TSharedPtr<FJsonObject> Section = MakeShared<FJsonObject>();
+					Section->Values = (*FromSections)[I]->AsObject()->Values;
+					if (Borrowed)
+					{
+						for (const TCHAR* Flag : { TEXT("invert"), TEXT("flip"), TEXT("median") })
+						{
+							bool bValue = false;
+							if ((*Borrowed)->TryGetBoolField(Flag, bValue)) Section->SetBoolField(Flag, bValue);
+						}
+					}
+					Kept.Add(MakeShared<FJsonValueObject>(Section));
+				}
+				Road->SetArrayField(Key, Kept);
+			}
+			RoadEntries->SetObjectField(Pair.Key, Road);
+			const TSharedPtr<FJsonObject> RawRoad = MakeShared<FJsonObject>();
+			RawRoad->Values = BaseRaw->Values;
+			RawRoad->SetStringField(TEXT("m_Name"), Pair.Key);
+			bool bZoning = true;
+			Definition->TryGetBoolField(TEXT("zoning"), bZoning);
+			if (!bZoning)
+			{
+				const TSharedPtr<FJsonObject> NoBlock = MakeShared<FJsonObject>();
+				NoBlock->SetNumberField(TEXT("m_FileID"), 0);
+				NoBlock->SetNumberField(TEXT("m_PathID"), 0);
+				RawRoad->SetObjectField(TEXT("m_ZoneBlock"), NoBlock);
+			}
+			const TSharedPtr<FJsonObject>* Plots = nullptr;
+			if (Definition->TryGetObjectField(TEXT("plots"), Plots))
+			{
+				FPlots& Settings = PlotSettings.Add(Pair.Key);
+				(*Plots)->TryGetNumberField(TEXT("setback"), Settings.Setback);
+				(*Plots)->TryGetNumberField(TEXT("frontage"), Settings.Frontage);
+			}
+			Raw->SetObjectField(FString::FromInt(NextId++), RawRoad);
+		}
 	}
 	for (const TSharedPtr<FJsonValue>& Name : CSRoadAssets_Arr(Catalog, TEXT("requirements"))) RequirementNames.Add(Name->AsString());
 

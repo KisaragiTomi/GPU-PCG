@@ -338,6 +338,100 @@ bool FCSCityLotsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// An 80 m block closed in by four streets. Filled, its plots run back halfway across the block and cover far more
+// of it than plots of their own depth. Cut north to south by a 3 m lane whose plots stand half a metre from it, it
+// has plots along both sides of the lane facing it, and the street plots run back halfway to the lane's. Either way
+// every plot keeps half a road's setback from every road and a Gap from every other plot, and the same inputs give
+// the same plots.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityLotsFillTest, "PCGPlugins.CSRoadNet.City.LotsFill",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSCityLotsFillTest::RunTest(const FString& Parameters)
+{
+	TArray<CSCity::FRoadLine> Streets = {
+		CSCityTests_Street(1, FVector(-4000.0, 0.0, 0.0), FVector(12000.0, 0.0, 0.0), 400.0),
+		CSCityTests_Street(2, FVector(-4000.0, 8000.0, 0.0), FVector(12000.0, 8000.0, 0.0), 400.0),
+		CSCityTests_Street(3, FVector(0.0, -4000.0, 0.0), FVector(0.0, 12000.0, 0.0), 400.0),
+		CSCityTests_Street(4, FVector(8000.0, -4000.0, 0.0), FVector(8000.0, 12000.0, 0.0), 400.0) };
+	TArray<CSCity::FRoadLine> WithLane = Streets;
+	WithLane.Add(CSCityTests_Street(5, FVector(4000.0, 0.0, 0.0), FVector(4000.0, 8000.0, 0.0), 150.0));
+	WithLane.Last().Setback = 50.0;
+	CSCity::FLotSettings Settings;
+	const FBox2D Block(FVector2D(0.0, 0.0), FVector2D(8000.0, 8000.0));
+
+	auto Distance = [](const CSCity::FPolygon& A, const CSCity::FPolygon& B)
+	{
+		if (CSCity::Overlap(A, B)) return 0.0;
+		double Best = TNumericLimits<double>::Max();
+		for (const CSCity::FPolygon* From : { &A, &B }) for (const FVector2D& P : *From) Best = FMath::Min(Best, CSCityTests_Distance(From == &A ? B : A, P));
+		return Best;
+	};
+	auto Area = [](const CSCity::FPolygon& Polygon)
+	{
+		double Twice = 0.0;
+		for (int32 I = 0; I < Polygon.Num(); I++) Twice += Polygon[I].X * Polygon[(I + 1) % Polygon.Num()].Y - Polygon[(I + 1) % Polygon.Num()].X * Polygon[I].Y;
+		return Twice * 0.5;
+	};
+	auto Covered = [&Block, &Area](const TArray<CSCity::FLot>& Lots)
+	{
+		double Sum = 0.0;
+		for (const CSCity::FLot& Lot : Lots) if (Block.IsInside(Lot.Centre)) Sum += Area(Lot.Corners);
+		return Sum / Block.GetArea();
+	};
+	// Clear of the roads and of each other.
+	auto Spaced = [&](const FString& Case, const TArray<CSCity::FRoadLine>& Roads, const TArray<CSCity::FLot>& Lots)
+	{
+		int32 OnRoad = 0;
+		int32 TooNear = 0;
+		for (int32 I = 0; I < Lots.Num(); I++)
+		{
+			for (const CSCity::FRoadLine& Road : Roads)
+			{
+				const double Keep = Road.HalfWidth + (Road.Setback >= 0.0 ? Road.Setback : Settings.Setback) * 0.5 - 1.0;
+				for (const FVector& P : Road.Points) OnRoad += CSCityTests_Distance(Lots[I].Corners, FVector2D(P)) < Keep ? 1 : 0;
+			}
+			for (int32 J = I + 1; J < Lots.Num(); J++) TooNear += Distance(Lots[I].Corners, Lots[J].Corners) < Settings.Gap - 1.0 ? 1 : 0;
+		}
+		TestEqual(Case + TEXT(": plots within half a road's setback of it"), OnRoad, 0);
+		TestEqual(Case + TEXT(": plots nearer each other than a Gap"), TooNear, 0);
+	};
+
+	// The block alone.
+	const TArray<CSCity::FLot> Filled = CSCity::LayoutLots(Streets, Streets, {}, Settings);
+	TestTrue(TEXT("block: the same inputs give the same plots"), CSCityTests_SameLots(Filled, CSCity::LayoutLots(Streets, Streets, {}, Settings)));
+	Spaced(TEXT("block"), Streets, Filled);
+	double Middle = 0.0;
+	for (const CSCity::FLot& Lot : Filled) if (Block.IsInside(Lot.Centre) && FMath::Abs(Lot.Front.Y + 1.0) < 1e-6) for (const FVector2D& Corner : Lot.Corners) Middle = FMath::Max(Middle, Corner.Y);
+	// Towards the middle of the block, where the four streets' ground meets (40 m), half a Gap short of the diagonals;
+	// unfilled plots reach 25 m at most.
+	TestTrue(FString::Printf(TEXT("block: south street plots run back near the middle (to %.0f cm)"), Middle), Middle > 3500.0 && Middle <= 3901.0);
+	Settings.bFill = false;
+	const TArray<CSCity::FLot> Unfilled = CSCity::LayoutLots(Streets, Streets, {}, Settings);
+	Settings.bFill = true;
+	AddInfo(FString::Printf(TEXT("block: %.0f%% covered filled, %.0f%% not"), Covered(Filled) * 100.0, Covered(Unfilled) * 100.0));
+	TestTrue(TEXT("block: filled plots cover far more of it"), Covered(Filled) > Covered(Unfilled) + 0.1);
+
+	// The block with the lane.
+	const TArray<CSCity::FLot> Lots = CSCity::LayoutLots(WithLane, WithLane, {}, Settings);
+	Spaced(TEXT("lane"), WithLane, Lots);
+	int32 AlongLane = 0;
+	double Deepest = 0.0;
+	for (const CSCity::FLot& Lot : Lots)
+	{
+		if (!Block.IsInside(Lot.Centre)) continue;
+		// A lane plot: its front on the lane, half a metre from its edge, facing it.
+		const FVector2D FrontMiddle = Lot.Centre + Lot.Front * (Lot.Depth * 0.5);
+		if (FMath::Abs(FMath::Abs(FrontMiddle.X - 4000.0) - 200.0) < 1.0 && FMath::Abs(Lot.Front.Y) < 1e-6) AlongLane++;
+		// How far a west street plot (west of the lane, facing west) runs back towards the lane.
+		if (Lot.Centre.X < 4000.0 && FMath::Abs(Lot.Front.X + 1.0) < 1e-6) for (const FVector2D& Corner : Lot.Corners) Deepest = FMath::Max(Deepest, Corner.X);
+	}
+	AddInfo(FString::Printf(TEXT("lane: %d plots along it, %.0f%% of the block covered"), AlongLane, Covered(Lots) * 100.0));
+	TestTrue(TEXT("lane: plots along both sides of it"), AlongLane >= 6);
+	// Halfway between the west street's plot fronts (7 m) and the lane's (38 m), half a Gap short.
+	TestTrue(FString::Printf(TEXT("lane: west street plots run back halfway to the lane's (to %.0f cm)"), Deepest), Deepest > 2100.0 && Deepest <= 2151.0);
+	return true;
+}
+
 // A street grid with a diagonal, wide and narrow streets and reserved plots, laid out whole, then only
 // from the inputs within reach (CSCity::AnchorReach and the like) of each of several windows: every plot
 // centred in a window comes out the same, id, corners, base and height.
@@ -526,7 +620,7 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 // The batch buildings laid out again only near what an edit changed, on a turned network in small
 // tiles: a main road drawn over the alleys, one of its points moved, the special building moved, the
 // main road deleted. After each edit the buildings change and equal those of a layout from scratch;
-// moving the special building lays out only some of the tiles.
+// moving the special building writes only some of the building tiles.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityLocalUpdateTest, "PCGPlugins.CSRoadNet.City.LocalUpdate",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
 
@@ -576,14 +670,15 @@ bool FCSCityLocalUpdateTest::RunTest(const FString& Parameters)
 		CSRoadTest::TickBuild(Network);
 		TestEqual(Case + TEXT(": error"), Network->LastError, FString());
 		const int32 LaidOut = Network->BuildingTilesLaidOut;
+		const int32 Written = Network->BuildingTilesRebuilt;
 		const int32 Tiles = CSCityTests_BuildingGenerations(Network).Num();
 		const TArray<FVector3f> Local = Sorted();
 		TestTrue(Case + TEXT(": the buildings changed"), Local != Current);
 		TestTrue(Case + TEXT(": tiles laid out"), LaidOut > 0);
 		TestTrue(Case + TEXT(": the same buildings as a layout from scratch"), Local == Scratch());
-		AddInfo(FString::Printf(TEXT("%s: %d tiles laid out, %d building tiles"), *Case, LaidOut, Tiles));
+		AddInfo(FString::Printf(TEXT("%s: %d tiles laid out, %d of %d building tiles written"), *Case, LaidOut, Written, Tiles));
 		Current = Local;
-		return LaidOut < Tiles;
+		return Written < Tiles;
 	};
 
 	ACSRoadSplineActor* Main = World->SpawnActor<ACSRoadSplineActor>();
@@ -595,7 +690,7 @@ bool FCSCityLocalUpdateTest::RunTest(const FString& Parameters)
 	Check(TEXT("main road point moved"));
 	Special->SetActorLocation(FVector(6000.0, -3000.0, 0.0));
 	Special->Rebuild();
-	TestTrue(TEXT("special building moved: only some tiles laid out"), Check(TEXT("special building moved")));
+	TestTrue(TEXT("special building moved: only some building tiles written"), Check(TEXT("special building moved")));
 	Main->Destroy();
 	Check(TEXT("main road deleted"));
 	return true;

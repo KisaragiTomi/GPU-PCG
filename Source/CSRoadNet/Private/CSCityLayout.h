@@ -57,12 +57,19 @@ struct FLotSettings
 	// Along the road per plot, of which Gap stays between neighbours.
 	double Frontage = 1600.0;
 	double Gap = 200.0;
-	// From the road's edge to the plot; plots keep half of it from every other road.
+	// From the road's edge to the plot, for roads that set none (FRoadLine::Setback).
 	double Setback = 300.0;
 	double MinDepth = 1000.0;
 	double MaxDepth = 1800.0;
 	double MinHeight = 600.0;
 	double MaxHeight = 2400.0;
+	// Plots in a block the roads close in run back to whatever stops them within FillDepth of their front (halfway to
+	// the plots of another road, a road's clearance, a reserved plot), a Gap short, their back slanted to fit; plots
+	// with nothing that near take MinDepth..MaxDepth. Near a corner or a road joining, a plot gives up the side of its
+	// front that is not its own. A filled plot shallower than half MinDepth on a side, or narrower than 40% of its
+	// slot, is left out. Without it, plots take MinDepth..MaxDepth and give way whole.
+	bool bFill = true;
+	double FillDepth = 4000.0;
 	int32 Seed = 1;
 };
 
@@ -71,8 +78,16 @@ struct FRoadLine
 {
 	// Plot ids derive from it: stable for the line's source (a spline's segment).
 	uint64 Id = 0;
+	// The road it is part of (a spline): a plot never makes way for its own road's other parts. 0: Id.
+	uint64 Group = 0;
 	TArray<FVector> Points;
 	double HalfWidth = 0.0;
+	// From its edge to the plots along it; negative: FLotSettings::Setback. Every plot keeps half of it from the road.
+	double Setback = -1.0;
+	// Along it per plot, Gap included; negative: FLotSettings::Frontage, which it never exceeds.
+	double Frontage = -1.0;
+	// It has plots along it: with FLotSettings::bFill, the plots of other roads stop halfway to them.
+	bool bZoned = true;
 };
 
 // The alleys with the stretches under the roads taken out: where an alley comes within a road's half
@@ -85,31 +100,40 @@ TArray<FAlley> CutAlleys(const TArray<FAlley>& Alleys, const TArray<FRoadLine>& 
 struct FLot
 {
 	uint64 Id = 0;
-	// Counter-clockwise, standing on Base.
+	// Counter-clockwise, standing on Base: a rectangle, or with FLotSettings::bFill a trapezoid whose back is slanted.
 	FPolygon Corners;
 	double Base = 0.0;
 	double Height = 0.0;
+	// The middle of the Width by Depth rectangle on its front, which lies within Corners.
 	FVector2D Centre = FVector2D::ZeroVector;
 	FLinearColor Color = FLinearColor::White;
+	// Towards the road it faces; its size along that road (the stretch of its slot it takes) and away from it (the
+	// shallower side of a slanted plot).
+	FVector2D Front = FVector2D::UnitX();
+	double Width = 0.0;
+	double Depth = 0.0;
 };
 
-// Plots on both sides of each anchor line, one every Frontage along it. A plot is built when it is
-// clear of every road (Roads: as built, alleys already cut back under main roads; by half the setback
-// from its edge) and every reserved plot, and no clear plot it overlaps comes first (a priority drawn from its id). A plot's id, size
-// and place depend only on its anchor line, side and slot, so an edit elsewhere leaves it as it was.
+// Plots on both sides of each anchor line, one every Frontage along it, standing the anchor's setback from its edge.
+// A plot stays clear of every road (Roads: as built, alleys already cut back under main roads; by half the road's
+// setback from its edge; one whose front is not is left out) and of every reserved plot; with bFill it runs back to
+// whatever stops it (FLotSettings::bFill), and gives way to a reserved plot or to a plot that comes first (a priority
+// drawn from its id) by coming forward a Gap short of it; without, it gives way by being left out. A plot's id and
+// place depend only on its anchor line, side and slot, so an edit elsewhere leaves it as it was.
 // Place decides whether a plot can stand where it lies (and may set its base): one that cannot is no
 // candidate at all.
 TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine>& Roads, const TArray<FPolygon>& Reserved, const FLotSettings& Settings,
 	TFunctionRef<bool(FLot&)> Place = [](FLot&) { return true; });
 
-// How far past an input's bounds the centres of the plots it can change lie (cm). A plot depends on its
-// anchor line, on the roads and reserved plots near it or near a plot it overlaps (a rival), and on
-// those rivals' anchor lines; nothing farther. So LayoutLots run on the inputs whose bounds lie within
-// reach of a window gives every plot centred in the window exactly as a run on all of them does.
-// LotRadius: the plots' largest half diagonal.
-double LotRadius(const FLotSettings& Settings);
-double AnchorReach(const FLotSettings& Settings, double HalfWidth);
-double RoadReach(const FLotSettings& Settings, double HalfWidth);
+// How far past an input's bounds the centres of the plots it can change lie (cm). Every plot lies in its strip,
+// Frontage - Gap wide, from its front back by the deepest a plot can be; LotStrip is the strip's diagonal. A plot
+// depends on its anchor line, on the roads whose half width, setback and that depth reach its strip, on the reserved
+// plots near it, and on the plots it gives way to (their strips within a few Gaps of its own) with what those depend
+// on; nothing farther. So LayoutLots run on the inputs whose bounds lie within reach of a window gives every plot
+// centred in the window exactly as a run on all of them does. Setback: the line's own, negative for the settings'.
+double LotStrip(const FLotSettings& Settings);
+double AnchorReach(const FLotSettings& Settings, double HalfWidth, double Setback = -1.0);
+double RoadReach(const FLotSettings& Settings, double HalfWidth, double Setback = -1.0);
 double ReservedReach(const FLotSettings& Settings);
 
 // The batch buildings between two layouts, so that the second lays out only the tiles near what
