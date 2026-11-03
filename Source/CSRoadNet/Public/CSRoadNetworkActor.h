@@ -250,9 +250,17 @@ public:
 	bool bBakeNanite = true;
 
 	/** Video memory the GPU meshes of the tiles not yet baked may hold (MiB): past it, tiles wait to be built until bakes
-	 *  free theirs. Counts their streams as the pools hand them out and their ray tracing BLAS. 0: no limit. */
+	 *  free theirs. Counts their streams as the pools hand them out and their ray tracing BLAS. 0: no limit. Nothing is
+	 *  baked while a mouse button is held (an edit dragged, a slider, the camera flown), so a long drag can fill it: the
+	 *  tiles then wait for the button to come up. Bakes go nearest the camera first. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Local Update", meta = (ClampMin = "0", DisplayName = "GPU Mesh Budget (MiB)", EditCondition = "bLocalUpdate && bBakeNanite"))
 	int32 GpuMeshBudget = 200;
+
+	/** While the GPU has less video memory than this left (MiB, as its driver budgets this process, other programs' use
+	 *  included), the network stops updating as edits come: no tile, road or building, is written, and nothing fails;
+	 *  they wait, nearest the camera first, until memory comes back (bakes, which free it, go on). 0: never. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Local Update", meta = (ClampMin = "0", DisplayName = "Min Free Video Memory (MiB)", EditCondition = "bLocalUpdate"))
+	int32 MinFreeVideoMemory = 512;
 
 	/** After an edit, convert only the splines around the ones that changed into the network, taking the rest as the last
 	 *  conversion left it; the network comes out as converting every spline makes it. Other prefab data, settings or
@@ -276,6 +284,14 @@ public:
 	/** What the tiles' GPU meshes hold now, as GpuMeshBudget counts it (MiB). */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats", meta = (DisplayName = "GPU Mesh MiB"))
 	float GpuMeshMiB = 0.0f;
+
+	/** Video memory left when the network last looked (MiB; -1: unknown). Below MinFreeVideoMemory it waits. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats", meta = (DisplayName = "Free Video Memory MiB"))
+	float FreeVideoMemoryMiB = -1.0f;
+
+	/** The last update stopped for want of video memory (MinFreeVideoMemory, or the GPU mesh refusing to grow). */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	bool bWaitingForVideoMemory = false;
 
 	/** Tiles the last rebuild wrote or removed. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
@@ -604,6 +620,11 @@ private:
 	static int64 EstimateTileBytes(const FCSRoadTile* Known, int32 Roads, double TrianglesPerRoad);
 	// GpuMeshBudget in bytes; MAX_int64 when it does not apply.
 	int64 GpuMeshBudgetBytes() const;
+	// Whether writing Bytes more would leave less video memory than MinFreeVideoMemory: FreeVideoMemoryMiB, read again
+	// at most every quarter second, less what tiles took since (VideoMemoryTaken). False when unknown or not applying.
+	bool VideoMemoryShort(int64 Bytes);
+	double VideoMemorySeconds = -1.0;
+	int64 VideoMemoryTaken = 0;
 
 	// Where one road mesh goes, and what it took. With Decals (over the road mesh input), the same
 	// graph finds the heights their connectors and crosswalks lie at: Fit, unless the decals have none.
@@ -619,6 +640,8 @@ private:
 		TSharedPtr<CSRoad::FDecalFitReadback> Fit;
 		double AllocationMs = 0.0;
 		double RoadMs = 0.0;
+		// The GPU mesh refused to grow for want of video memory: nothing of the mesh was changed.
+		bool bRefused = false;
 	};
 
 	FString ResolveAssetDirectory() const;

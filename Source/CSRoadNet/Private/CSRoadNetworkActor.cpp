@@ -4,6 +4,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "CSCityBuildingActor.h"
 #include "CSCityLayout.h"
+#include "CSGpuMemoryBudget.h"
 #include "CSGpuMeshTypes.h"
 #include "CSMesh.h"
 #include "CSMeshOps.h"
@@ -43,6 +44,7 @@
 #include "GameFramework/PlayerController.h"
 #if WITH_EDITOR
 #include "Editor.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Landscape.h"
 #include "LandscapeInfo.h"
 #include "LevelEditorViewport.h"
@@ -930,6 +932,7 @@ void ACSRoadNetworkActor::RunBuild(bool bWait)
 	// What spline roads asked for until now is in this build. The build makes the preview again, or,
 	// building in tiles, RefreshPreview does once edits settle; until then the last one stays up.
 	bRebuildRequested = false;
+	bWaitingForVideoMemory = false;
 	FString Error;
 	const bool bBuilt = BuildRoads(bWait, Error);
 	const double Milliseconds = (FPlatformTime::Seconds() - StartTime) * 1000.0;
@@ -1396,12 +1399,22 @@ bool ACSRoadNetworkActor::AdvanceTiles(FCSRoadNetworkActor_TileJob& Job, FString
 				Done++;
 				continue;
 			}
+			const FCSRoadTile* Known = Tiles.Find(Item.Key);
+			const bool bKnown = Known != nullptr;
+			const bool bHadRoad = Known && Known->Road;
+			const int64 Held = Known ? TileGpuBytes(*Known) : 0;
+			const int64 Bytes = CSRoadNetworkActor_GpuMeshBytes(MeshInput.NumVertices, MeshInput.NumIndices);
 			if (Job.Budget < MAX_int64)
 			{
-				const FCSRoadTile* Known = Tiles.Find(Item.Key);
-				const int64 Others = GpuMeshBytes() - (Known ? TileGpuBytes(*Known) : 0);
-				NextTileBytes = CSRoadNetworkActor_GpuMeshBytes(MeshInput.NumVertices, MeshInput.NumIndices);
+				const int64 Others = GpuMeshBytes() - Held;
+				NextTileBytes = Bytes;
 				if (Others > 0 && Others + NextTileBytes > Job.Budget) break;
+			}
+			// Short of video memory: this tile and the rest wait as they are.
+			if (VideoMemoryShort(Bytes - Held))
+			{
+				bWaitingForVideoMemory = true;
+				break;
 			}
 			TBitArray<> Keep(false, Graph.Roads.Num());
 			for (const int32 Road : Item.Roads) Keep[Road] = true;
@@ -1420,7 +1433,23 @@ bool ACSRoadNetworkActor::AdvanceTiles(FCSRoadNetworkActor_TileJob& Job, FString
 				Targets.Decals = &Decals;
 				if (!Job.bWait) Targets.SharedDecals = SharedDecals;
 			}
-			if (!WriteMeshes(Graphed->Input, Graphed->Shared, MeshInput, ByBaseColor, Assets, Targets, OutError)) return Fail();
+			if (!WriteMeshes(Graphed->Input, Graphed->Shared, MeshInput, ByBaseColor, Assets, Targets, OutError))
+			{
+				if (!Targets.bRefused) return Fail();
+				// The GPU mesh found too little video memory to grow: the tile stays as it was (a component made for it
+				// goes again), pending with the rest.
+				if (!bKnown) RemoveTile(Item.Key);
+				else if (!bHadRoad)
+				{
+					Tile.Road->DestroyComponent();
+					Tile.Road = nullptr;
+					Tile.RoadMesh = nullptr;
+				}
+				OutError.Reset();
+				bWaitingForVideoMemory = true;
+				break;
+			}
+			VideoMemoryTaken += FMath::Max<int64>(Bytes - Held, 0);
 			EditMs += Targets.AllocationMs + Targets.RoadMs;
 			// A new GPU mesh: whatever was baked or baking is of the old one.
 			Tile.WrittenSeconds = FPlatformTime::Seconds();
@@ -1772,14 +1801,22 @@ void ACSRoadNetworkActor::DestroyComponents(TArray<TObjectPtr<UInstancedStaticMe
 void ACSRoadNetworkActor::TickBakes()
 {
 #if WITH_EDITOR
-	if (bLocalUpdate && bBakeNanite && Content)
+	// Nothing bakes while a mouse button is held: a drag rewrites its tiles again and again, and a swap would hitch it.
+	const bool bMouseHeld = FSlateApplication::IsInitialized() && FSlateApplication::Get().GetPressedMouseButtons().Num() > 0;
+	if (bLocalUpdate && bBakeNanite && Content && !bMouseHeld)
 	{
 		const double Start = FPlatformTime::Seconds();
-		// Game-thread time a tick for starting bakes, handing them to the compiler and swapping meshes.
+		// Game-thread time a tick for starting bakes, handing them to the compiler and swapping meshes, the tiles nearest
+		// the camera first.
 		const double Deadline = Start + 0.002;
-		for (TPair<FIntPoint, FCSRoadTile>& Pair : Tiles)
+		FVector2D Focus;
+		const bool bFocus = TileFocus(Focus);
+		TArray<FIntPoint> Order;
+		Tiles.GetKeys(Order);
+		Order.Sort([&Focus, bFocus](const FIntPoint& A, const FIntPoint& B) { return CSRoad::TileBefore(A, B, bFocus ? &Focus : nullptr); });
+		for (const FIntPoint& Key : Order)
 		{
-			FCSRoadTile& Tile = Pair.Value;
+			FCSRoadTile& Tile = Tiles.FindChecked(Key);
 			if (!Tile.RoadMesh || !Tile.Road || Tile.bBakeFailed) continue;
 			if (!Tile.Bake)
 			{
@@ -1793,21 +1830,21 @@ void ACSRoadNetworkActor::TickBakes()
 				Tile.Bake = MakeShared<CSRoad::FRoadBake>();
 				if (!Tile.Bake->Start(*Tile.RoadMesh, uint32(Tile.Vertices), uint32(Tile.Triangles) * 3u, Tile.Baking))
 				{
-					UE_LOG(LogCSRoadNet, Warning, TEXT("%s: tile (%d, %d) has no road mesh streams to bake"), *GetName(), Pair.Key.X, Pair.Key.Y);
+					UE_LOG(LogCSRoadNet, Warning, TEXT("%s: tile (%d, %d) has no road mesh streams to bake"), *GetName(), Key.X, Key.Y);
 					Tile.Bake.Reset();
 					Tile.Baking = nullptr;
 					Tile.bBakeFailed = true;
 				}
-				if (CVarCSRoadBakeLog.GetValueOnGameThread() != 0 && FPlatformTime::Seconds() - StartStart > 0.002) UE_LOG(LogCSRoadNet, Log, TEXT("%s: tile (%d, %d) bake start took %.1f ms"), *GetName(), Pair.Key.X, Pair.Key.Y, (FPlatformTime::Seconds() - StartStart) * 1000.0);
+				if (CVarCSRoadBakeLog.GetValueOnGameThread() != 0 && FPlatformTime::Seconds() - StartStart > 0.002) UE_LOG(LogCSRoadNet, Log, TEXT("%s: tile (%d, %d) bake start took %.1f ms"), *GetName(), Key.X, Key.Y, (FPlatformTime::Seconds() - StartStart) * 1000.0);
 				continue;
 			}
 			const double StepStart = FPlatformTime::Seconds();
 			const CSRoad::FRoadBake::EStage Before = Tile.Bake->Stage();
 			const CSRoad::FRoadBake::EStage Stage = Tile.Bake->Tick(StepStart < Deadline);
-			if (CVarCSRoadBakeLog.GetValueOnGameThread() != 0 && FPlatformTime::Seconds() - StepStart > 0.002) UE_LOG(LogCSRoadNet, Log, TEXT("%s: tile (%d, %d) bake step %d -> %d took %.1f ms"), *GetName(), Pair.Key.X, Pair.Key.Y, int32(Before), int32(Stage), (FPlatformTime::Seconds() - StepStart) * 1000.0);
+			if (CVarCSRoadBakeLog.GetValueOnGameThread() != 0 && FPlatformTime::Seconds() - StepStart > 0.002) UE_LOG(LogCSRoadNet, Log, TEXT("%s: tile (%d, %d) bake step %d -> %d took %.1f ms"), *GetName(), Key.X, Key.Y, int32(Before), int32(Stage), (FPlatformTime::Seconds() - StepStart) * 1000.0);
 			if (Stage == CSRoad::FRoadBake::EStage::Failed)
 			{
-				UE_LOG(LogCSRoadNet, Warning, TEXT("%s: tile (%d, %d) could not be baked into a Nanite mesh; it keeps its GPU mesh"), *GetName(), Pair.Key.X, Pair.Key.Y);
+				UE_LOG(LogCSRoadNet, Warning, TEXT("%s: tile (%d, %d) could not be baked into a Nanite mesh; it keeps its GPU mesh"), *GetName(), Key.X, Key.Y);
 				Tile.Bake.Reset();
 				Tile.Baking = nullptr;
 				Tile.bBakeFailed = true;
@@ -1819,7 +1856,7 @@ void ACSRoadNetworkActor::TickBakes()
 			if (!Tile.Nanite)
 			{
 				// As the other tile components: made at build time, never saved or copied.
-				const FName Name = MakeUniqueObjectName(Content, UStaticMeshComponent::StaticClass(), *FString::Printf(TEXT("NaniteTile_%d_%d"), Pair.Key.X, Pair.Key.Y));
+				const FName Name = MakeUniqueObjectName(Content, UStaticMeshComponent::StaticClass(), *FString::Printf(TEXT("NaniteTile_%d_%d"), Key.X, Key.Y));
 				Tile.Nanite = NewObject<UStaticMeshComponent>(Content, Name, RF_Transient | RF_DuplicateTransient);
 				Tile.Nanite->SetupAttachment(Content->GetRootComponent());
 				Tile.Nanite->SetUsingAbsoluteLocation(true);
@@ -1840,7 +1877,7 @@ void ACSRoadNetworkActor::TickBakes()
 			Tile.Road->DestroyComponent();
 			Tile.Road = nullptr;
 			Tile.RoadMesh = nullptr;
-			if (CVarCSRoadBakeLog.GetValueOnGameThread() != 0 && FPlatformTime::Seconds() - SwapStart > 0.002) UE_LOG(LogCSRoadNet, Log, TEXT("%s: tile (%d, %d) swap took %.1f ms"), *GetName(), Pair.Key.X, Pair.Key.Y, (FPlatformTime::Seconds() - SwapStart) * 1000.0);
+			if (CVarCSRoadBakeLog.GetValueOnGameThread() != 0 && FPlatformTime::Seconds() - SwapStart > 0.002) UE_LOG(LogCSRoadNet, Log, TEXT("%s: tile (%d, %d) swap took %.1f ms"), *GetName(), Key.X, Key.Y, (FPlatformTime::Seconds() - SwapStart) * 1000.0);
 		}
 	}
 #endif
@@ -1879,6 +1916,22 @@ int64 ACSRoadNetworkActor::GpuMeshBudgetBytes() const
 	if (bLocalUpdate && bBakeNanite && GpuMeshBudget > 0) return int64(GpuMeshBudget) << 20;
 #endif
 	return MAX_int64;
+}
+
+bool ACSRoadNetworkActor::VideoMemoryShort(int64 Bytes)
+{
+	if (!bLocalUpdate || MinFreeVideoMemory <= 0) return false;
+	// The driver's budget for this process less what it uses (a DXGI query): measured or not at all.
+	const double Now = FPlatformTime::Seconds();
+	if (VideoMemorySeconds < 0.0 || Now - VideoMemorySeconds > 0.25)
+	{
+		VideoMemorySeconds = Now;
+		VideoMemoryTaken = 0;
+		const CSGpuMemoryBudget::FMemorySnapshot Snapshot = CSGpuMemoryBudget::QueryMemorySnapshot();
+		FreeVideoMemoryMiB = Snapshot.bAvailableIsMeasured ? float(double(Snapshot.AvailableVideoMemory) / double(1 << 20)) : -1.0f;
+	}
+	if (FreeVideoMemoryMiB < 0.0f) return false;
+	return double(FreeVideoMemoryMiB) - double(VideoMemoryTaken + FMath::Max<int64>(Bytes, 0)) / double(1 << 20) < double(MinFreeVideoMemory);
 }
 
 int64 ACSRoadNetworkActor::EstimateTileBytes(const FCSRoadTile* Known, int32 Roads, double TrianglesPerRoad)

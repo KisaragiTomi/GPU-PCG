@@ -12,6 +12,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "Framework/Application/SlateApplication.h"
 #include "HAL/IConsoleManager.h"
 #include "Materials/MaterialInterface.h"
 #include "Rendering/NaniteResources.h"
@@ -526,6 +527,50 @@ bool FCSRoadTilesNaniteTest::RunTest(const FString& Parameters)
 	}));
 	TestTrue(TEXT("budget: at most two GPU meshes at once"), MostAtOnce <= 2);
 	AddInfo(FString::Printf(TEXT("budget of 1 MiB: %d tiles, at most %d GPU meshes at once, peaking at %.2f MiB"), Network->NumTiles, MostAtOnce, Peak));
+	return true;
+}
+
+// While a mouse button is held, as Slate has it (a drag in the viewport, a slider), no tile bakes however long its GPU
+// mesh has stood; let go, they all do.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSRoadTilesNaniteHeldTest, "PCGPlugins.CSRoadNet.Tiles.NaniteHeld",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSRoadTilesNaniteHeldTest::RunTest(const FString& Parameters)
+{
+	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
+	if (!Lib.bLoaded)
+	{
+		AddWarning(Lib.Error + TEXT(" (skipped)"));
+		return true;
+	}
+	if (!FSlateApplication::IsInitialized())
+	{
+		AddWarning(TEXT("No Slate application (skipped)"));
+		return true;
+	}
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("editor world"), World)) return false;
+	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>();
+	if (!TestNotNull(TEXT("network actor"), Network)) return false;
+	Network->TileSize = 128.0f;
+	Network->MaxTilesPerBatch = 0;
+	Network->bLocalUpdate = true;
+	Network->bBakeNanite = true;
+	CSRoadTileTests_Grid(World, Network);
+	Network->Rebuild();
+	TestEqual(TEXT("built: error"), Network->LastError, FString());
+	TestTrue(TEXT("built: tiles"), Network->NumTiles > 0);
+
+	// The left button down, off every window, as Slate records it.
+	FSlateApplication& Slate = FSlateApplication::Get();
+	const TSet<FKey> Held = { EKeys::LeftMouseButton };
+	const FVector2D Away(-100000.0, -100000.0);
+	Slate.ProcessMouseButtonDownEvent(nullptr, FPointerEvent(0, Away, Away, Held, EKeys::LeftMouseButton, 0.0f, FModifierKeysState()));
+	TestTrue(TEXT("held: Slate has the button down"), Slate.GetPressedMouseButtons().Contains(EKeys::LeftMouseButton));
+	CSRoadTileTests_Drive(Network, 3.0, [&]() { return Network->NumNaniteTiles > 0; });
+	TestEqual(TEXT("held three seconds: tiles baked"), Network->NumNaniteTiles, 0);
+	Slate.ProcessMouseButtonUpEvent(FPointerEvent(0, Away, Away, TSet<FKey>(), EKeys::LeftMouseButton, 0.0f, FModifierKeysState()));
+	TestTrue(TEXT("let go: baked within a minute"), CSRoadTileTests_Drive(Network, 60.0, [&]() { return Network->NumTiles > 0 && Network->NumNaniteTiles == Network->NumTiles; }));
 	return true;
 }
 

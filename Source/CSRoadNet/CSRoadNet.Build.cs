@@ -41,6 +41,8 @@ public class CSRoadNet : ModuleRules
 		if (Target.Type == TargetType.Editor)
 		{
 			PrivateDependencyModuleNames.Add("UnrealEd");
+			// The tiles' Nanite bakes wait while a mouse button is held (FSlateApplication; the test presses one).
+			PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore", "InputCore" });
 		}
 	}
 }
