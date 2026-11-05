@@ -18,6 +18,11 @@ Docs/TinyGlade/geo/
 # CSRoadNet 读的 CS2 数据（预制件、Palmsland 快照与高度图、测试金标，约 400 MB）：从游戏提取，不进公开仓库，
 # 靠同步盘带到另一台机器；来源与更新见 Docs/CS2RoadsGpu.md「数据」
 Data/CS2Road/
+# 同理：从游戏导入的 Palmsland 路面网格、贴图和 M_CS2_* 材质（约 640 MB）
+Content/CS2Roads/
+
+# 复制自商城素材包 Hong Kong Street 的整栋房子（L_RoadTierTest 用，MakeRoadTierTest.py 能重新复制），不进公开仓库
+Content/CSRoadNet/Houses/SM_House_*.uasset
 
 # 大型测试 mesh（>=1 MB，2026-09-07 从库里删除；只是本地试验件，不随仓库分发）
 Content/MeshBoolean/SM_SM_MERGED_StaticMeshActor_10.uasset
