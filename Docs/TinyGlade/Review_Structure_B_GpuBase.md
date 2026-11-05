@@ -244,4 +244,4 @@ EditMeshAsync：RT lambda 持 ResidentRef + WeakThis；执行后 AsyncTask(GT) �
 | B9 交接必阻塞 | 经典路未修；GPU-Scene 路上已无 | 未动：随实例化叶子的路线拍板一起定 |
 | B10 哈希九份 | 未修 | 未动：与 `CSHash.h / .ush` 对一起做 |
 | 点刷点源引用泄漏 | 未修 | 已修（见 B7） |
-| L0 回读层 | 从未建 | `GpuTriangleUnified_Plan.md` 标为历史文档 |
+| L0 回读层 | 从未建 | 原 `GpuTriangleUnified_Plan.md` 标为历史文档（2026-11-05 已并入 `../gpu-triangle-buffer-unification.md`「设计沿革」） |

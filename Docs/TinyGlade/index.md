@@ -117,7 +117,7 @@ TG 原件预览 `RockShell_Pattern.preview.png` 是 `Scripts/VerifyRockShellGlb.
 | `Plugins/PCGPlugins/Scripts/TinyGlade*.py` | 演示搭建 / 出图 / 回归脚本（回归入口 `TinyGladeDemoRegression.py`） |
 | `Plugins/PCGPlugins/Source/ComputeShaderGenerator/` | `CSHouse*` / `CSGround*` / `CSStairs*` / `CSWall*` 的类注释；逐字段口径以源码注释为准，MD 不复述 |
 | `/PCGPlugins/HouseTest/` | 演示关卡：`L_HouseGroundDemo`、`L_TerrainOpsDemo`，以及屋顶 / 楼梯各轮的专用验证关卡 |
-| `doc/index.md` | 项目级文档索引 |
+| [`../index.md`](../index.md) | PCGPlugins 全部文档的索引 |
 
 ## 目录里的非文档文件
 

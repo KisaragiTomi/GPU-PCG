@@ -7,7 +7,7 @@
 
 与已有文档的分工：
 
-- [项目清理审计记录](project-cleanup-plan.md) 管死代码 / 重复代码的历史候选（`csg-*`、`gse-*` 等编号）。本文只在和结构有关时引用其编号，不重复列条目。
+- [代码冗余与空指针检查审查](Review_CodeRedundancy.md) 管死代码 / 重复代码（2026-08 旧审计的 `csg-*`、`gse-*` 等遗留编号已于 2026-11-05 并入其第八节）。本文只在和结构有关时引用其编号，不重复列条目。
 - [Tiny Glade 结构审查](TinyGlade/Review_Structure.md) 管 TG 编排层内部（actor 生命周期、基类上提）。本文只管 TG 在模块里的位置。
 
 本文条目编号：`repo-*` 仓库与同步、`plug-*` 插件描述文件、`src-*` 源码与模块、`shd-*` 着色器、`doc-*` 文档、`scr-*` 脚本、`cnt-*` Content。
@@ -271,8 +271,8 @@ Docs/
 └─ TinyGlade/                   # 专题目录，沿用其 index.md 的命名规则
 ```
 
-- 根目录沿用 `TinyGlade/` 已定的 `前缀_主题.md` 规则（英文 PascalCase、不带日期），只是前缀换成上面四个。例：`FrameQuotaScheduler_Plan.md` → `Plan_FrameQuotaScheduler.md`，`cs-scene-dirty-3d-design.md` → `Design_SceneDirty3D.md`，`project-cleanup-plan.md` → `Review_ProjectCleanup.md`。
-- 进 `History/`：`ComputeShaderMeshGeneratorVoxelTriangleCache.md`、`ComputeShaderMeshGeneratorTriangleCachePitfalls.md` 及其流程图（子系统 2026-08-12 已删）、`GpuTriangleUnified_Plan.md`（已被 CSMesh 对象层取代）、`VineCpuCostBench.cpp`（CPU 版藤蔓基准）。
+- 根目录沿用 `TinyGlade/` 已定的 `前缀_主题.md` 规则（英文 PascalCase、不带日期），只是前缀换成上面四个。例：`FrameQuotaScheduler_Plan.md` → `Plan_FrameQuotaScheduler.md`，`cs-scene-dirty-3d-design.md` → `Design_SceneDirty3D.md`（旧的 `project-cleanup-plan.md` 已于 2026-11-05 并入 `Review_CodeRedundancy.md` 第八节并删除）。
+- 进 `History/`：`ComputeShaderMeshGeneratorVoxelTriangleCache.md` 及其流程图（子系统 2026-08-12 删过一次、被快照提交带回，2026-11-05 再次删除；原 `…TriangleCachePitfalls.md` 已并入它）、`VineCpuCostBench.cpp`（CPU 版藤蔓基准）。`GpuTriangleUnified_Plan.md` 已于 2026-11-05 并入 `gpu-triangle-buffer-unification.md`「设计沿革」，不再单列。
 - 移出 Docs：`TinyGlade/lextab.py`、`yacctab.py` 删除并加进 `.gitignore`（pycparser 会自动重建）；`build_tree.py`、`measure_cards.py` 与 `.hip` 一起进 `SourceArt/Houdini/`；`TinyGlade/out/` 只保留文档真正引用的渲染图，其余加进 `.gitignore`。
 - `motion-matching-plugin-porting-guide.md` 讲的不是本插件，在 `index.md` 里标「非本插件」，或移出 Docs。
 - 插件根 4 份计划搬进来并入库；工程根 `GpuMesh_DynamicMeshWrap_Plan.md` 直接进 `History/`，它的链接是相对工程根写的（`Plugins/PCGPlugins/README.md`），要一并改。这几份文件名在 27 个文件里出现 45 次（含 C++ 注释与着色器注释），用脚本统一替换路径。
@@ -333,10 +333,10 @@ Scripts/
 ### 阶段 2：文档与 DCC 文件归位（不碰代码逻辑）
 
 1. `doc-1`：5 份散落的计划搬进 `Docs/` 并入库，批量替换 45 处引用。
-2. `doc-2`：`Docs/index.md` 补齐 8 份漏列文档，README「设计文档」表改为一行链接；根目录文档按 3.4 改名，同一提交里替换所有链接。
+2. `doc-2`：`Docs/index.md` 补齐 8 份漏列文档，README「设计文档」表改为一行链接（✅ 2026-11-05：两份清单已合成 `index.md` 一份，并合并了两组重复文档）；根目录文档按 3.4 改名，同一提交里替换所有链接（未做）。
 3. `doc-3`、`doc-4`：建 `SourceArt/Houdini/`，先确定两份 `TinyGlade.hip` 哪份是真源，再搬 `.hip` 与 Houdini 脚本；删 PLY 生成表；`TinyGlade/out/` 清理。
 4. `scr-1` 第一步：写 `Scripts/README.md`，清理一次性迭代。
-5. 修 `TinyGlade/index.md` 里指向不存在的 `doc/index.md` 的那行。
+5. 修 `TinyGlade/index.md` 里指向不存在的 `doc/index.md` 的那行（✅ 2026-11-05）。
 
 验证：用脚本扫一遍所有 md 的相对链接与 C++ / 着色器注释里的路径，失效链接为零。
 

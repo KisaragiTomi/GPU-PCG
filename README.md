@@ -213,7 +213,7 @@ GPU procedural content generation (PCG) tools for Unreal Engine 5.7: procedural 
 
 GPU 实例化叶子的用户（每个组件各持一份 `InstancedGpuMesh`）：地面的石阶 / 石阶卵石 / 裙边摆件 / 地被，房屋的门框砖（接缝、角石、包边、砖墙共用这一个组件）/ 承重柱砖 / 藤蔓枝叶花 / 屋瓦 / 摆件，以及 PointBrush 的实例显示。房屋的尖顶、门扇与窗的预制网格是普通 `UStaticMeshComponent`，不在这一层。
 
-- 📖 设计与落地计划：[`Docs/GpuTriangleUnified_Plan.md`](Docs/GpuTriangleUnified_Plan.md)；当前对象与数据流见本节。
+- 📖 数据流与设计沿革：[`Docs/gpu-triangle-buffer-unification.md`](Docs/gpu-triangle-buffer-unification.md)；当前对象与算子见本节。
 - 🧪 自动化测试（`Source/ComputeShaderGenerator/Private/Tests/`）：`CSGpuMeshObjectTests`（对象 / 编辑 / 桥接口径）、`CSGpuInstancedMeshTests`、`CSGpuInstancedNaniteTests`（Nanite 路：按资产自动选路、真渲染一帧从深度图数实例）、`CSGpuMemoryBudgetTests`、`CSDirectMeshSaveTests`、`CSMeshBooleanParityTests`；全部测试组与跑法见 [自动化测试](#自动化测试)
 
 ### 2. GPU 浅水模拟 · Shallow Water
@@ -582,24 +582,7 @@ C++ 自动化测试位于 `Source/ComputeShaderGenerator/Private/Tests/` 与 `So
 
 ## 设计文档
 
-各功能节里已就近链接对应文档，这里汇总 `Docs/` 与插件根的全部文档及其状态。
-
-| 文档 | 内容 | 状态 |
-|---|---|---|
-| [`Docs/TinyGlade/index.md`](Docs/TinyGlade/index.md) | Tiny Glade 复刻的文档入口：设计裁决、模块对照与进度、窗户 / 树冠专卷、逆向报告 | 持续更新 |
-| [`Docs/TinyGlade/Review_Structure.md`](Docs/TinyGlade/Review_Structure.md) | Tiny Glade 编排层的整体结构审查，子代理报告同目录 `Review_Structure_{A,B,C}_*.md` | 2026-09-06～07 审查，09-11 复核 |
-| [`Docs/GpuTriangleUnified_Plan.md`](Docs/GpuTriangleUnified_Plan.md) | GPU 三角形统一：可拓展储存 + 单一 readback，CSMesh 对象层的前身 | ⚠️ 历史文档：L0 回读层与 sink B 未按此落地，对象层取代了它（2026-09-10 标注） |
-| [`Docs/GpuMeshRayTracing.md`](Docs/GpuMeshRayTracing.md) | GPU 常驻网格的光追 BLAS 接入（Lumen 硬件光追 / 光追阴影 / 反射） | 2026-09-09 落地 |
-| [`Docs/VineGpuResidency.md`](Docs/VineGpuResidency.md) | 藤蔓生成链路的 GPU 常驻化现状与剩余计划 | 2026-08-14；现状表于 2026-09-10 订正过两行 |
-| [`Docs/FrameQuotaScheduler_Plan.md`](Docs/FrameQuotaScheduler_Plan.md) | GPU 生成作业的统一帧配额（分帧）调度 | 设计基线，暂不实施 |
-| [`Docs/GpuClothSim_Plan.md`](Docs/GpuClothSim_Plan.md) | XPBD 布料模拟：常驻算子逐帧驱动 `UCSMesh` 形变 | 2026-10-26 P0 / P1 落地（另含 tether 与约束上色），测试 11/11；P2 碰撞升级、自碰撞、多实例未做 |
-| [`Docs/GpuRigidSettle_Plan.md`](Docs/GpuRigidSettle_Plan.md) | 批量刚体沉降（粒子簇形状匹配），布料计划的姊妹篇 | 计划，未实施 |
-| [`NaniteClusterHLOD_Plan.md`](NaniteClusterHLOD_Plan.md) | 用 Nanite cluster 截面给远处的大中型物体组生成简易 HLOD（小物体归 foliage，不进 HLOD）：`UCSNaniteCutOps` 算子 + `UCSNaniteCutHLODBuilder` | 2026-09-22 落地（含关卡内试验台与外部可见性剔除），测试 5/5，测试关卡截图验收；未在 WP 关卡实跑 |
-| [`Docs/CSLandscapeLayer_Framework.md`](Docs/CSLandscapeLayer_Framework.md) | 当前 Landscape 图层继承、Merge 与烘焙入口 | 2026-09-30 按源码清理已删除类与旧接口 |
-| [`Docs/InstanceBrushPaintDesign.md`](Docs/InstanceBrushPaintDesign.md) | Actor 自持的实例笔刷方案 | 2026-07-23 设计稿 |
-| [`Docs/VDBMeshFromActorPoints.md`](Docs/VDBMeshFromActorPoints.md)、[`Docs/VDBMeshFromSurfaceVoxels.md`](Docs/VDBMeshFromSurfaceVoxels.md) | VDB 网格生成的 GPU 加速方案 | 2026-07-23 写成；之后 `*ToDynamicMesh` 系列已改为 `*ToGpuMesh` |
-| [`Docs/ComputeShaderMeshGeneratorVoxelTriangleCache.md`](Docs/ComputeShaderMeshGeneratorVoxelTriangleCache.md)、[`Docs/ComputeShaderMeshGeneratorTriangleCachePitfalls.md`](Docs/ComputeShaderMeshGeneratorTriangleCachePitfalls.md) | `AComputeShaderMeshGenerator` 的体素激活与脏页三角缓存 | ⚠️ 所述子系统已于 2026-08-12 删除（`fd95aff`），仅作历史 |
-| [`Docs/VineCpuCostBench.cpp`](Docs/VineCpuCostBench.cpp) | 藤蔓 CPU 版的单次成本基准 | 数据见藤蔓测试场景「CPU 版本耗时预估」 |
+各功能节里已就近链接对应文档。全部文档（含插件根目录的计划稿）及其状态只在一处维护：[`Docs/index.md`](Docs/index.md)；Tiny Glade 专题另有 [`Docs/TinyGlade/index.md`](Docs/TinyGlade/index.md)。
 
 ---
 
@@ -613,7 +596,7 @@ PCGPlugins/
 ├─ VoxelTest.hip             # Houdini 参考文件
 ├─ Config/
 │  └─ DefaultPCGPlugins.ini  # CoreRedirects（历史命名 + AVineContainer 迁模块）
-├─ Docs/                     # 设计文档与算法/管线流程图（SVG + 预览 PNG），见「设计文档」
+├─ Docs/                     # 设计文档与算法/管线流程图（SVG + 预览 PNG），清单见 Docs/index.md
 │  └─ TinyGlade/             # Tiny Glade 复刻的全部文档，入口 Docs/TinyGlade/index.md
 ├─ Scripts/                  # Tiny Glade 演示搭建 / 材质建图 / 出图 / 无头回归；NaniteCutHLOD*.py（Python）
 ├─ Shaders/Private/          # GPU 全局着色器（.usf/.ush）

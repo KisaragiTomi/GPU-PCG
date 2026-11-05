@@ -2,7 +2,7 @@
 
 记录 `AVineContainer` 生成链路（表面体素 → 空间竞争 → VisVine 网格）从"CPU 回读 + `UDynamicMesh`"收敛到 GPU 常驻的当前状态，以及还没做的部分。
 
-上游的 GPU 三角形统一化背景见 [`GpuTriangleUnified_Plan.md`](GpuTriangleUnified_Plan.md)。
+上游的 GPU 三角形统一化背景见 [GPU 三角形 Buffer 统一现状](gpu-triangle-buffer-unification.md)「设计沿革」。
 
 ## 现状
 

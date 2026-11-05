@@ -8,7 +8,10 @@
 - 哪些代码重复或已经死掉；
 - 审查中顺带发现了哪些真实缺陷。
 
-文中所有条目都**还没有改代码**。行号是这个快照的，动手前请按位置重新确认。
+行号是这个快照的，动手前请按位置重新确认。处理进度直接标在各条的最后一列：
+
+- **2026-10-24**：第二节 P0 第 1–4 条已修（`9e5991a`）。
+- **2026-11-05**：按[第七节](#七建议的处理顺序)第 2 步删了死代码、单行转发与可直接删副本的重复，41 条标「✅ 2026-11-05 已删」，1 条部分处理（🟡），代码提交 `862e3d8`；另发现并删除了一个被快照提交带回来的死子系统（脏页三角缓存，约 1100 行），见[第八节](#八2026-11-05-补充复活的死子系统与旧审计遗留)。原《项目清理审计记录》（`project-cleanup-plan.md`）已并入第八节后删除。
 
 ## 结论摘要
 
@@ -101,13 +104,13 @@
 | 主题 | 位置 | 内容 | 条目 |
 | --- | --- | --- | --- |
 | 场景代理的「自持 buffer」模式已无使用者 | `CSGpuMeshSceneProxy.*` | 两个子类都是 final，都借用常驻集。可以删掉两个纯虚 hook、分配块、owned 尾段、恒为零的字段，以及 5 个零调用函数 | 4.3 G3-01、G3-02 |
-| 藤蔓构建里的不可达路径 | `GeometryEditorActor.cpp` | 约 250 行 CPU 体素重打包和 5 个 helper；legacy 输出路径；一个白编译的 shader 排列 | 4.5 D1、D2、D8 |
-| 死掉的 GPU 辅助函数 | `ComputeShaderBasicFunction.cpp`、`ComputeShaderMeshGenerator.cpp` | `RasterizeTriangleSoupToHeightmapRDG`、约 130 行的 `UpdateTextureArray`、`DrawCopyTexture`、`BuildTextureArray`、`BlurTextureRDG`，以及它们的 shader | 4.4 D01-D05 |
+| 藤蔓构建里的不可达路径 | `GeometryEditorActor.cpp` | 约 250 行 CPU 体素重打包和 5 个 helper；legacy 输出路径；一个白编译的 shader 排列 | 4.5 D1、D2、D8 · 🟡 D1 已删（2026-11-05），D2、D8 未动 |
+| 死掉的 GPU 辅助函数 | `ComputeShaderBasicFunction.cpp`、`ComputeShaderMeshGenerator.cpp` | `RasterizeTriangleSoupToHeightmapRDG`、约 130 行的 `UpdateTextureArray`、`DrawCopyTexture`、`BuildTextureArray`、`BlurTextureRDG`，以及它们的 shader | 4.4 D01-D05 · ✅ 2026-11-05 已删 |
 | 悬崖与 MeshFill 互相复制 | 两个 cpp | 约 200 行，其中包括上面第 4 条的共有越界、白付的阻塞回读和无用 buffer | 4.5 U1、R2、R3 |
 | 新旧两条表面体素管线 | `ComputeShaderMeshGenerator.cpp:2378-2573 ↔ 2705-2978` | 约 200 行 buffer 分配与 pass 设置重复。改之前要实测 TDR 和峰值显存 | 4.4 U01 |
 | 延迟重求值机制写了三份 | 楼梯、墙、房子 | 上提到 `ACSTinyGlade`，样条观测抽成 `FCSSplineChangeObserver` | 4.2 G2-01、4.1 H24 |
 | 抓手 actor 写了三份 | `CSHouse{Resize,Ridge,Height}HandleActor` | 抽一个抽象中间类，Spawn / Get 改成模板 | 4.1 H10、H18 |
-| 重复的头文件 | `GeometryAsync.h`、`PCGPluginDebug.h` | CSG 里那份 `GeometryAsync.h` 没人包含；`PCGPluginDebug.h` 的 Private 副本可以删（即[结构方案](Plan_PluginStructure.md)的 `src-2`） | 4.6 D1、4.4 D12 |
+| 重复的头文件 | `GeometryAsync.h`、`PCGPluginDebug.h` | CSG 里那份 `GeometryAsync.h` 没人包含；`PCGPluginDebug.h` 的 Private 副本可以删（即[结构方案](Plan_PluginStructure.md)的 `src-2`） | 4.6 D1、4.4 D12 · ✅ 2026-11-05 已删 |
 | GeometryScriptExtraEditor 内部复制 | `FoliageConverter`、`GeometryGenerate`、`GeometryGeneral` | 同一段前置写了 6 份；收集逻辑 3 份；`WeldVertices` 约 230 行照抄引擎算法 | 4.6 P1-P3、P5、P9 |
 | 拖动时反复重算 | 房子框架容量、楼梯把手 | 每帧多次全量重算 | 4.1 H11、4.2 G2-16 |
 | 顶点打包函数 | `CSGpuInstancedMeshComponent.cpp`、`CSMeshOps.cpp`、`CSMesh.cpp` | C++ 侧还有多份；shader 侧已在 10-23 合并进 `CSPackedVertex.ush` | 4.3 G3-07 |
@@ -134,10 +137,10 @@
 | H10 | duplicate | `CSHouse{Resize,Ridge,Height}HandleActor.cpp` | `ConsumeDragToHost`、`OnDetachFromHost` 和两个记账字段三份逐字相同；箭头组件 + `UpdateArrowPose` 两份，`CSStairsWidthHandleActor` 是第三份 | 抽抽象中间类（三者都是 NotBlueprintable + Transient，改继承不影响资产） | high |
 | H11 | redundant-logic | `Private/CSHouseActor.cpp:2874-2902` | 每次 `RebuildFrame` 最多调 9 次 `EffectiveFrameCapacity`，每次全量重算砖层预算和 `BuildGableWalls`，拖动时每帧都走 | 每轮只算一次，用参数传下去 | medium |
 | H12 | duplicate | `Private/CSHouseActor.cpp:2259, 2648, 2737, 2787, 2916, 2975` | 六个砖构建函数开头同一段 `FBrickParams` 初始化；种子表达式重复 4 次、Gable 转换重复 3 次 | 抽 `MakeFrameBrickParams` / `GetBrickSeed` / `ToBrickGables` | high |
-| H13 | duplicate | `Private/CSHouseDecor.cpp:87` | `CSHouseDecor::Hash01` 与 `CSHouseVine::Hash01`（:113）逐字相同，都是导出 API；柱和瓦已用后者（`CSGpuInstancedMeshComponent.cpp:84` 是第三份） | 删掉 Decor 那份 | high |
-| H14 | dead-code | `Private/CSHouseActor.cpp:59` | `CSHouse_WallUV` 0 处调用；1808 行把同一式子内联了一遍 | 删除，或让 1808 改用它 | high |
-| H15 | dead-code | `Public/CSHouseProfile.h:1560` | `CSHouse_FeatureRejectText` 全工程 0 调用 | 删除 | high |
-| H16 | alias | `Private/CSHouseActor.cpp:79` | `CSHouse_AppendFootprintHash` 只转发 `AppendQuantizedHash`，8 个调用点（744、1116、2487、3348、3747、3852、4013、4364），1620 已直调后者 | 内联后删除 | high |
+| H13 | duplicate | `Private/CSHouseDecor.cpp:87` | `CSHouseDecor::Hash01` 与 `CSHouseVine::Hash01`（:113）逐字相同，都是导出 API；柱和瓦已用后者（`CSGpuInstancedMeshComponent.cpp:84` 是第三份） | 删掉 Decor 那份 | high · ✅ 2026-11-05 已删 |
+| H14 | dead-code | `Private/CSHouseActor.cpp:59` | `CSHouse_WallUV` 0 处调用；1808 行把同一式子内联了一遍 | 删除，或让 1808 改用它 | high · ✅ 2026-11-05 已删 |
+| H15 | dead-code | `Public/CSHouseProfile.h:1560` | `CSHouse_FeatureRejectText` 全工程 0 调用 | 删除 | high · ✅ 2026-11-05 已删 |
+| H16 | alias | `Private/CSHouseActor.cpp:79` | `CSHouse_AppendFootprintHash` 只转发 `AppendQuantizedHash`，8 个调用点（744、1116、2487、3348、3747、3852、4013、4364），1620 已直调后者 | 内联后删除 | high · ✅ 2026-11-05 已删 |
 | H17 | duplicate | Frame / Decor / Pillar / Tile / Vine 的打包函数 | 五份结构相同的 RDG 打包样板（注册外部 buffer → UAV → 空表清零 → 上传 → AddPass → SetBufferAccessFinal） | 抽模板 helper，参数用 lambda 填 | medium |
 | H18 | duplicate | `Private/CSHouseActor.cpp:1495-1552；1430, 1743, 1753` | `Spawn{Edge,Height,Ridge}Handle` 三个函数体相同；`Get{Roof,Height,Base}Handle` 只差 Side | `SpawnHandle<T>` + `FindHeightHandle(Side)` | high |
 | H19 | duplicate | `Private/CSHouseActor.cpp:3042, 3117, 3369, 4399；3066-3078 ↔ 3144-3156` | 四个 `Is*Drawable` 包装结构相同；接缝与窗的房体 / 墙材质 / Masked 六条检查逐字相同；组件状态检查链 4 份 | 抽三个私有 helper | medium |
@@ -176,9 +179,9 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 | G2-06 | redundant-logic | `Private/CSGroundActor.cpp:3233` | `PostEditUndo` 先调 `EnsureMirrorInitialized` 再调 `RebuildGroundMesh`，后者在 347-348 自己会调，第二次白扫一遍 MaxAbsHeight | 删掉 3233 | high |
 | G2-07 | redundant-logic | `Private/CSWallActor.cpp:761-762` | (A∧B)∨¬B ≡ A∨¬B，761 的 `&& bBuffersReady` 多余；`EnsureVineRig` 已做过预留与交接，762 实际不可达。`CSHouseActor.cpp:3354` 同款 | 761 只留前两项，删 762 | high（等价已复核）/ medium |
 | G2-08 | duplicate | `Private/CSGroundActor.cpp:2263-2289` ↔ `2727-2750`；`HashFloat` 在 474、1377、2259、2700 与 `CSGroundRockShell.cpp:328` 共 5 份 | 地被与灌木的地面侧输入哈希逐行相同（这些哈希不存盘） | 抽 `CSGround_HashFloat` 与 `HashGroundSurfaceInputs` | high |
-| G2-09 | dead-code | `Public/CSWall.h:111-114` | `FCSWallSkins::TurnDegrees` 全插件零调用，非反射 | 删除 | high（已复核） |
-| G2-10 | dead-code | `Public/CSStairs.h:149-153` | `CSStairs::FNode` 全插件零引用 | 删除 | high（已复核） |
-| G2-11 | dead-code | `Public/CSGroundCollisionComponent.h:48` | `GetCollisionTriangleCount` 注释说给测试用，但 Source / Tests / Scripts 都没调 | 删除或在测试里用上 | high（已复核） |
+| G2-09 | dead-code | `Public/CSWall.h:111-114` | `FCSWallSkins::TurnDegrees` 全插件零调用，非反射 | 删除 | high（已复核） · ✅ 2026-11-05 已删 |
+| G2-10 | dead-code | `Public/CSStairs.h:149-153` | `CSStairs::FNode` 全插件零引用 | 删除 | high（已复核） · ✅ 2026-11-05 已删 |
+| G2-11 | dead-code | `Public/CSGroundCollisionComponent.h:48` | `GetCollisionTriangleCount` 注释说给测试用，但 Source / Tests / Scripts 都没调 | 删除或在测试里用上 | high（已复核） · ✅ 2026-11-05 已删 |
 | G2-12 | duplicate | `Private/CSGroundCover.cpp:444-540` ↔ `Private/CSGroundStairs.cpp:278-358` | 两份 `DebugReadInstancesSync` 的回读 lambda 与收尾几乎逐字相同 | 在 `CSShaperSteps` 抽共享回读 | medium |
 | G2-13 | duplicate | `Private/CSGroundActor.cpp:3098-3165` ↔ `Private/CSHouseActor.cpp:4552-4616` | 两个烘焙自检流程同构（同 H25） | `ACSTinyGlade` 放 protected static helper | medium |
 | G2-14 | duplicate | `Private/CSStairsActor.cpp:303-354` ↔ `18-47` | 踏步砖上传把 `CSStairsActor_UploadPieces` 重写了一遍 | 砖也走 UploadPieces（合并后复跑 UploadCount 单测） | medium |
@@ -216,9 +219,9 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 | ID | 类别 | 位置 | 问题与证据 | 建议 | 置信度 |
 | --- | --- | --- | --- | --- | --- |
 | G3-01 | redundant-logic | `Private/CSGpuMeshSceneProxy.cpp:341-343, 362-377, 512-520`；`Public/CSGpuMeshSceneProxy.h:212, 217` | "代理自持 buffer"模式已无使用者：子类只有 `FCSMeshRenderSceneProxy` 与 `FCSGpuInstancedMeshSceneProxy`，都是 final，都在构造时以非空 resident 调 `SetExternalStreams`，`RegisterStreams` / `BuildGeometry` 都是空实现。owned 分支、`bAllocateBuffers` 分配块、`GatherDrawArgs` owned 尾段都到不了；`FDrawDesc::NumPrimitives` 无写入恒 0 | 收敛成"只借用常驻集"：删两个纯虚 hook、分配块、owned 尾段与恒零字段，改写类注释 | high（子类已复核） |
-| G3-02 | dead-code | `Public/CSGpuMeshSceneProxy.h:130-131, 241, 244`；`.cpp:264-274, 283-287` | 代理版 `AddStandardTriangleStreams` / `GetStreamBuffer` / `GetVertexCapacity` / `GetIndexCapacity` 零调用（同名调用都在 `FCSMeshResident` / `UCSMesh` 上） | 删除（owned 模式残留） | high |
-| G3-03 | dead-code | `Public/CSGpuMeshTypes.h:294-304`；`.cpp:165-182` | 导出函数 `SetStandardStreamAccessFinal` 只有声明和定义，其余提及都是"这里不调它"的注释 | 删除，注释改指 `RestoreStreamAccess` | high（已复核） |
-| G3-04 | dead-code | `Public/CSMesh.h:188-196`；`Private/CSMesh.cpp:378-389` | `FCSMeshResident::AddStream` 零调用，函数体与 `CSMesh_AppendUniqueStreamDesc`（:143-155）逐字重复 | 删除并更新引用它的注释 | high（已复核） |
+| G3-02 | dead-code | `Public/CSGpuMeshSceneProxy.h:130-131, 241, 244`；`.cpp:264-274, 283-287` | 代理版 `AddStandardTriangleStreams` / `GetStreamBuffer` / `GetVertexCapacity` / `GetIndexCapacity` 零调用（同名调用都在 `FCSMeshResident` / `UCSMesh` 上） | 删除（owned 模式残留） | high · ✅ 2026-11-05 已删 |
+| G3-03 | dead-code | `Public/CSGpuMeshTypes.h:294-304`；`.cpp:165-182` | 导出函数 `SetStandardStreamAccessFinal` 只有声明和定义，其余提及都是"这里不调它"的注释 | 删除，注释改指 `RestoreStreamAccess` | high（已复核） · ✅ 2026-11-05 已删 |
+| G3-04 | dead-code | `Public/CSMesh.h:188-196`；`Private/CSMesh.cpp:378-389` | `FCSMeshResident::AddStream` 零调用，函数体与 `CSMesh_AppendUniqueStreamDesc`（:143-155）逐字重复 | 删除并更新引用它的注释 | high（已复核） · ✅ 2026-11-05 已删 |
 | G3-05 | duplicate | `Private/CSMesh.cpp:869-924` | `ReadCountersSync` 就是 `ReadUintBufferSync(…, 2, MeshCounters, …)` 的展开（约 45 行）；"消费回读"在 `CSMeshOps.cpp:1777-1796`、`StaticMeshRenderDataPointSampler.cpp:354-422` 还各有一份 | 改为转调；再抽 `ConsumeReadbackSync` | high |
 | G3-06 | duplicate | `Private/StaticMeshRenderDataPointSampler.cpp:93-159` | `ResolveRequest` / `CreateIndexBufferSRV` ≈ `ComputeShaderMeshGenerator.cpp:779-845`；建索引 SRV 在 `CSMeshOps.cpp:662-671` 是第三份 | 抽模块内共享头 `ResolveResidentLOD` + `CreateIndexBufferSRV` | high |
 | G3-07 | duplicate | `Private/CSGpuInstancedMeshComponent.cpp:52-59, 1142-1147` | `PackSnorm8888` ≡ `CSMeshOps.cpp:472` 的版本；解包在 `CSMesh.cpp:46` 与本文件各一份（后者不钳 -128） | 在 `CSGpuMeshStreams` 放一组 inline Pack/Unpack | high |
@@ -242,7 +245,7 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 | G3-25 | alias | `Private/CSMeshOps.cpp:518` | `UCSMeshOps::InvalidateSections` 纯转发 `Context.InvalidateSections()`，9 个调用点 | 内联（也可为可发现性保留） | medium |
 | G3-26 | alias | `Private/ComputeShaderMeshGenerator.cpp:3937-3980` | 三个 `Add*ToRDG` 纯转发，各只在 `ComputeShaderMeshBoolean.cpp:721/731/809` 用一次（同 A01） | 改直调后删除 | medium |
 | G3-27 | duplicate | `Private/CSMeshOps.cpp:1175-1181` | `EnsureTexCoordSets` 又拼了一遍 `CSMesh_BuildStandardDescs` 的强制选项，两边漂移会让 `SetStreamLayoutSync` 因重复流拒掉整套布局 | 由 CSMesh 侧导出 `BuildStandardStreamDescs` | medium |
-| G3-28 | dead-code | `Private/CSGpuInstancedMeshVertexFactory.h:100` | `GetInstanceCustomDataSRV` 零调用 | 删掉 | high（已复核） |
+| G3-28 | dead-code | `Private/CSGpuInstancedMeshVertexFactory.h:100` | `GetInstanceCustomDataSRV` 零调用 | 删掉 | high（已复核） · ✅ 2026-11-05 已删 |
 | G3-29 | redundant-logic | `Private/CSMeshVisibilityCull.cpp:304-305`（另有 `CSGpuInstancedMeshComponent.cpp:889, 1194, 1231, 1256`） | `ReadUintBufferSync` 成功时恰好返回 NumUints 个值且自己拒绝无效 buffer，调用方后置检查多余 | 删掉或在函数头写明契约 | medium |
 | G3-30 | redundant-logic | `Private/CSGpuInstancedNaniteComponent.cpp:126, 175` | 唯一上游 `IssueGpuSceneWrite` 已保证槽数 > 0 且 Feed 有效 | 删掉两项 | medium |
 | G3-31 | null-unnecessary | `Private/CSGpuInstancedMeshSceneProxy.cpp:441` | `if (P) delete P;` | 去掉 if | high |
@@ -309,20 +312,20 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 
 | ID | 位置 | 问题与证据 | 建议 | 置信度 |
 | --- | --- | --- | --- | --- |
-| D01 | `Private/ComputeShaderMeshGenerator.cpp:4088-4162`（h:602-610） | `RasterizeTriangleSoupToHeightmapRDG` 全工程 0 调用，连带 `FTriangleSoupToHeightmapCS`（465-483）；`MeshGeneratorLandscapeCapture.cpp:8-9` 说它"被复用"已过时 | 连同 shader 类与 usf 入口删除 | high |
-| D02 | `Private/ComputeShaderBasicFunction.cpp:1288-1418`（h:189） | `UpdateTextureArray` 唯一引用 `ComputeShaderCliffGenerate.cpp:350` 已被注释掉（约 130 行，是引擎代码的拷贝） | 删除 | high |
-| D03 | `Private/ComputeShaderBasicFunction.cpp:1172-1185, 55-112` | `DrawCopyTexture` 只在 1164 有一处注释掉的调用；`FDrawCopyTexturePS` 只有它在用 | 一并删除（含 usf 入口） | high |
-| D04 | `Private/ComputeShaderBasicFunction.cpp:1187-1207` | `BuildTextureArray` 0 调用（`CliffGenerate:443`、`MeshFill:260` 各内联了一份） | 删除 | high |
-| D05 | `Private/ComputeShaderBasicFunction.cpp:380-403` | `BlurTextureRDG` 0 调用，且与 `BlurTexture_Internal` 重复 | 删除 | high |
-| D06 | `Public/ComputeShaderSceneCapture.h:97` | `CreateRenderTarget(float)` 无定义也无调用 | 删声明 | high |
-| D07 | `Public/ComputeShaderSceneCapture.h:112-113` | `PreCenter` / `PreExtent` 非 UPROPERTY、0 引用 | 删除 | high |
-| D08 | `Private/MeshGeneratorBrushCache.cpp:571-576` | 两参数重载 `BuildActiveCellsFromReferencePoints` 纯转发且 0 调用 | 删除 | high |
-| D09 | `Public/ComputeShaderBasicFunction.h:21-24` | `FCSSPlinePointData` 0 引用 | 删除 | high |
-| D10 | `Public/CSGpuSurfaceBudget.h:10` | `MaxBytes` 0 引用 | 删除 | high |
-| D11 | `Public/ComputeShaderGenerateHelper.h:19-31, 42-43, 60-63` | `CREATE_UAVB/_16/_32`、`CREATE_TEXTURE_UAV_16`、`CREATE_TEXTURE_UAV_32_OUTP` 头文件之外 0 使用 | 删除 | high |
-| D12 | `Private/PCGPluginDebug.h` | 与 `Public/` 副本逐字节相同，唯一 includer `GeometryEditorActor.cpp:11`（删后回落到 Public 副本，零行为变化）；`PCG_DEBUG_ONLY` / `PCG_DEBUG_LOG` / `PCG_DEBUG_TIME_SCOPE` 无人用，`#ifndef PCGPLUGINS_DEBUG` 兜底永远不生效 | 删 Private 副本与无用宏 | high |
-| D13 | `Private/ComputeShaderMeshGenerator.cpp:3140-3142` | 参数 `DebugName` 被 `(void)` 掉，3 个调用点都不传 | 删参数 | high |
-| D14 | `Private/ComputeShaderMeshGenerator.cpp:2207-2237` | `NaniteTriangles` 从未被填充，2214 恒真、2237 恒为 nullptr | 删除，2249 直接传 nullptr | high |
+| D01 | `Private/ComputeShaderMeshGenerator.cpp:4088-4162`（h:602-610） | `RasterizeTriangleSoupToHeightmapRDG` 全工程 0 调用，连带 `FTriangleSoupToHeightmapCS`（465-483）；`MeshGeneratorLandscapeCapture.cpp:8-9` 说它"被复用"已过时 | 连同 shader 类与 usf 入口删除 | high · ✅ 2026-11-05 已删 |
+| D02 | `Private/ComputeShaderBasicFunction.cpp:1288-1418`（h:189） | `UpdateTextureArray` 唯一引用 `ComputeShaderCliffGenerate.cpp:350` 已被注释掉（约 130 行，是引擎代码的拷贝） | 删除 | high · ✅ 2026-11-05 已删 |
+| D03 | `Private/ComputeShaderBasicFunction.cpp:1172-1185, 55-112` | `DrawCopyTexture` 只在 1164 有一处注释掉的调用；`FDrawCopyTexturePS` 只有它在用 | 一并删除（含 usf 入口） | high · ✅ 2026-11-05 已删 |
+| D04 | `Private/ComputeShaderBasicFunction.cpp:1187-1207` | `BuildTextureArray` 0 调用（`CliffGenerate:443`、`MeshFill:260` 各内联了一份） | 删除 | high · ✅ 2026-11-05 已删 |
+| D05 | `Private/ComputeShaderBasicFunction.cpp:380-403` | `BlurTextureRDG` 0 调用，且与 `BlurTexture_Internal` 重复 | 删除 | high · ✅ 2026-11-05 已删 |
+| D06 | `Public/ComputeShaderSceneCapture.h:97` | `CreateRenderTarget(float)` 无定义也无调用 | 删声明 | high · ✅ 2026-11-05 已删 |
+| D07 | `Public/ComputeShaderSceneCapture.h:112-113` | `PreCenter` / `PreExtent` 非 UPROPERTY、0 引用 | 删除 | high · ✅ 2026-11-05 已删 |
+| D08 | `Private/MeshGeneratorBrushCache.cpp:571-576` | 两参数重载 `BuildActiveCellsFromReferencePoints` 纯转发且 0 调用 | 删除 | high · ✅ 2026-11-05 已删 |
+| D09 | `Public/ComputeShaderBasicFunction.h:21-24` | `FCSSPlinePointData` 0 引用 | 删除 | high · ✅ 2026-11-05 已删 |
+| D10 | `Public/CSGpuSurfaceBudget.h:10` | `MaxBytes` 0 引用 | 删除 | high · ✅ 2026-11-05 已删 |
+| D11 | `Public/ComputeShaderGenerateHelper.h:19-31, 42-43, 60-63` | `CREATE_UAVB/_16/_32`、`CREATE_TEXTURE_UAV_16`、`CREATE_TEXTURE_UAV_32_OUTP` 头文件之外 0 使用 | 删除 | high · ✅ 2026-11-05 已删 |
+| D12 | `Private/PCGPluginDebug.h` | 与 `Public/` 副本逐字节相同，唯一 includer `GeometryEditorActor.cpp:11`（删后回落到 Public 副本，零行为变化）；`PCG_DEBUG_ONLY` / `PCG_DEBUG_LOG` / `PCG_DEBUG_TIME_SCOPE` 无人用，`#ifndef PCGPLUGINS_DEBUG` 兜底永远不生效 | 删 Private 副本与无用宏 | high · ✅ 2026-11-05 已删 |
+| D13 | `Private/ComputeShaderMeshGenerator.cpp:3140-3142` | 参数 `DebugName` 被 `(void)` 掉，3 个调用点都不传 | 删参数 | high · ✅ 2026-11-05 已删 |
+| D14 | `Private/ComputeShaderMeshGenerator.cpp:2207-2237` | `NaniteTriangles` 从未被填充，2214 恒真、2237 恒为 nullptr | 删除，2249 直接传 nullptr | high · ✅ 2026-11-05 已删 |
 | D15 | `Private/ComputeShaderBasicFunction.cpp:231, 697, 726, 1220-1221, 1260` | 赋值后从不读取的变量与无副作用语句（231 应按 X03 修） | 清理 | high |
 | D16 | 反射成员（仅供复核） | C++ 与资产都无引用：`SyncRenderThread`、`CalTreeWindTexture`、`CaptureLandscapeTrianglesGPU`、USTRUCT `FCSMeshData`、`FCSDebug*VoxelDirectionOptions` 的 `Thickness` / `bDrawPoints` / `PointColor` / `PointSize`（只写不读）。必须保留：`SpawnDebugSurfaceTrianglesDynamicMeshActor`（`BP_VineSource`）、`CreateLandscapeMesh`（`EUW_Tests`）、`EVisVineGPUDebugStage` | 先用 Reference Viewer 复核再删 | medium |
 
@@ -355,18 +358,18 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 | --- | --- | --- | --- | --- | --- |
 | U01 | duplicate | `Private/ComputeShaderMeshGenerator.cpp:2378-2573 ↔ 2705-2978` | 新旧两条表面体素管线约 200 行 buffer 分配、分批、pass 参数逐字重复（2338-2341 注释自己承认） | 抽 helper 或旧路径改走新接口；改前实测 TDR 与峰值显存 | medium |
 | U02 | duplicate | `Private/ComputeShaderMeshGenerator.cpp:2185, 2595, 2649` | 三份游戏线程收集前置，等价于 `CollectBoxSceneTriangles` + `MakeBoxSceneCollectOptions` | 改用现成函数 | medium |
-| U03 | duplicate | `Private/ComputeShaderMeshGenerator.cpp:4106-4161 ↔ 4184-4280` | uint 高度图目标与转换 pass 两份 | 删 D01 即消除 | high |
+| U03 | duplicate | `Private/ComputeShaderMeshGenerator.cpp:4106-4161 ↔ 4184-4280` | uint 高度图目标与转换 pass 两份 | 删 D01 即消除 | high · ✅ 2026-11-05 已删 |
 | U04 | duplicate | `Private/MeshGeneratorLandscapeCapture.cpp:226-291 ↔ 340-412` | 多地形捕获循环两份 | 抽 `ForEachLandscapeHeightmap` | medium |
 | U05 | duplicate | `Private/ComputeShaderMeshGenerator.cpp:783-819 ↔ StaticMeshRenderDataPointSampler.cpp:95-127` | LOD 解析前置逐行重复（同 G3-06） | `MeshGeneratorInternal.h` 提供 `ResolveRenderLOD` | medium |
 | U06 | duplicate | `Private/ComputeShaderMeshGenerator.cpp:1654-1742 ↔ CSGpuMemoryBudget.cpp:240-309` | 显存预检估算与真实提取各写一份场景枚举，2136 要求两者口径一致只能靠手工同步 | 抽共享枚举 | medium |
 | U07 | duplicate | `Public/ComputeShaderGeneral.h` 6 处 THREADGROUPSIZE、5 个 `Create*Permutation` | SetDefine 三连与排列工厂重复（参数结构体属于不同 shader，保持独立） | 一个宏 + 一个模板工厂 | medium |
-| U08 | duplicate | `Private/ComputeShaderBasicFunction.cpp:334-359 ↔ 380-403` | Blur 的 pass 设置两份 | 删 D05 即消除 | high |
+| U08 | duplicate | `Private/ComputeShaderBasicFunction.cpp:334-359 ↔ 380-403` | Blur 的 pass 设置两份 | 删 D05 即消除 | high · ✅ 2026-11-05 已删 |
 | U09 | duplicate | `Public/ComputeShaderGenerateHelper.h:213-241, 150-172` | `CreateClearedTypedBuffer` 4 个重载、`ConvertToUVATexture*` 3 个版本函数体两两相同 | 模板化 / 委托 | medium |
 | U10 | duplicate | `Private/ComputeShaderMeshGenerator.cpp:3294-3298, 147-150 ↔ MeshGeneratorBrushCache.cpp:129-133, 121-124` | RT 初始化 / 释放两个 TU 各一份 | 收进 `MeshGeneratorInternal.h` | medium |
 | U11 | duplicate | `Private/GDFSampleService.cpp:250-253 ↔ 374-377` | GDF 参数与采样器设置逐字相同 | 抽小 helper | medium |
 | A01 | alias | `Private/ComputeShaderMeshGenerator.cpp:3937-3980` | 三个 static 纯转发到 `CSGpuTriangleUtilities`，各一处调用（同 G3-26；头注释 928-934 说是刻意设计） | 直调，或作为设计选择保留 | medium |
 | A02 | alias | `Private/ComputeShaderMeshGenerator.cpp:3693-3696` | 已废弃的 UFUNCTION，`BP_VineSource` 仍在引用 | 等 BP 迁移后再删 | high |
-| A03 | alias | `Private/CSFixedScreenBillboardComponent.cpp:65` | `GetAllocatedSize` 遮蔽基类且行为相同 | 删除（收益小） | medium |
+| A03 | alias | `Private/CSFixedScreenBillboardComponent.cpp:65` | `GetAllocatedSize` 遮蔽基类且行为相同 | 删除（收益小） | medium · ✅ 2026-11-05 已删 |
 
 ### 4.5 功能模块
 
@@ -375,12 +378,12 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 | ID | 类别 | 位置 | 问题与证据 | 建议 | 置信度 |
 | --- | --- | --- | --- | --- | --- |
 | R1 | redundant-logic（疑似缺陷） | `Private/ComputeShaderCliffGenerate.cpp:254-276` | `GenerateTargetHeightCal` 每次跑 2×GroupCount.X 趟 `GenerateTargetHeight`：每趟读不变的 `RDG_TargetHeight`、写 `TmpRDG_TargetHeight`，lambda 只交换 shader 里只有声明的 `RW_TempA/B`；:276 把初值拷回；随后 :284-299 的 Blur 以 `RDG_TargetHeight` 为输入整幅覆盖输出——循环结果从未被读 | 二选一：删掉循环与乒乓（输出不变）；或按原意做真正的乒乓。先在编辑器比对两种输出 | high |
-| D1 | dead-code | `Private/GeometryEditorActor.cpp:2739-2852`，另有 1581-1766 的 5 个 helper | `VineLeaf_BuildVineBuildInput` 两个调用点传的 `VoxelData` 都是空对象（:3848、:5008），CPU 体素重打包段、`BuildVineVoxelHashSlots`、`BuildVineTargetBucketBuffers`、`GetVineTargetBucketCell`、`Hash/SameVineVoxelCell` 都不可达；3 个计时出参恒为 nullptr | 删掉 `VoxelData` 参数、CPU 段、5 个 helper 与计时出参（约 250 行），`EnsureVineTargetBucketDummyBuffers` 保留 | high |
+| D1 | dead-code | `Private/GeometryEditorActor.cpp:2739-2852`，另有 1581-1766 的 5 个 helper | `VineLeaf_BuildVineBuildInput` 两个调用点传的 `VoxelData` 都是空对象（:3848、:5008），CPU 体素重打包段、`BuildVineVoxelHashSlots`、`BuildVineTargetBucketBuffers`、`GetVineTargetBucketCell`、`Hash/SameVineVoxelCell` 都不可达；3 个计时出参恒为 nullptr | 删掉 `VoxelData` 参数、CPU 段、5 个 helper 与计时出参（约 250 行），`EnsureVineTargetBucketDummyBuffers` 保留 | high · 🟡 2026-11-05 部分处理（CPU 体素重打包、5 个 helper、`VoxelData` 与 3 个计时出参已删；`FVineBuildInput` 的 CPU 体素数组字段仍供吸附关闭时的哑缓冲用，未动） |
 | D2 | dead-code | `Private/GeometryEditorActor.cpp:2363-2374、1959-1968、1859-1866` | `FVineMeshPassOutputs` 只在 :3051、:3157 构造，都设 `bBaseStreams = true` 并给了 IndirectArgs / MeshCounters：legacy 输出分支、scratch 兜底、3 个 `Out*UAV` 字段都不可达，`FVVVoxelCS` 的 `FBaseStreams=false` 排列白编译；:1863 的注释与事实相反 | 删开关与 legacy 路径（或在 `ShouldCompilePermutation` 排除 false 排列），修正注释 | high |
 | R3 | redundant-logic | `Private/ComputeShaderMeshFill.cpp:269-281`；`ComputeShaderCliffGenerate.cpp:452-464` | 3 个 FindPixel buffer 和 `RW_Deduplication`、`RW_FilterResulteMult` 在 usf 里只有声明；3 个 UAV 都建在同一个 `Tmp_CountBuffer` 上，清零互相覆盖 | 删掉这些 buffer、纹理、清零、绑定与 usf 声明 | high |
 | R2 | redundant-logic | `Private/ComputeShaderMeshFill.cpp:464-469`；`ComputeShaderCliffGenerate.cpp:85-90` | `ReadLinearColorPixels` 读出的 `LinearSamples` 没人用，紧接着又 `ReadRenderTargetRaw` 读同一张 RT——每次生成多一次阻塞 GPU 回读 | 删掉 | high |
 | U1 | duplicate（含缺陷） | `Private/ComputeShaderCliffGenerate.cpp:35-161、321-607` ↔ `ComputeShaderMeshFill.cpp:143-416、423-543` | 约 200 行几乎逐行相同。两份共有同一个越界：循环到 `MeshDataAssets.Num()`，每轮却读 `GenerateDatas[i]`（只有 NumIteration 个元素，MeshFill :243-257、Cliff :426-440）；而且这里该用的切片号是 `i`，不是 `GenerateDatas[i].SelectIndex` | 越界 ✅ 已修：切片号改为资产号 `i`，3 资产 × 1 次迭代实测正常。去重还没做：抽自由函数到 `Private/CSMeshFillShared.h`（不要插中间 UCLASS，蓝图资产依赖现有层级） | high（越界已复核） |
-| D3 | dead-code | `Private/GeometryAsync.h` | CSG 里没人包含它，唯一包含点解析到 GSEE 那份（同 g6 的 D1） | 删掉 CSG 这份 | high |
+| D3 | dead-code | `Private/GeometryAsync.h` | CSG 里没人包含它，唯一包含点解析到 GSEE 那份（同 g6 的 D1） | 删掉 CSG 这份 | high · ✅ 2026-11-05 已删 |
 | R4 | redundant-logic | `Private/ComputeShaderMeshFill.cpp:103-126` | 重叠查询只贡献"带 Tag 的"子集，紧接着遍历全世界的 Tag 又全加一遍（还有重复）；`OverlapOutActorsWithoutTag` 没人用 | 删掉重叠查询；若本意是"盒内且带 Tag"则删第二段，需作者确认 | high |
 | U3 | duplicate | `Private/GeometryEditorActor.cpp:114-150、443-465、591-610、674-693`，绑定 2097-2392 | 4 个 VVVoxel shader 声明并逐行绑定同一组 19 个参数；本文件已对 TriangleSurface / GDF 用 `SHADER_PARAMETER_STRUCT_INCLUDE` | 新建 `FVineVoxelLookupParameters` 并 STRUCT_INCLUDE，约省 140 行 | medium |
 | U2 | duplicate | `Private/GeometryEditorActor.cpp:1445-1472 ↔ 1826-1852` 等 5 处 | 约 30 个标量在两个 bundle 声明、58 行逐字段拷贝、45 行局部别名、20 多个位置参数里重复 | 抽 POD `FVineMeshScalars`，约省 120 行 | medium |
@@ -391,8 +394,8 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 | D8 | dead-code | `Private/GeometryEditorActor.cpp:2716-2722、2045、2060-2062` | 用 pooled GPUVoxels 构建这条路总被哑缓冲分支或 FusedVoxels 抢先，走不到 | 不打算恢复就删参数、成员与分支 | medium |
 | U5 | duplicate | `Private/GeometryEditorActor.cpp:3220-3240 ↔ PCGEditorProcess/Private/ComputeShaderLandscapeRoad.cpp:22-41` | 两个"能否生成"判断逐行相同（同 g6 的 P7） | CSG Public 提供共享函数 | high |
 | D6 | dead-code | `Private/ComputeShaderShallowWaterVoxel.cpp:20-23` 及整个类 | `ACSShallowWaterVoxelCapture` 是空壳：`BuildTerrainVoxelGrid` 没人调，buffer 从未分配，类在代码与资产里都没被引用 | 删函数与字段；无计划可删整个类（先确认外部关卡没放置） | high |
-| D5 | dead-code | `Public/ComputeShaderMeshFill.h:232-241` | `FCSGenerateParameter::IsValid` / `IsValidMult` 没人调且函数体一字不差，USTRUCT 在代码和资产里零引用 | 至少删两个函数 | high |
-| D4 | dead-code | `Private/GeometryEditorActor.cpp:1493、3272` | `NormalizeVineAxisOrFallback`、`RebuildVineDisplayInstances` 只有定义处 | 删除连同悬空注释 | high |
+| D5 | dead-code | `Public/ComputeShaderMeshFill.h:232-241` | `FCSGenerateParameter::IsValid` / `IsValidMult` 没人调且函数体一字不差，USTRUCT 在代码和资产里零引用 | 至少删两个函数 | high · ✅ 2026-11-05 已删 |
+| D4 | dead-code | `Private/GeometryEditorActor.cpp:1493、3272` | `NormalizeVineAxisOrFallback`、`RebuildVineDisplayInstances` 只有定义处 | 删除连同悬空注释 | high · ✅ 2026-11-05 已删 |
 | R5 | redundant-logic | `Private/GeometryEditorActor.cpp:3242-3257、3343-3344` | `ApplyVineReferenceComponentsHiddenInGame` 唯一调用在构造函数，而构造函数 :3322、:3330 已设过；里面的判空不可能成立 | 删函数与两行调用 | high |
 | R13 | redundant-logic（性能） | `Private/GPUSkeletalTreeComponent.cpp:158` | 每帧对每根骨骼做一次 `Name.ToString().StartsWith`，结果只取决于骨骼名 | 在 `RebuildBoneHierarchy` 时缓存成 `bBranch` | high |
 | N2 | null-unnecessary | `Private/ComputeShaderMeshBoolean.cpp:2413-2415` | :2375 的 `Capture.IsValid()` 已查过同样 9 个 buffer | 删掉 | high |
@@ -482,15 +485,15 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 
 | ID | 位置 | 问题与证据 | 建议 | 置信度 |
 | --- | --- | --- | --- | --- |
-| D1 | `ComputeShaderGenerator/Private/GeometryAsync.h` | 整份文件没有任何地方包含（唯一 include `GeometryGenerate.cpp:57` 解析到 GSEE 那份，两份只差一行注释）；`Parallel_For` 两份都 0 调用 | 删 CSG 那份与 `Parallel_For` | high |
-| D2 | `GSEE/Public/GeometryGeneral.h:103` | `TreeWindMergeComponents` 空函数体、无调用 | 删除 | high |
-| D3 | `GSEE/Public/GeometryGeneral.h:159` | `FindNearestComponents` 模板从未实例化；`FWindTreeReduceData` 随之没用 | 删除 | high |
-| D4 | `GSEE/Public/GeometryGeneral.h:154` | `SaveDynamicMeshToStaticMesh(UDynamicMesh*, int32)` 无调用 | 删除 | high |
-| D5 | `GSEE/Public/GeometryMathUtils.h:31` | `FindNearPointIteration` 两个重载无调用，删后 `UPointFunction` 成空类 | 删除 | high |
-| D6 | `GSEE/Public/GeometryMathUtils.h:127` | `CountIf`、`Reduce_Custom` 两个重载无调用 | 删除 | high |
-| D7 | `GSEE/Public/GeometryAttribute.h:64` | 非 inline 的 `GetAttrib` 写在 Public 头里（再被别的 TU 包含就 LNK2005）；`PointInt` 与 6 个属性宏无人用（VV/VP 前缀还写错）；被 `GeometryGeneral.cpp` 包含了两次 | 删除 | high |
-| D8 | `PEP/Private/SelectedActorViewportOverlayBase.h:34` | `CreateDetailsCategoryOverlayWidget` 无调用，函数体与 `CreateOverlayWidget` 相同 | 删除 | high |
-| D9 | `PEP/Private/RoadBuilderShaders.cpp:11` | `ROAD_SHADER` 宏从没用过 | 删除 | high |
+| D1 | `ComputeShaderGenerator/Private/GeometryAsync.h` | 整份文件没有任何地方包含（唯一 include `GeometryGenerate.cpp:57` 解析到 GSEE 那份，两份只差一行注释）；`Parallel_For` 两份都 0 调用 | 删 CSG 那份与 `Parallel_For` | high · ✅ 2026-11-05 已删 |
+| D2 | `GSEE/Public/GeometryGeneral.h:103` | `TreeWindMergeComponents` 空函数体、无调用 | 删除 | high · ✅ 2026-11-05 已删 |
+| D3 | `GSEE/Public/GeometryGeneral.h:159` | `FindNearestComponents` 模板从未实例化；`FWindTreeReduceData` 随之没用 | 删除 | high · ✅ 2026-11-05 已删 |
+| D4 | `GSEE/Public/GeometryGeneral.h:154` | `SaveDynamicMeshToStaticMesh(UDynamicMesh*, int32)` 无调用 | 删除 | high · ✅ 2026-11-05 已删 |
+| D5 | `GSEE/Public/GeometryMathUtils.h:31` | `FindNearPointIteration` 两个重载无调用，删后 `UPointFunction` 成空类 | 删除 | high · ✅ 2026-11-05 已删（`UPointFunction` 删空后整个类一并删除，资产零引用） |
+| D6 | `GSEE/Public/GeometryMathUtils.h:127` | `CountIf`、`Reduce_Custom` 两个重载无调用 | 删除 | high · ✅ 2026-11-05 已删 |
+| D7 | `GSEE/Public/GeometryAttribute.h:64` | 非 inline 的 `GetAttrib` 写在 Public 头里（再被别的 TU 包含就 LNK2005）；`PointInt` 与 6 个属性宏无人用（VV/VP 前缀还写错）；被 `GeometryGeneral.cpp` 包含了两次 | 删除 | high · ✅ 2026-11-05 已删 |
+| D8 | `PEP/Private/SelectedActorViewportOverlayBase.h:34` | `CreateDetailsCategoryOverlayWidget` 无调用，函数体与 `CreateOverlayWidget` 相同 | 删除 | high · ✅ 2026-11-05 已删 |
+| D9 | `PEP/Private/RoadBuilderShaders.cpp:11` | `ROAD_SHADER` 宏从没用过 | 删除 | high · ✅ 2026-11-05 已删 |
 | D10 | `GSEE/Private/GeometryGenerate.cpp:847` | `bool UsePointVDB=false; if (UsePointVDB)`，约 108 行永不执行（含候选重复块 855-890） | 删除 | high |
 | D11 | `GSEE/Public/VDBExtra.h:92` | `VDBParticleList::Add` 无调用 | 删除 | medium |
 | D12 | `GSEE/Private/FoliageConverter.cpp:370`；`GeometryMathUtils.cpp:309-311` | `AddFoliage`、`Reduction` 是空函数体 UFUNCTION | 先查 BP 引用再删 | medium |
@@ -537,7 +540,7 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 | L19 | redundant-logic | `GSEE/Private/LandscapeExtra.cpp:222-237, 104` | 死局部变量；重复取 :90 已有的值 | 删掉 | high |
 | L20 | redundant-logic | `GSEE/Private/GeometryGenerate.cpp:1186` | 中断器永远返回 false | 换平凡实现 | medium |
 | L21 | redundant-logic | `PEP/Private/ViewEditCategoryViewportOverlay.cpp:7` | 唯一调用点已判 `IsValid` | 给基类加默认实现 | medium |
-| A1 | alias | `PEP/Private/CSBrushEdModeBase.cpp:108` | `CapturedMouseMove` 与 `MouseMove` 逐行相同 | `return MouseMove(...)` | high |
+| A1 | alias | `PEP/Private/CSBrushEdModeBase.cpp:108` | `CapturedMouseMove` 与 `MouseMove` 逐行相同 | `return MouseMove(...)` | high · ✅ 2026-11-05 已删 |
 | A2 | alias | `GSEE/Private/LandscapeExtra.cpp:79, 172` | `GetWorldFromContextObject(GWorld, …)` 等价于 GWorld | 直接用 GWorld | medium |
 | A3 | alias | `PEP/Private/GeometryEditorFunction.cpp:17` | 纯转发，注释说明为兼容 BP 保留 | 保留，仅登记 | high |
 
@@ -591,3 +594,33 @@ C++、Python、资产都没有引用、但按口径不建议直接删的 UFUNCTI
 2. **删死代码和死子系统。** 第三节前三项和各组的 dead-code，收益大、风险小。
 3. **结构性去重。** 需要先定落点：放基类还是 helper，要不要插中间类（插中间类会影响蓝图资产的类层级）。
 4. **多余判空。** 按模块批量清理，机械、低风险；可以改成 `check` 的地方，优先改 `check` 而不是直接删。
+
+## 八、2026-11-05 补充：复活的死子系统与旧审计遗留
+
+### 8.1 脏页三角缓存子系统（已删）
+
+`AMeshGeneratorBrushCache` 里的「体素分页三角形缓存」（`EnsureTriangleCache*`、`UpdateMeshGeneratorCacheByBox`、`ClearMeshGeneratorCache`、`DrawDebugActiveVoxels` 等 9 个 UFUNCTION，`FCSMeshGeneratorTriangleCacheRequest` / `Handle` / `VoxelCacheState`、`FCSDebugActiveVoxelOptions` 四个结构体，以及 `StaticMeshPointSampler.usf` 的 `ClearDirtyVoxelCacheCS`、`ScatterTrianglesToVoxelCacheCS`）：
+
+- 2026-08-12 `fd95aff` 以「产出无人消费」删过一次；2026-08-14 的工作区快照提交 `bd46db7` 把另一份旧工作区原样提交上来，整套又回来了（`MeshGeneratorBrushCache.cpp` +969 行）。本审查 10-24 的 X01（三张缓存 RT 不是 `UPROPERTY`）修的就是它。
+- 2026-11-05 复核：C++ 唯一调用点是藤蔓表面体素调试箭头（`AVineContainer::DrawDebugVineSurfaceVoxelArrows`），只为把 `GeneratorBounds` 摆好；主生成路早就改成直接摆盒子。工程与插件 Content 二进制检索 9 个 UFUNCTION 名与结构体名零命中（阳性对照 `GenerateMapCliff` 命中 `UEW_CliffGenerate`）。已删除（`862e3d8`），调试那条路改为直接摆盒子。设计文档保留为历史：[ComputeShaderMeshGeneratorVoxelTriangleCache.md](ComputeShaderMeshGeneratorVoxelTriangleCache.md)。
+- 教训：快照式提交会把别处删掉的东西带回来。合并他处工作区之前，先对照 `git log --diff-filter=D` 看有没有「复活」的文件块。
+
+### 8.2 旧审计（2026-08）遗留候选
+
+原《项目清理审计记录》（2026-08 的跨模块审计，编号 `csg-*`、`gse-*`、`shaders-*` 等）2026-11-05 按符号对当前代码重查：其中 14 个代表性符号已不存在（`PrepareVVLinesProjected`、`AppendTriangleMeshData`、`CalculateGradient`、`FillSharedGroup`、`SW_SmoothHeight`、`CS_Promote`、`BlurPixelOrig`、`CPF_Findislands`、`SS_RASTERIZESPLINE`、`SelectionMechanic` 等），对应条目作废。`xmodule-1/2`（两份重复头）即本文 4.6 D1 / 4.4 D12，已删。仍然存在、**未按当前代码复核**的 PCGPlugins 候选如下：
+
+| 旧编号 | 位置 / 符号 | 原结论 | 风险 |
+| --- | --- | --- | --- |
+| `shaders-16` | `MeshFill.usf` 的 `FMESHFILL_TEST` 调试 kernel + 蓝图 `CurvaturePostTest` | 调试残留 | 高：蓝图在引用 |
+| `csg-5` | `FMeshFillMult` 排列 | 16 种模式里 5 种从不派发，128 个排列全在编译 | 中 |
+| `gse-12` 一带 | `UGeneralMath` | 空桩函数库 | 低（先查资产引用） |
+| `hierarchy-11` | `EnqueueGDFJob` | 零生产者 | 中 |
+| `pcgep-5` | `MaterialTest` | 死调试函数 | 低（先查资产引用） |
+| `gse-14` 一带 | `CreateLandscapeMeshTextureData` | 恒返回空 | 中 |
+| `hierarchy-18` | `IsFiniteVector` 多份 | 谓词重复 | 低 |
+| `gse-16`、`hierarchy-14` | `GeometryGeneral.cpp` 大段注释代码 | 注释掉的旧实现 | 低 |
+| `xmodule-3`、`xmodule-4`、`xmodule-5` | OpenVDB 粒子管线两份、DynamicMesh→UStaticMesh 保存三份、同步回读样板约 9 份 | 跨模块重复（与本文 4.5 P8、4.6 P8 有重叠） | 中 |
+| `hierarchy-6` | `ACSCliffGenerateCapture` / `ACSFillTarget` | 重复成员与捕获逻辑，可上提共同基类（与本文 4.5 U1 同源） | 中 |
+| `critic-2`、`pcgep-20`、`gse-30` | 三个 `Build.cs` | 依赖重复列出、`Foliage` 未用 | 低 |
+
+旧文档里 PCGPlugins 之外的条目（`mcp-*`、`aitool-*`、`game-*`、工程根目录与工程 `Config` 的卫生项）不属于本插件文档的范围，没有搬过来；需要时从 git 历史取：`git show 671b693:Docs/project-cleanup-plan.md`。
