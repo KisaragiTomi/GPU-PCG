@@ -94,8 +94,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ComputeShader")
 	void Construction();
 	
-	UTextureRenderTarget2D* CreateRenderTarget(float TextureSize = 512);
-	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capturer")
 	float CaptureSize = 2048;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capturer")
@@ -108,10 +106,6 @@ public:
 	float GenerateThreshold = .5;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capturer")
 	float UnGenerateThreshold = .9;
-	
-	FVector PreCenter = FVector::ZeroVector;
-	FVector PreExtent = FVector::ZeroVector;
-	
 };
 
 UCLASS(BlueprintType)

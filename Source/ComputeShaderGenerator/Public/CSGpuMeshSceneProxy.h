@@ -125,11 +125,6 @@ public:
 	// Readback API (used by UCSGpuMeshComponent::ReadbackMeshSync). Render thread only.
 	// -------------------------------------------------------------------------
 
-	/** Conservative GPU-buffer capacities (the actual counts are GPU-decided and read
-	 *  back from the MeshCounters buffer). */
-	uint32 GetVertexCapacity() const { return VertexCapacity; }
-	uint32 GetIndexCapacity() const { return IndexCapacity; }
-
 	/** Snapshots this proxy's stream set as a plain FCSMeshResident so the shared readback
 	 *  (CSMeshReadback::ReadbackResidentSync) can consume it. The proxy keeps owning the
 	 *  buffers; the view only adds references. Render thread only.
@@ -232,16 +227,6 @@ protected:
 
 	/** Register one stream. Call from RegisterStreams(). */
 	void AddStream(const FCSGpuStreamDesc& Desc);
-
-	/** Register the standard triangle-mesh set: Position / TangentBasis / TexCoord0 /
-	 *  Color / Index / IndirectArgs + the MeshCounters carrier. Call after setting the
-	 *  capacities; leaves may AddStream(...) extra buffers before or after.
-	 *  NumIndirectDraws > 1 sizes the IndirectArgs buffer for that many DrawIndexedIndirect
-	 *  arg sets (5 uints each) so a leaf can issue one draw per LOD out of one buffer. */
-	void AddStandardTriangleStreams(uint32 NumIndirectDraws = 1);
-
-	/** Pooled buffer for a registered stream (for BuildGeometry to register external / dispatch). */
-	TRefCountPtr<FRDGPooledBuffer> GetStreamBuffer(ECSGpuStreamRole Role, uint8 Index = 0) const;
 
 	/** SRV of a registered stream (only streams whose desc set SrvFormat have one). */
 	FRHIShaderResourceView* GetStreamSRV(ECSGpuStreamRole Role, uint8 Index = 0) const;

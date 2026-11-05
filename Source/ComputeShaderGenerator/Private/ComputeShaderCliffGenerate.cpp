@@ -347,7 +347,6 @@ void ACSCliffGenerateCapture::GenerateCliffVerticalCal(TArray<FCSMeshFillData> G
 	// 	InMeshHeightArray->SourceTextures.Add(MeshDataAssets[i]->CSMeshHeightTexture);
 	// }
 	// // InMeshHeightArray->UpdateSourceFromSourceTextures();
-	// UComputeShaderBasicFunction::UpdateTextureArray(InMeshHeightArray);
 	ENQUEUE_RENDER_COMMAND(SceneDrawCompletion)(
 	[=, this ](FRHICommandListImmediate& RHICmdList)
 	{

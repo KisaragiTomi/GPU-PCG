@@ -44,9 +44,6 @@ public:
 	 */
 	void RebuildFromMirror(const FCSGroundMirror& Mirror);
 
-	/** 最近一次请求的碰撞网格三角数（测试与诊断用）。 */
-	int32 GetCollisionTriangleCount() const { return CollisionIndices.Num(); }
-
 	/** 还有一次重烘在后台 cook（测试据此等它落地）。 */
 	bool IsCookInFlight() const { return PendingBodySetup != nullptr; }
 

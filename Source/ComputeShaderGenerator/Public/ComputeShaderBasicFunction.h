@@ -18,11 +18,6 @@ class ACSPlaneRangeGenerator;
 #include "ComputeShaderBasicFunction.generated.h"
 
 
-struct FCSSPlinePointData
-{
-	TArray<TArray<FLinearColor>> PointData;
-};
-
 /**
  * Unified blend mode for all CS landscape edit layers (Temp / Layer / Landscape).
  * Integer order MUST stay in sync with the TempLayerBlend branch in CSLandscape.usf.
@@ -80,10 +75,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ComputeShader")
 	static void BlurTexture(UTextureRenderTarget2D* InTextureTarget, UTextureRenderTarget2D* OutBlurTexture, float BlurScale = 1);
 
-	static void BlurTextureRDG(FRDGBuilder& GraphBuilder, FRDGTextureRef& InTexture, FRDGTextureUAVRef& InTextureUAV, FRDGTextureRef& OutTexture, FIntVector
-	                           GroupCount, FBlurTexture::EBlurType Type, float
-	                           BlurScale = 1);
-	
 	UFUNCTION(BlueprintCallable, Category = "ComputeShader")
 	static void BlurNormalTexture(UTextureRenderTarget2D* InTextureTarget, UTextureRenderTarget2D* OutBlurTexture, float BlurScale = .5);
 	
@@ -176,17 +167,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ComputeShader")
 	static void CopyTexture(UTextureRenderTarget2D* InOrig, UTextureRenderTarget2D* InCopy);
 	
-	static void DrawCopyTexture(FRDGBuilder& GraphBuilder, FRDGTextureUAVRef RDGUAV_CopySource, FRDGTextureRef& RDG_CopyTarget);
-
-	static void BuildTextureArray(FRDGBuilder& GraphBuilder, int32& Index, FRDGTextureRef& RDG_CopySource, FRDGTextureUAVRef
-	                              & RDG_CopyTarget, FIntVector& GroupCount);
-
 
 #if WITH_EDITOR
 	UFUNCTION(BlueprintCallable, Category = "ComputeShader")
 	static void Test(UTexture2DArray* InArray, UTexture2D* InTexture, UTextureRenderTarget2D* InDebugView);
-	
-	static void UpdateTextureArray(UTexture2DArray* Texture2DArray);
 #endif
 
 	UFUNCTION(BlueprintCallable, Category = "ComputeShader")

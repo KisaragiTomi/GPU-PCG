@@ -56,10 +56,6 @@ RWBuffer<int> RW_SurfaceVoxelNormalSums;
 RWBuffer<uint> RW_SurfaceVoxelNormalCounts;
 Buffer<int> SurfaceVoxelNormalSums;
 Buffer<uint> SurfaceVoxelNormalCounts;
-Buffer<uint4> DirtyVoxelPages;
-RWTexture2D<float4> RW_VoxelMetaTexture;
-RWTexture2D<float4> RW_TriangleVertexTexture;
-RWTexture2D<float4> RW_TriangleNormalTexture;
 
 // --- Surface voxel target position / blur buffers (ported from ResinRattan) ---
 RWBuffer<float4> RW_OutVoxelTargetPositions;
@@ -97,20 +93,6 @@ uint SurfaceVoxelCapacity;
 uint SurfaceVoxelHashSlotCount;
 // Blur neighbourhood radius for mean filter (0=disabled, 1=3x3x3)
 uint SurfaceVoxelBlurRadius;
-uint DirtyVoxelCount;
-uint CacheGeneration;
-uint GridSizeX;
-uint GridSizeY;
-uint GridSizeZ;
-uint MaxTrianglesPerVoxel;
-uint MetaTextureWidth;
-uint MetaTextureHeight;
-uint TriangleVertexTextureWidth;
-uint TriangleVertexTextureHeight;
-uint TriangleNormalTextureWidth;
-uint TriangleNormalTextureHeight;
-float3 CacheWorldMin;
-float CacheVoxelSize;
 float ReferenceFilterDistanceSq;
 
 bool IsInsideBounds(float3 Point)
@@ -229,35 +211,6 @@ uint HashCell(int3 Cell)
 	uint Y = (uint)Cell.y;
 	uint Z = (uint)Cell.z;
 	return HashUint(X * 73856093u ^ Y * 19349663u ^ Z * 83492791u);
-}
-
-uint2 LinearIndexToTextureCoord(uint LinearIndex, uint TextureWidth)
-{
-	uint SafeWidth = max(TextureWidth, 1u);
-	return uint2(LinearIndex % SafeWidth, LinearIndex / SafeWidth);
-}
-
-bool TextureCoordInside(uint2 Coord, uint TextureWidth, uint TextureHeight)
-{
-	return Coord.x < TextureWidth && Coord.y < TextureHeight;
-}
-
-bool CellInsideGrid(int3 Cell)
-{
-	return all(Cell >= int3(0, 0, 0))
-		&& Cell.x < (int)GridSizeX
-		&& Cell.y < (int)GridSizeY
-		&& Cell.z < (int)GridSizeZ;
-}
-
-bool TriangleAABBOverlapsVoxel(float3 P0, float3 P1, float3 P2, int3 Cell)
-{
-	float CellSize = max(CacheVoxelSize, 1.0e-4f);
-	float3 CellMin = CacheWorldMin + float3(Cell) * CellSize;
-	float3 CellMax = CellMin + CellSize;
-	float3 TriMin = min(P0, min(P1, P2));
-	float3 TriMax = max(P0, max(P1, P2));
-	return all(TriMax >= CellMin) && all(TriMin <= CellMax);
 }
 
 [numthreads(THREADGROUPSIZE_X, 1, 1)]
@@ -1132,135 +1085,6 @@ void FinalizeSurfaceVoxelNormalsCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	RW_OutVoxelTargetPositions[VoxelIndex] = float4(TargetPosition, 1.0f);
 }
 
-[numthreads(THREADGROUPSIZE_X, 1, 1)]
-void ClearDirtyVoxelCacheCS(uint3 DispatchThreadId : SV_DispatchThreadID)
-{
-	uint DirtyIndex = DispatchThreadId.x;
-	if (DirtyIndex >= DirtyVoxelCount || MaxTrianglesPerVoxel == 0u)
-	{
-		return;
-	}
-
-	uint4 Dirty = DirtyVoxelPages[DirtyIndex];
-	uint PageIndex = Dirty.w;
-	uint TriStart = PageIndex * MaxTrianglesPerVoxel;
-
-	uint2 MetaCoord = LinearIndexToTextureCoord(PageIndex, MetaTextureWidth);
-	if (TextureCoordInside(MetaCoord, MetaTextureWidth, MetaTextureHeight))
-	{
-		// x = active, y = cache generation, z = first triangle slot, w = triangle count / overflow marker when negative.
-		RW_VoxelMetaTexture[MetaCoord] = float4(1.0f, (float)CacheGeneration, (float)TriStart, 0.0f);
-	}
-
-	for (uint LocalTriIndex = 0u; LocalTriIndex < MaxTrianglesPerVoxel; ++LocalTriIndex)
-	{
-		uint TriSlot = TriStart + LocalTriIndex;
-		uint2 NormalCoord = LinearIndexToTextureCoord(TriSlot, TriangleNormalTextureWidth);
-		if (TextureCoordInside(NormalCoord, TriangleNormalTextureWidth, TriangleNormalTextureHeight))
-		{
-			RW_TriangleNormalTexture[NormalCoord] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-		}
-
-		uint VertexBase = TriSlot * 3u;
-		[unroll]
-		for (uint Corner = 0u; Corner < 3u; ++Corner)
-		{
-			uint2 VertexCoord = LinearIndexToTextureCoord(VertexBase + Corner, TriangleVertexTextureWidth);
-			if (TextureCoordInside(VertexCoord, TriangleVertexTextureWidth, TriangleVertexTextureHeight))
-			{
-				RW_TriangleVertexTexture[VertexCoord] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-			}
-		}
-	}
-}
-
-[numthreads(THREADGROUPSIZE_X, 1, 1)]
-void ScatterTrianglesToVoxelCacheCS(uint3 DispatchThreadId : SV_DispatchThreadID)
-{
-	uint DirtyIndex = DispatchThreadId.x;
-	uint ActualTriangleCount = SurfaceTriangleCounter[0];
-	ActualTriangleCount = min(ActualTriangleCount, SurfaceTriangleCount);
-	if (DirtyIndex >= DirtyVoxelCount || ActualTriangleCount == 0u || MaxTrianglesPerVoxel == 0u)
-	{
-		return;
-	}
-
-	uint4 Dirty = DirtyVoxelPages[DirtyIndex];
-	int3 Cell = int3((int)Dirty.x, (int)Dirty.y, (int)Dirty.z);
-	if (!CellInsideGrid(Cell))
-	{
-		return;
-	}
-
-	uint PageIndex = Dirty.w;
-	uint TriStart = PageIndex * MaxTrianglesPerVoxel;
-	uint2 MetaCoord = LinearIndexToTextureCoord(PageIndex, MetaTextureWidth);
-	if (!TextureCoordInside(MetaCoord, MetaTextureWidth, MetaTextureHeight))
-	{
-		return;
-	}
-
-	uint WrittenCount = 0u;
-	bool bOverflow = false;
-	for (uint TriIndex = 0u; TriIndex < ActualTriangleCount; ++TriIndex)
-	{
-		uint VertexBase = TriIndex * 3u;
-		float3 P0 = TriangleVertices[VertexBase + 0u].xyz;
-		float3 P1 = TriangleVertices[VertexBase + 1u].xyz;
-		float3 P2 = TriangleVertices[VertexBase + 2u].xyz;
-		if (!TriangleAABBOverlapsVoxel(P0, P1, P2, Cell))
-		{
-			continue;
-		}
-
-		float3 Normal = ResolveTriangleSoupNormal(
-			P0,
-			P1,
-			P2,
-			TriangleNormals[VertexBase + 0u].xyz,
-			TriangleNormals[VertexBase + 1u].xyz,
-			TriangleNormals[VertexBase + 2u].xyz);
-		if (dot(Normal, Normal) <= 1.0e-8f || any(isnan(Normal)))
-		{
-			continue;
-		}
-
-		if (WrittenCount >= MaxTrianglesPerVoxel)
-		{
-			bOverflow = true;
-			break;
-		}
-
-		uint TriSlot = TriStart + WrittenCount;
-		uint OutVertexBase = TriSlot * 3u;
-		uint2 V0Coord = LinearIndexToTextureCoord(OutVertexBase + 0u, TriangleVertexTextureWidth);
-		uint2 V1Coord = LinearIndexToTextureCoord(OutVertexBase + 1u, TriangleVertexTextureWidth);
-		uint2 V2Coord = LinearIndexToTextureCoord(OutVertexBase + 2u, TriangleVertexTextureWidth);
-		if (TextureCoordInside(V0Coord, TriangleVertexTextureWidth, TriangleVertexTextureHeight))
-		{
-			RW_TriangleVertexTexture[V0Coord] = float4(P0, 1.0f);
-		}
-		if (TextureCoordInside(V1Coord, TriangleVertexTextureWidth, TriangleVertexTextureHeight))
-		{
-			RW_TriangleVertexTexture[V1Coord] = float4(P1, 1.0f);
-		}
-		if (TextureCoordInside(V2Coord, TriangleVertexTextureWidth, TriangleVertexTextureHeight))
-		{
-			RW_TriangleVertexTexture[V2Coord] = float4(P2, 1.0f);
-		}
-
-		uint2 NormalCoord = LinearIndexToTextureCoord(TriSlot, TriangleNormalTextureWidth);
-		if (TextureCoordInside(NormalCoord, TriangleNormalTextureWidth, TriangleNormalTextureHeight))
-		{
-			RW_TriangleNormalTexture[NormalCoord] = float4(Normal, 0.0f);
-		}
-
-		++WrittenCount;
-	}
-
-	RW_VoxelMetaTexture[MetaCoord] = float4(1.0f, (float)CacheGeneration, (float)TriStart, bOverflow ? -(float)WrittenCount : (float)WrittenCount);
-}
-
 // =============================================================================
 // Surface voxel spatial blur — ported from ResinRattan surface_voxel.comp
 // 3D mean filter over a Moore neighbourhood.
@@ -1328,8 +1152,8 @@ void BlurSurfaceVoxelsCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// TriangleSoupToHeightmapCS
-// Top-down orthographic rasterization of triangle soup into a depth/height
+// Mesh → Heightmap 光栅化（IndexedMeshToHeightmapCS 用）
+// Top-down orthographic rasterization into a depth/height
 // texture compatible with ShallowWater's T_SceneDepth convention:
 //   texel.x = CameraHeight - WorldZ
 // Uses InterlockedMin on uint-reinterpreted floats for correct max-Z.
@@ -1342,7 +1166,7 @@ float2 HM_BoundsInvSize;
 float  HM_CameraHeight;
 int2   HM_TextureSize;
 
-// 单三角俯视正交光栅化（TriangleSoupToHeightmapCS 与 IndexedMeshToHeightmapCS 共用）。
+// 单三角俯视正交光栅化（IndexedMeshToHeightmapCS 用）。
 // depth = HM_CameraHeight - WorldZ，非负 float 的位型保持单调，InterlockedMin 即取最高面。
 void HM_RasterizeWorldTriangle(float3 V0, float3 V1, float3 V2)
 {
@@ -1378,21 +1202,6 @@ void HM_RasterizeWorldTriangle(float3 V0, float3 V1, float3 V2)
 			InterlockedMin(RW_HeightmapUint[int2(px, py)], depthBits);
 		}
 	}
-}
-
-[numthreads(THREADGROUPSIZE_X, 1, 1)]
-void TriangleSoupToHeightmapCS(uint3 DTid : SV_DispatchThreadID)
-{
-	uint TriCount = RW_TriangleCounter[0];
-	uint TriIdx = DTid.x;
-	if (TriIdx >= TriCount)
-		return;
-
-	float3 V0 = RW_OutTriangleVertices[TriIdx * 3 + 0].xyz;
-	float3 V1 = RW_OutTriangleVertices[TriIdx * 3 + 1].xyz;
-	float3 V2 = RW_OutTriangleVertices[TriIdx * 3 + 2].xyz;
-
-	HM_RasterizeWorldTriangle(V0, V1, V2);
 }
 
 // ─────────────────────────────────────────────────────────────────────────

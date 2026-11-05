@@ -291,17 +291,6 @@ namespace CSGpuMeshStreams
 	COMPUTESHADERGENERATOR_API void SetStreamAccessFinal(
 		FRDGBuilder& GraphBuilder, FRDGBufferRef Buffer, ECSGpuStreamRole Role);
 
-	/** One call for the whole standard set. Every producer that fills these seven buffers ends
-	 *  its graph with exactly this; pass null for any stream it does not own. */
-	COMPUTESHADERGENERATOR_API void SetStandardStreamAccessFinal(
-		FRDGBuilder& GraphBuilder,
-		FRDGBufferRef Positions,
-		FRDGBufferRef Tangents,
-		FRDGBufferRef TexCoords,
-		FRDGBufferRef Colors,
-		FRDGBufferRef Indices,
-		FRDGBufferRef IndirectArgs,
-		FRDGBufferRef MeshCounters);
 }
 
 // -----------------------------------------------------------------------------

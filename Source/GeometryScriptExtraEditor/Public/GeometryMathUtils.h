@@ -21,18 +21,6 @@ public:
 };
 
 // =====================================================================
-// UPointFunction — nearest-point search
-// =====================================================================
-UCLASS()
-class GEOMETRYSCRIPTEXTRAEDITOR_API UPointFunction : public UBlueprintFunctionLibrary
-{
-	GENERATED_BODY()
-public:
-	static int32 FindNearPointIteration(TArray<FVector> TarLocations, FVector SourceLocation);
-	static int32 FindNearPointIteration(TArray<FVector> TarLocations, FVector SourceLocation, TFunction<bool(int32)> Func);
-};
-
-// =====================================================================
 // UPolyLine — polyline smooth / resample / query
 // =====================================================================
 UCLASS()
@@ -122,24 +110,4 @@ public:
 		EReductionCustomOp Operation,
 		int32 InitValue = 0
 	);
-
-	template<typename T>
-	static int32 CountIf(TArrayView<const T> Input, TFunctionRef<bool(T)> Predicate)
-	{
-		return Reduce<T, int32>(Input, [&Predicate](int32 Acc, T V) {
-			return Acc + (Predicate(V) ? 1 : 0);
-		}, 0);
-	}
-
-	template<typename T, typename R>
-	static R Reduce_Custom(TArrayView<const T> Input, TFunctionRef<R(R, T)> Lambda, R Init)
-	{
-		return Reduce<T, R>(Input, Lambda, MoveTemp(Init));
-	}
-
-	template<typename T, typename R>
-	static R Reduce_Custom(const TArray<T>& Input, TFunctionRef<R(R, T)> Lambda, R Init)
-	{
-		return Reduce_Custom<T, R>(TArrayView<const T>(Input), Lambda, MoveTemp(Init));
-	}
 };

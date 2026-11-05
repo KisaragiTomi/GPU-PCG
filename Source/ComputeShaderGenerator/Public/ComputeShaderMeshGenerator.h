@@ -338,70 +338,6 @@ struct COMPUTESHADERGENERATOR_API FCSMeshGeneratorVoxelGridSettings
 	int32 MaxCacheTextureDimension = 4096;
 };
 
-USTRUCT(BlueprintType)
-struct COMPUTESHADERGENERATOR_API FCSMeshGeneratorTriangleCacheRequest
-{
-	GENERATED_BODY()
-
-	FName RequestId = NAME_None;
-
-	bool bForceFullRebuild = false;
-
-	float ActivationRadiusOverride = 0.0f;
-
-	bool bPersistentInterest = true;
-
-	TArray<FVector> CachedReferencePoints;
-};
-
-USTRUCT(BlueprintType)
-struct COMPUTESHADERGENERATOR_API FCSMeshGeneratorTriangleCacheHandle
-{
-	GENERATED_BODY()
-
-	bool bValid = false;
-
-	int32 CacheGeneration = 0;
-
-	FBox CachedWorldBounds = FBox(ForceInit);
-
-	FIntVector GridSize = FIntVector::ZeroValue;
-
-	float VoxelSize = 0.0f;
-
-	int32 ActiveVoxelCount = 0;
-
-	int32 DirtyVoxelCount = 0;
-
-	TObjectPtr<UTextureRenderTarget2D> VoxelMetaRT = nullptr;
-
-	TObjectPtr<UTextureRenderTarget2D> TriangleVertexRT = nullptr;
-
-	TObjectPtr<UTextureRenderTarget2D> TriangleNormalRT = nullptr;
-};
-
-USTRUCT()
-struct COMPUTESHADERGENERATOR_API FCSMeshGeneratorVoxelCacheState
-{
-	GENERATED_BODY()
-
-	FBox CachedWorldBounds = FBox(ForceInit);
-	FIntVector GridSize = FIntVector::ZeroValue;
-	float CachedVoxelSize = 0.0f;
-	int32 CachedMaxActiveVoxels = 0;
-	int32 CachedMaxTrianglesPerVoxel = 0;
-	int32 CachedLODIndex = 0;
-	int32 CachedMaxTextureDimension = 0;
-	uint32 CacheGeneration = 0;
-
-	TSet<FIntVector> ActiveCells;
-	TSet<FIntVector> CellsToActivate;
-	TSet<FIntVector> CellsToDeactivate;
-	TSet<FIntVector> DirtyCells;
-	TMap<FIntVector, int32> CellToPage;
-	TArray<int32> FreePages;
-};
-
 // -----------------------------------------------------------------------------
 // Brush Data
 // -----------------------------------------------------------------------------
@@ -599,16 +535,6 @@ public:
 	 *  Also refreshes LastTriangleTextureData. Blocks via FlushRenderingCommands. */
 	FCSTriangleMeshData GetBoxSceneTrianglesFromGPUFiltered(float ReferenceFilterDistance = 200.0f);
 
-	/** Rasterizes a GPU triangle soup into a 2D heightmap via top-down orthographic projection.
-	 *  Output format matches SceneCapture depth: texel.x = CameraHeight - WorldZ.
-	 *  Runs entirely within the supplied FRDGBuilder; must be called on the render thread. */
-	void RasterizeTriangleSoupToHeightmapRDG(
-		FRDGBuilder& GraphBuilder,
-		const FCSStaticMeshTriangleRDGOutput& TriangleOutput,
-		FRDGTextureRef OutputHeightmap,
-		const FBox& WorldBounds,
-		float CameraHeight);
-
 	/** Converts an ALandscape::RenderHeightmap G16 output into the depth format (CameraHeight - WorldZ)
 	 *  and merges it into an existing OutputHeightmap using min (higher terrain wins).
 	 *  Runs entirely within the supplied FRDGBuilder; must be called on the render thread. */
@@ -758,7 +684,7 @@ public:
 	 *  running the RDG surface-voxel pass on the render thread and blocking via FlushRenderingCommands.
 	 *  Keeps all triangles within the generator bounds (no reference-point filtering). Refreshes the
 	 *  cached LastSurfaceVoxelData / LastSurfaceVoxelTextureData and returns the sanitized voxel data. */
-	FCSSurfaceVoxelData ReadbackBoxSceneSurfaceVoxelsSync(float VoxelSize, const TCHAR* DebugName = nullptr);
+	FCSSurfaceVoxelData ReadbackBoxSceneSurfaceVoxelsSync(float VoxelSize);
 
 	/** Returns the handle for the most recently stored triangle texture data. */
 	UFUNCTION(BlueprintPure, Category = "CS Mesh Generator|Generated Data")

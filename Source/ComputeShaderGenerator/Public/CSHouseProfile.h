@@ -1556,19 +1556,3 @@ inline ECSFeatureReject CSHouse_QueryOpening(const FCSOpeningSite& Site, const F
 	return ECSFeatureReject::None;
 }
 
-/** 拒绝原因 → 一句人话。编辑器线框颜色与脚本日志共用，别在调用点各写一份。 */
-inline const TCHAR* CSHouse_FeatureRejectText(ECSFeatureReject Reason)
-{
-	switch (Reason)
-	{
-	case ECSFeatureReject::None:            return TEXT("");
-	case ECSFeatureReject::Degenerate:      return TEXT("尺寸退化（宽或高 ≤ 0）");
-	case ECSFeatureReject::NotOnWall:       return TEXT("边号越界");
-	case ECSFeatureReject::NearCorner:      return TEXT("吃掉了墙端的护角");
-	case ECSFeatureReject::SillTooLow:      return TEXT("窗台太低（低于 WindowMinSillZ 或在地面以下）");
-	case ECSFeatureReject::AboveEave:       return TEXT("洞顶吃掉了墙顶的连续砖带");
-	case ECSFeatureReject::OverlapsOpening: return TEXT("与已有洞的面板格相交（门拱优先）");
-	case ECSFeatureReject::OnPierSpan:      return TEXT("落在拱间墩的跨度上");
-	default:                                return TEXT("未知");
-	}
-}

@@ -145,13 +145,6 @@ struct FDoorStepsInput
 	float Width = 100.0f;
 };
 
-/** 楼梯点（样条控制点）：世界位置（Z = 节点高度）+ 宽度 cm。 */
-struct FNode
-{
-	FVector Position = FVector::ZeroVector;
-	float Width = 150.0f;
-};
-
 /** 地面采样：世界 XY → 世界 Z。**空 = 没有地面**：不夹高度、不抬踏面。 */
 using FGroundSampler = TFunction<float(const FVector2D&)>;
 

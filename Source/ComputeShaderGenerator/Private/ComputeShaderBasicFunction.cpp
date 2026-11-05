@@ -52,65 +52,6 @@ using namespace FImageCoreUtils;
 
 DECLARE_CYCLE_STAT(TEXT("CS Execute"), STAT_CSTest_Execute, STATGROUP_CSTest)
 
-class FDrawCopyTexturePS : public FGlobalShader
-{
-public:
-
-	enum class EDrawCopy : uint8
-	{
-		DC_CopyRWTexture,
-		DC_CopyTexture,
-		MAX
-	};
-	class FDrawCopy : SHADER_PERMUTATION_ENUM_CLASS("DrawCopy", EDrawCopy);
-	using FPermutationDomain = TShaderPermutationDomain<FDrawCopy>;
-
-	static TShaderMapRef<FDrawCopyTexturePS> CreatePermutation(EDrawCopy Permutation)
-	{
-		typename FPermutationDomain PermutationVector;
-		PermutationVector.Set<FDrawCopy>(Permutation);
-		TShaderMapRef<FDrawCopyTexturePS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), PermutationVector);
-		return ComputeShader;
-	}
-	
-	DECLARE_GLOBAL_SHADER(FDrawCopyTexturePS);
-	SHADER_USE_PARAMETER_STRUCT(FDrawCopyTexturePS, FGlobalShader);
-	
-	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float4>, T_CopySource)
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RW_CopySource)
-		SHADER_PARAMETER_SAMPLER(SamplerState, SourceSampler)
-		// SHADER_PARAMETER_SAMPLER(SamplerState, SourceSSProfilesSampler)
-		// SHADER_PARAMETER(FVector4f, TextureSizeAndPixelSize)
-		// SHADER_PARAMETER(int32, SourceSubsurfaceProfileInt)
-		RENDER_TARGET_BINDING_SLOTS()
-	END_SHADER_PARAMETER_STRUCT()
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return FDataDrivenShaderPlatformInfo::GetSupportsVertexShaderSRVs(Parameters.Platform);
-	}
-
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
-	{
-		static const TCHAR* ShaderSourceModeDefineName[] =
-		{
-			TEXT("DC_COPYRWTEXTURE"),
-			TEXT("DC_COPYTEXTURE"),
-		}; 
-		static_assert(UE_ARRAY_COUNT(ShaderSourceModeDefineName) == (uint32)EDrawCopy::MAX, "Enum doesn't match define table.");
-
-		const FPermutationDomain PermutationVector(Parameters.PermutationId);
-		const uint32 SourceModeIndex = static_cast<uint32>(PermutationVector.Get<FDrawCopy>());
-		OutEnvironment.SetDefine(ShaderSourceModeDefineName[SourceModeIndex], 1u);
-	}
-
-
-
-};
-
-IMPLEMENT_GLOBAL_SHADER(FDrawCopyTexturePS, "/Plugin/PCGPlugins/Shaders/Private/BasicFunction.usf", "FDrawCopyTexture", SF_Pixel);
-
 namespace CSRTUpload
 {
 template<typename TPixel>
@@ -376,31 +317,6 @@ void UComputeShaderBasicFunction::BlurTexture(UTextureRenderTarget2D* InTextureT
 		GraphBuilder.Execute();
 	});
 	UCSMesh::CountedBlockingFlush();
-}
-
-void UComputeShaderBasicFunction::BlurTextureRDG(FRDGBuilder& GraphBuilder, FRDGTextureRef& InTexture, FRDGTextureUAVRef& InTextureUAV, FRDGTextureRef& OutTexture, FIntVector GroupCount, FBlurTexture::EBlurType Type,float BlurScale)
-{
-	typename FBlurTexture::FPermutationDomain PermutationVector;
-	PermutationVector.Set<FBlurTexture::FBlurFunctionSet>(Type);
-	TShaderMapRef<FBlurTexture> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel), PermutationVector);
-
-	FBlurTexture::FParameters* PassParameters = GraphBuilder.AllocParameters<FBlurTexture::FParameters>();
-			
-	PassParameters->T_BlurTexture = OutTexture;
-	PassParameters->RW_BlurTexture = InTextureUAV ;
-	PassParameters->Sampler	= TStaticSamplerState<SF_Bilinear>::GetRHI();
-	PassParameters->BlurScale = BlurScale;
-			
-
-	GraphBuilder.AddPass(
-	RDG_EVENT_NAME("Blur"),
-	PassParameters,
-	ERDGPassFlags::AsyncCompute,
-	[PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
-	{
-		FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *PassParameters, GroupCount);
-	});
-	AddCopyTexturePass(GraphBuilder,InTexture , OutTexture, FRHICopyTextureInfo());
 }
 
 void UComputeShaderBasicFunction::BlurNormalTexture(UTextureRenderTarget2D* InTextureTarget,
@@ -1162,49 +1078,11 @@ void UComputeShaderBasicFunction::CopyTexture(UTextureRenderTarget2D* InOrig, UT
 		{
 			FRDGTextureRef RDG_OrigData = RegisterExternalTexture(GraphBuilder, OrigData->GetRenderTargetTexture(), TEXT("Orig_RT"));
 			FRDGTextureRef RDG_CopyData = RegisterExternalTexture(GraphBuilder, CopyData->GetRenderTargetTexture(), TEXT("Copy_RT"));
-			// DrawCopyTexture(GraphBuilder, RDG_OrigData, RDG_CopyData);
 			AddCopyTexturePass(GraphBuilder, RDG_OrigData, RDG_CopyData, FRHICopyTextureInfo());
 		}
 		GraphBuilder.Execute();
 	});
 	UCSMesh::CountedBlockingFlush();
-}
-
-void UComputeShaderBasicFunction::DrawCopyTexture(FRDGBuilder& GraphBuilder, FRDGTextureUAVRef RDGUAV_CopySource, FRDGTextureRef& RDG_CopyTarget)
-{
-	FDrawCopyTexturePS::FParameters* PassParameters = GraphBuilder.AllocParameters<FDrawCopyTexturePS::FParameters>();
-	
-	PassParameters->RenderTargets[0] = FRenderTargetBinding(RDG_CopyTarget, ERenderTargetLoadAction::EClear, 0);
-	PassParameters->RW_CopySource = RDGUAV_CopySource;
-	PassParameters->SourceSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
-	FIntRect ViewRect = FIntRect(FIntPoint(0, 0), FIntPoint(RDG_CopyTarget->Desc.Extent.X, RDG_CopyTarget->Desc.Extent.Y));
-	const auto GlobalShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
-	TShaderMapRef<FDrawCopyTexturePS> PixelShader = FDrawCopyTexturePS::CreatePermutation(FDrawCopyTexturePS::EDrawCopy::DC_CopyRWTexture);
-	
-	FPixelShaderUtils::AddFullscreenPass(GraphBuilder, GlobalShaderMap, RDG_EVENT_NAME("DrawCopyTexture"), PixelShader, PassParameters, ViewRect);
-	
-}
-
-void UComputeShaderBasicFunction::BuildTextureArray(FRDGBuilder& GraphBuilder, int32& Index, FRDGTextureRef& RDG_CopySource,
-	FRDGTextureUAVRef& RDG_CopyTarget, FIntVector& GroupCount)
-{
-	
-	TShaderMapRef<FGeneralFunctionShader> ComputeShader = FGeneralFunctionShader::CreateShaderPermutation(FGeneralFunctionShader::EGeneralShader::GTS_BuildTextureArray);
-	
-	FGeneralFunctionShader::FParameters* PassParameters = GraphBuilder.AllocParameters<FGeneralFunctionShader::FParameters>();
-	
-	PassParameters->RW_TextureArray0 = RDG_CopyTarget;
-	PassParameters->T_ProcssTexture0 = RDG_CopySource;
-	PassParameters->InputData0 = Index;
-	
-	GraphBuilder.AddPass(
-	RDG_EVENT_NAME("BuildTextureArray"),
-	PassParameters,
-	ERDGPassFlags::AsyncCompute,
-	[PassParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
-	{
-		FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *PassParameters, GroupCount);
-	});
 }
 
 #if WITH_EDITOR
@@ -1285,138 +1163,6 @@ void UComputeShaderBasicFunction::Test(UTexture2DArray* InArray, UTexture2D* InT
 }
 
 
-
-void UComputeShaderBasicFunction::UpdateTextureArray(UTexture2DArray* Texture2DArray)
-{
-	if (!Texture2DArray->CheckArrayTexturesCompatibility()) 
-	{
-		return;
-	}
-	
-	if (Texture2DArray->SourceTextures.Num() > 0)
-	{
-		Texture2DArray->Modify();
-	
-		int32 SizeX = Texture2DArray->SourceTextures[0]->Source.GetSizeX();
-		int32 SizeY = Texture2DArray->SourceTextures[0]->Source.GetSizeY();
-		ETextureSourceFormat Format = Texture2DArray->SourceTextures[0]->Source.GetFormat();
-		bool bSRGB = Texture2DArray->SourceTextures[0]->Source.GetGammaSpace(0) == EGammaSpace::sRGB;
-	
-		bool bMismatchedSize = false;
-		bool bMismatchedAspectRatio = false;
-		bool bMismatchedFormats = false;
-		bool bMismatchedGammaSpace = false;
-	
-		for (int32 SourceTextureIndex = 1; SourceTextureIndex < Texture2DArray->SourceTextures.Num(); ++SourceTextureIndex)
-		{
-			if (Texture2DArray->SourceTextures[SourceTextureIndex]->Source.GetSizeX() != SizeX || Texture2DArray->SourceTextures[SourceTextureIndex]->Source.GetSizeY() != SizeY)
-			{
-				bMismatchedSize = true;
-				if (Texture2DArray->SourceTextures[SourceTextureIndex]->Source.GetSizeX() * SizeY != Texture2DArray->SourceTextures[SourceTextureIndex]->Source.GetSizeY() * SizeX)
-				{
-					bMismatchedAspectRatio = true;
-				}
-				// Dimensions of the texture array source are set to the maximum SizeX and SizeY among the array element's sources in order to minimize quality loss.
-				SizeX = FMath::Max(SizeX, Texture2DArray->SourceTextures[SourceTextureIndex]->Source.GetSizeX());
-				SizeY = FMath::Max(SizeY, Texture2DArray->SourceTextures[SourceTextureIndex]->Source.GetSizeY());
-			}
-	
-			if ((Texture2DArray->SourceTextures[SourceTextureIndex]->Source.GetGammaSpace(0) == EGammaSpace::sRGB) != bSRGB)
-			{
-				bMismatchedGammaSpace = true;
-				bSRGB = false;
-				Format = TSF_RGBA32F;
-			}
-	
-			if (Format != Texture2DArray->SourceTextures[SourceTextureIndex]->Source.GetFormat())
-			{
-				bMismatchedFormats = true;
-				Format = FImageCoreUtils::GetCommonSourceFormat(Format, Texture2DArray->SourceTextures[SourceTextureIndex]->Source.GetFormat());
-			}
-		}
-	
-		if (bMismatchedSize)
-		{
-			UE_LOG(LogTexture, Log, TEXT("Mismatched sizes of the source textures, resizing all the array elements to %dx%d%s ..."),
-				SizeX, SizeY, bMismatchedAspectRatio ? TEXT(" (this will also affect aspect ratio of some source textures)") : TEXT(""));
-		}
-	
-		if (bMismatchedGammaSpace)
-		{
-			UE_LOG(LogTexture, Log, TEXT("Mismatched source gamma spaces, converting all to RGBA32F/Linear ..."));
-		}
-		else if (bMismatchedFormats)
-		{
-			UE_LOG(LogTexture, Log, TEXT("Mismatched source pixel formats, converting all to %s/%s ..."),
-				ERawImageFormat::GetName(FImageCoreUtils::ConvertToRawImageFormat(Format)), bSRGB ? TEXT("sRGB") : TEXT("Linear"));
-		}
-	
-		int32 FormatDataSize = FTextureSource::GetBytesPerPixel(Format);
-		uint32 ArraySize = Texture2DArray->SourceTextures.Num();
-	
-		// This should be false when texture is updated to avoid overriding user settings.
-		bool bCreatingNewTexture = true;
-		if (bCreatingNewTexture)
-		{
-			Texture2DArray->CompressionSettings = Texture2DArray->SourceTextures[0]->CompressionSettings;
-			Texture2DArray->MipGenSettings = TMGS_NoMipmaps;
-			Texture2DArray->PowerOfTwoMode = ETexturePowerOfTwoSetting::None;
-			Texture2DArray->LODGroup = Texture2DArray->SourceTextures[0]->LODGroup;
-			Texture2DArray->NeverStream = true;
-		}
-	
-		Texture2DArray->SRGB = bSRGB;
-	
-		// Create the source texture for this Texture2DArray.
-		// Currently only single-mip Texture2DArray's are supported, therefore only the first mip is copied from each element source.
-		Texture2DArray->Source.Init(SizeX, SizeY, ArraySize, 1, Format);
-	
-		uint8* DestMipData = Texture2DArray->Source.LockMip(0);
-		int64 MipSizeBytes = Texture2DArray->Source.CalcMipSize(0) / ArraySize;
-	
-		for (int32 SourceTexIndex = 0; SourceTexIndex < Texture2DArray->SourceTextures.Num(); ++SourceTexIndex)
-		{
-			FTextureSource& TextureSource = Texture2DArray->SourceTextures[SourceTexIndex]->Source;
-			void* DestSliceData = DestMipData + MipSizeBytes * SourceTexIndex;
-			if (TextureSource.GetSizeX() == SizeX && TextureSource.GetSizeY() == SizeY && TextureSource.GetFormat() == Format)
-			{
-				const uint8* SourceData = TextureSource.LockMipReadOnly(0);
-				check(TextureSource.CalcMipSize(0) == MipSizeBytes);
-				FMemory::Memcpy(DestSliceData, SourceData, MipSizeBytes);
-				TextureSource.UnlockMip(0);
-			}
-			else
-			{
-				FImage SourceImage;
-				Texture2DArray->SourceTextures[SourceTexIndex]->Source.GetMipImage(SourceImage, 0);
-	
-				if (TextureSource.GetFormat() != Format)
-				{
-					// note: there is no need to check if the gamma space is different, because in such case we would fallback to TSF_RGBA32F, which is always linear
-					FImage ConvertedSourceImage;
-					SourceImage.CopyTo(ConvertedSourceImage, FImageCoreUtils::ConvertToRawImageFormat(Format), bSRGB ? EGammaSpace::sRGB : EGammaSpace::Linear);
-					ConvertedSourceImage.Swap(SourceImage);
-				}
-	
-				if (TextureSource.GetSizeX() != SizeX || TextureSource.GetSizeY() != SizeY)
-				{
-					FImage ResizedSourceImage;
-					SourceImage.ResizeTo(ResizedSourceImage, SizeX, SizeY, SourceImage.Format, SourceImage.GammaSpace);
-					ResizedSourceImage.Swap(SourceImage);
-				}
-				
-				check(SourceImage.RawData.Num() == MipSizeBytes);
-				FMemory::Memcpy(DestSliceData, SourceImage.RawData.GetData(), MipSizeBytes);
-			}
-		}
-	
-		Texture2DArray->Source.UnlockMip(0);
-	
-		Texture2DArray->ValidateSettingsAfterImportOrEdit();
-		Texture2DArray->SetLightingGuid();
-		Texture2DArray->UpdateResource();
-	}
-}
 
 #endif
 

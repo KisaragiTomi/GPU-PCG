@@ -31,7 +31,6 @@ protected:
 	bool ActorHasRequiredDetailsCategory(const AActor* Actor) const;
 	bool ActorHasDetailsCategory(const AActor* Actor, FName CategoryName) const;
 	TSharedRef<SWidget> CreateDetailsCategoryPanelWidget(TWeakObjectPtr<AActor> Actor) const;
-	TSharedRef<SWidget> CreateDetailsCategoryOverlayWidget(TWeakObjectPtr<AActor> Actor) const;
 
 private:
 	void HandleActorSelectionChanged(const TArray<UObject*>& NewSelection, bool bForceRefresh);

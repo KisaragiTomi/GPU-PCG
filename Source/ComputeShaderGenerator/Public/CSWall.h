@@ -107,11 +107,6 @@ struct COMPUTESHADERGENERATOR_API FCSWallSkins
 
 	bool IsValid() const { return Left.Num() >= 2 && Left.Num() == Right.Num() && Right.Num() == Normal.Num(); }
 
-	/** 转角的度数（端点 0）。 */
-	double TurnDegrees(int32 Index) const
-	{
-		return FMath::RadiansToDegrees(2.0 * FMath::Acos(FMath::Clamp(HalfTurnCos[Index], 0.0, 1.0)));
-	}
 };
 
 /**

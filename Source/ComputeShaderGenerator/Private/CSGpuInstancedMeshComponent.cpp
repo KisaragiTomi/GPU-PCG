@@ -1862,7 +1862,7 @@ void UCSGpuInstancedMeshComponent::RebuildGpuMesh()
 		if (bUploadRows) GraphBuilder.QueueBufferUpload(SourceInstances, Rows.GetData(), Rows.Num() * sizeof(FVector4f), ERDGInitialDataFlags::None);
 		if (Clusters.Num() > 0) GraphBuilder.QueueBufferUpload(ClusterBoundsBuffer, Clusters.GetData(), Clusters.Num() * sizeof(FVector4f), ERDGInitialDataFlags::None);
 
-		// No SetStandardStreamAccessFinal and no GraphBuilder.Execute() here: both belong to
+		// No SetStreamAccessFinal and no GraphBuilder.Execute() here: both belong to
 		// EditMeshSync, which restores every resident stream's access state for the whole edit.
 		// Doing either by hand is the failure that has no symptom but "it stopped drawing".
 

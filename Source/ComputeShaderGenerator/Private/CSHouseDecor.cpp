@@ -84,12 +84,6 @@ const CSHouseVine::FWallStrip* CSHouseDecor_FindStrip(const TArray<CSHouseVine::
 
 namespace CSHouseDecor
 {
-float Hash01(uint32 H)
-{
-	H = ((H >> ((H >> 28) + 4u)) ^ H) * 277803737u;
-	return float((H >> 22 ^ H) & 0xFFFFFFu) / float(0x1000000u);
-}
-
 uint32 IdentityHash(EFamily Family, int32 AnchorId, uint32 Salt, int32 Seed)
 {
 	// 常数与 `CSHouseVine::IdentityHash` / `CSGroundStairs.usf::CSStairs_CellSeed` 同一套 ——

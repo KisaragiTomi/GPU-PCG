@@ -263,16 +263,6 @@ TSharedRef<SWidget> FSelectedActorViewportOverlayBase::CreateDetailsCategoryPane
 		.MaxHeight(GetDetailsCategoryOverlayMaxHeight());
 }
 
-TSharedRef<SWidget> FSelectedActorViewportOverlayBase::CreateDetailsCategoryOverlayWidget(TWeakObjectPtr<AActor> Actor) const
-{
-	if (!Actor.IsValid() || GetRequiredDetailsCategoryName().IsNone())
-	{
-		return SNullWidget::NullWidget;
-	}
-
-	return CreateDetailsCategoryPanelWidget(Actor);
-}
-
 void FSelectedActorViewportOverlayBase::Start()
 {
 	if (bStarted)

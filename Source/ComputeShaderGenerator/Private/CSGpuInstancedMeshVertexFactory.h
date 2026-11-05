@@ -97,7 +97,6 @@ public:
 	FRHIShaderResourceView* GetInstanceOriginSRV() const { return InstanceOriginSRV; }
 	FRHIShaderResourceView* GetInstanceTransformSRV() const { return InstanceTransformSRV; }
 	FRHIShaderResourceView* GetInstanceLightmapSRV() const { return InstanceLightmapSRV; }
-	FRHIShaderResourceView* GetInstanceCustomDataSRV() const { return InstanceCustomDataSRV; }
 	FRHIUniformBuffer* GetInstanceUniformBuffer() const { return InstanceUniformBuffer.GetReference(); }
 
 private:

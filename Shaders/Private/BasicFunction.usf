@@ -402,29 +402,6 @@ void DistanceFieldFunction(
 #endif
 }
 
-RWTexture2D<float4> RW_CopySource;
-Texture2D<float4> T_CopySource;
-// float4 TextureSizeAndPixelSize;
-SamplerState SourceSampler;
-
-void FDrawCopyTexture(
-	in float4 SvPosition : SV_POSITION,
-	out float4 OutColor : SV_Target0)
-{
-	OutColor = HALF4_TYPE(1.0f, 1.0f, 1.0f, 0.0f);
-
-	// float2 UVPos = SvPosition.xy * TextureSizeAndPixelSize.zw;
-	//
-	// float UnClampedNoL = UVPos.x * 2.0f - 1.0f;
-	// float Curvature = UVPos.y;
-#if DC_COPYRWTEXTURE
-	OutColor = RW_CopySource[uint2(round(SvPosition.x), round(SvPosition.y))];
-#elif DC_COPYTEXTURE
-	OutColor = T_CopySource.Sample(SourceSampler, SvPosition);
-#endif
-}
-
-
 RWTexture2D<float4> RW_PivotIndex;
 RWTexture2D<float4> RW_DirExtent;
 RWBuffer<float4> RWB_PivotIndex;

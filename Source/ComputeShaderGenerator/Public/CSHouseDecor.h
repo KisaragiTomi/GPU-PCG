@@ -256,8 +256,8 @@ struct FSite
  */
 COMPUTESHADERGENERATOR_API uint32 IdentityHash(EFamily Family, int32 AnchorId, uint32 Salt, int32 Seed);
 
-/** uint → [0,1)，与 `CSGpuInstancedMesh.usf:120-126` 的收尾段同一份数学。 */
-COMPUTESHADERGENERATOR_API float Hash01(uint32 H);
+/** uint → [0,1) 用 `CSHouseVine::Hash01`（随机口径全项目只有那一份）。 */
+using CSHouseVine::Hash01;
 
 /**
  * 锚点生产者（四家）。读世界、不碰 GPU。产出顺序**钉死为构件遍历序**

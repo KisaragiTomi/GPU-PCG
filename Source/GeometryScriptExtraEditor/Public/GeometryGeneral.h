@@ -44,18 +44,6 @@ public:
 	virtual bool  CollectedData(FDynamicMesh3& EditMesh, int TID, float Dist) = 0;
 };
 
-struct FWindTreeReduceData :public FDynamicMeshComponentReduceData
-{
-public:
-
-	virtual bool  CollectedData(FDynamicMesh3& EditMesh, int TID, float InDist)
-	{
-		MaxDist = fmaxf(MaxDist, InDist);
-		Count += 1;
-		return true;
-	}
-};
-
 struct FWindTreeCombineLeafData :public FDynamicMeshComponentReduceData
 {
 public:
@@ -99,8 +87,6 @@ public:
 	                            & tXy, TArray<FVector>& OutHolePositions, TMap<int, FVector>& DebugClassNum, int LeafMaterialIndex = -1, float
 	                            CombineDistThreshold = 50, float FindParentThreshold = 5, bool OutDebugColor = false);
 	
-
-	static void TreeWindMergeComponents(FDynamicMesh3& EditMesh, FGeometryScriptDynamicMeshBVH BVH, TMap<int, FDynamicMeshComponentData> ComponentDatas);
 
 	UFUNCTION(BlueprintCallable, Category = Generate)
 	static UDynamicMesh* WeldDynamicMesh(UDynamicMesh* TargetMesh, float Tolerance = 0.001);
@@ -151,12 +137,8 @@ public:
 		bool bSaveAsset = false,
 		bool bMarkPackageDirty = true);
 
-	static UStaticMesh* SaveDynamicMeshToStaticMesh(UDynamicMesh* TargetMesh, int32 ResultIndex);
-	
 	static FVector GetNearestLocationNormal(FDynamicMesh3& EditMesh, FGeometryScriptTrianglePoint NearestPoint);
 
-	template<typename ReduceDatatype, typename ComponentType>
-	static TMap<int, ReduceDatatype> FindNearestComponents(FDynamicMesh3& EditMesh, FGeometryScriptDynamicMeshBVH BVH, TMap<int, ComponentType> ComponentDatas);
 
 	
 	

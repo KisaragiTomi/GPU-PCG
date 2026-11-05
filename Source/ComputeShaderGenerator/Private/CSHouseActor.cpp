@@ -55,12 +55,6 @@ static_assert(uint8(ECSHousePart::Wall) == CSWallMesh::PartWall, "墙的构件�
 // `FCSHouseEdgeFrame` / `CSHouse_GetEdge` 已上提到 `CSHouseProfile.h`：谓词（`CSHouse_QueryOpening`）
 // 与单测也要问"这面墙在哪、有多长"，而墙在哪只能有一个真源。
 
-/** 墙空间 (沿边弧长 S, 高度 Z) → UV。内外脸、过梁带、窗台带共用同一套参数化。 */
-FVector2f CSHouse_WallUV(float SAlong, float ZUp)
-{
-	return FVector2f(SAlong / CSHouse_UVScale, ZUp / CSHouse_UVScale);
-}
-
 
 uint32 CSHouse_Hash(const TArray<int32>& Values)
 {
@@ -68,18 +62,6 @@ uint32 CSHouse_Hash(const TArray<int32>& Values)
 }
 
 int32 CSHouse_Q(double Value, double Quantum) { return int32(FMath::RoundToInt(Value / Quantum)); }
-
-/**
- * footprint 进哈希：顶点数 + 逐顶点量化（口径与理由见 `FCSHouseFootprint::AppendQuantizedHash`）。
- *
- * 原来各家哈希写的是 `CSHouse_Q(FootprintSize.X, 1), CSHouse_Q(FootprintSize.Y, 1)` —— 两个数只能
- * 描述居中矩形。⚠️ 2026-09-14 起顶点量子从 1 cm 改成 0.5 cm：矩形上 1 cm 的顶点量子等于 2 cm 的尺寸量子，
- * 比折线化之前粗了一倍。量化只留一份，单测直接钉那个成员函数。
- */
-void CSHouse_AppendFootprintHash(TArray<int32>& H, const FCSHouseFootprint& Footprint)
-{
-	Footprint.AppendQuantizedHash(H);
-}
 
 /**
  * 屋脊三件套进哈希（2026-10-02）：脊长参数、脊向、山墙样式。吃屋面形状的每一家（房体的山墙、瓦、尖顶）都拼它 ——
@@ -741,7 +723,7 @@ uint32 ACSHouseActor::ComputeDoors()
 	// 房体**形状**哈希：几何参数 + 门集合，**不含世界变换**（那份归 ComputePlacementHash）。
 	// 纪律：desc 哈希只接受"决定顶点位置或索引的量"——材质/颜色/高亮一律走 D14 的外观通道。
 	TArray<int32> H;
-	CSHouse_AppendFootprintHash(H, GetFootprint());
+	GetFootprint().AppendQuantizedHash(H);
 	H.Append({ CSHouse_Q(WallHeight, 1), CSHouse_Q(WallThickness, 0.5),
 		CSHouse_Q(RoofPitch, 0.1), CSHouse_Q(RoofOverhang, 1), int32(IsFlatRoof()) });
 	// 山墙是房体的几何：脊长参数到 1（或换脊向）时两端的墙升成三角形，上沿跟着坡度走（坡度已在上面）；
@@ -1113,7 +1095,7 @@ void ACSHouseActor::ReevaluateSite()
 	bForceFullRebuild = false;
 	++ReevaluateCount;   // 合批的观测量（`GetReevaluateCount`），只数真正跑完的
 	TArray<int32> TerraceInput = { int32(PlacementHash), CSHouse_Q(WallHeight, 0.01), CSHouse_Q(WallThickness, 0.01), int32(IsFlatRoof()) };
-	CSHouse_AppendFootprintHash(TerraceInput, GetFootprint());
+	GetFootprint().AppendQuantizedHash(TerraceInput);
 	const uint32 NewTerraceHash = CSHouse_Hash(TerraceInput);
 	if (NewTerraceHash != TerraceSiteHash)
 	{
@@ -2484,7 +2466,7 @@ uint32 ACSHouseActor::ComputeSeamKey() const
 		CSHouse_Q(Loc.X, 1), CSHouse_Q(Loc.Y, 1), CSHouse_Q(Loc.Z, 0.5), CSHouse_Q(GetActorRotation().Yaw, 0.1),
 		CSHouse_Q(WallHeight, 1), CSHouse_Q(WallThickness, 0.5),
 		int32(bSeamEnabled), int32(CanBuildSeamBricks()), CSHouse_Q(BearingTolerance, 1) };
-	CSHouse_AppendFootprintHash(H, GetFootprint());
+	GetFootprint().AppendQuantizedHash(H);
 	return CSHouse_Hash(H);
 }
 
@@ -3345,7 +3327,7 @@ void ACSHouseActor::RebuildVine()
 		int32(ComputePlacementHash() & 0x7FFFFFFF) };
 	// 顶点表另拼：藤条沿每条边排，形状变了而包围盒尺寸没变时（异形房子改 `FootprintShape`）也必须重排。
 	TArray<int32> FootprintHash;
-	CSHouse_AppendFootprintHash(FootprintHash, GetFootprint());
+	GetFootprint().AppendQuantizedHash(FootprintHash);
 	const uint32 NewHash = HashCombine(CSHouse_Hash(HashInput), CSHouse_Hash(FootprintHash));
 
 	const bool bBuffersReady = AreVineBuffersReady();
@@ -3744,7 +3726,7 @@ void ACSHouseActor::RebuildRoofTiles()
 		CSHouse_Q(RoofTileAxes.NativeSize.Z, 0.1),
 		CSHouse_Q(RoofTileAxes.NativeCentre.X, 0.1), CSHouse_Q(RoofTileAxes.NativeCentre.Y, 0.1),
 		CSHouse_Q(RoofTileAxes.NativeCentre.Z, 0.1) };
-	CSHouse_AppendFootprintHash(HashInput, GetFootprint());
+	GetFootprint().AppendQuantizedHash(HashInput);
 	CSHouse_AppendRoofRidgeHash(HashInput, RoofRidgeLength01, RoofRidgeAxis, GableRoofStyle);
 	const uint32 NewHash = CSHouse_Hash(HashInput);
 	// 交接结果也进早退门（审查 B1）：容量比对挡的是"扩容后没重排"，交接结果还多挡一种 ——
@@ -3849,7 +3831,7 @@ void ACSHouseActor::RebuildRoofFinials()
 		int32(GetTypeHash(RoofFinialMesh) & 0x7FFFFFFF),
 		int32(GetTypeHash(RoofFinialMaterial) & 0x7FFFFFFF),
 		UpAxis, WantCount };
-	CSHouse_AppendFootprintHash(HashInput, GetFootprint());
+	GetFootprint().AppendQuantizedHash(HashInput);
 	// 脊端点跟着脊长 / 脊向 / 山墙悬挑走（悬挑量又吃 `RoofOverhang`）。
 	CSHouse_AppendRoofRidgeHash(HashInput, RoofRidgeLength01, RoofRidgeAxis, GableRoofStyle);
 	HashInput.Add(CSHouse_Q(RoofOverhang, 1));
@@ -4010,7 +3992,7 @@ void ACSHouseActor::RebuildDoorLeaves()
 		CSHouse_Q(DoorLeafMaxStretch, 0.001), CSHouse_Q(DoorLeafInset, 0.1),
 		int32(GetTypeHash(DoorLeafMaterial) & 0x7FFFFFFF),
 		WantCount };
-	CSHouse_AppendFootprintHash(HashInput, Footprint);
+	Footprint.AppendQuantizedHash(HashInput);
 	// 档位表进哈希：换一张网格、加一档、或换了顺序都必须重建（同 `RoofTileMeshBuiltFrom` 的教训）。
 	for (const FLeafRank& Rank : Ranks) HashInput.Add(int32(GetTypeHash(Rank.Mesh) & 0x7FFFFFFF));
 	// 洞变了门扇就得跟着变。**逐洞进哈希**，只记洞数会漏掉"同样两个洞、其中一个变宽了"。
@@ -4361,7 +4343,7 @@ void ACSHouseActor::RebuildDecor()
 		CSHouse_Q(DecorWallFootSpacing, 0.5), CSHouse_Q(DecorEaveSpacing, 0.5),
 		CSHouse_Q(DecorMinSpacing, 0.5), CSHouse_Q(DecorRoadReject, 0.01),
 		CSHouse_Q(DecorScale, 0.01), CSHouse_Q(DecorScaleJitter, 0.01), DecorSeed });
-	CSHouse_AppendFootprintHash(HashInput, GetFootprint());
+	GetFootprint().AppendQuantizedHash(HashInput);
 	for (const CSHouseDecor::FAnchor& Anchor : Anchors)
 	{
 		HashInput.Append({ int32(Anchor.Family), Anchor.AnchorId,

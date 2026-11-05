@@ -592,7 +592,7 @@ bool BuildMesh(UCSMesh* ShellMesh, const FPatternParams& InPattern, int32 Capaci
 	}
 	if (!ShellMesh->SetStreamLayoutSync(Layout))
 	{
-		// AddStream 的槽位冲撞只返回 false 且不写日志 —— 这里必须自己喊出来。
+		// SetStreamLayoutSync 的槽位冲撞只返回 false（CSMesh 只打一条通用警告）—— 这里必须自己喊出来。
 		UE_LOG(LogCSRockShell, Warning, TEXT("[CSRockShell] aux 流声明被拒（槽位 32 冲撞或显存预检不过），岩壳关闭。"));
 		return false;
 	}

@@ -33,7 +33,7 @@ CSV_DECLARE_CATEGORY_EXTERN(CSGpuInstanced);
  * its buffers were proxy-owned, where no material-id stream existed; the moment the same declaration
  * went to UCSMesh the two collided. What a collision does is the reason for the gap: an aux stream
  * simply does not get registered — UCSMesh::SetStreamLayoutSync refuses the whole layout and returns
- * false, and FCSMeshResident::AddStream returns false for one stream — after which a null buffer is
+ * false — after which a null buffer is
  * bound at draw time, with nothing in the log pointing at the cause.
  *
  * The gap to 16 is so a later standard aux stream (they are numbered upwards from 0) cannot walk

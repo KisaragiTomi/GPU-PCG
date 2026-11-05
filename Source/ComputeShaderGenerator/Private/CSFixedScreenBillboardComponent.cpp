@@ -62,7 +62,6 @@ public:
 	}
 
 	virtual uint32 GetMemoryFootprint() const override { return sizeof(*this) + GetAllocatedSize(); }
-	uint32 GetAllocatedSize() const { return FPrimitiveSceneProxy::GetAllocatedSize(); }
 
 private:
 	const UTexture2D* Texture;

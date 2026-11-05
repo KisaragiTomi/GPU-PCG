@@ -59,7 +59,7 @@ namespace VineInternal
 		return Sanitized;
 	}
 
-	/** UPointFunction::FindNearPointIteration 的等价物：线性最近点，空数组返回 -1。 */
+	/** 线性最近点，空数组返回 -1。 */
 	static int32 FindNearestPointIndex(const TArray<FVector>& Candidates, const FVector& Query)
 	{
 		int32 BestIndex = INDEX_NONE;
@@ -400,7 +400,7 @@ IMPLEMENT_GLOBAL_SHADER(FVineUVWriteCS, "/Plugin/PCGPlugins/Shaders/Private/VVVo
 
 // Trip B: rebuild the vine's one-buffer voxel-cell hash on the GPU from the producer's
 // retained cells (writes the exact layout FindVoxelIndexForCell decodes). Lets the vine
-// consume the GPU-resident surface voxels without the CPU readback + BuildVineVoxelHashSlots.
+// consume the GPU-resident surface voxels without a CPU readback or CPU-built voxel hash.
 class FVVBuildVoxelHashCS : public FGlobalShader
 {
 public:
@@ -1486,16 +1486,6 @@ struct FVineBuildInput
 namespace
 {
 
-// GPU-only line preparation: no CPU BVH surface projection and no CPU noise.
-// Surface projection and CurlNoise are handled entirely on the GPU (unified voxel projection).
-// Mirrors the "clone + SC jitter -> SmoothLine(3) -> ResampleByLength" front of the CPU path,
-// then leaves projection/noise to the GPU. Point count is fixed after the single resample.
-static FVector NormalizeVineAxisOrFallback(const FVector& Axis, const FVector& FallbackAxis = FVector::ZeroVector)
-{
-	const FVector NormalizedAxis = Axis.GetSafeNormal();
-	return NormalizedAxis.IsNearlyZero() ? FallbackAxis.GetSafeNormal() : NormalizedAxis;
-}
-
 
 static float EvaluateVineScale(const UCurveLinearColor* CurveControl, int32 Index, int32 Count)
 {
@@ -1578,81 +1568,6 @@ static void RefreshFoliageType(UWorld* World, UFoliageType* InFoliageType)
 }
 #endif // WITH_EDITOR
 
-static uint32 HashVineVoxelCell(int32 X, int32 Y, int32 Z)
-{
-	return (static_cast<uint32>(X) * 73856093u)
-		^ (static_cast<uint32>(Y) * 19349663u)
-		^ (static_cast<uint32>(Z) * 83492791u);
-}
-
-static bool SameVineVoxelCell(const FIntVector4& A, const FIntVector4& B)
-{
-	return A.X == B.X && A.Y == B.Y && A.Z == B.Z;
-}
-
-static bool BuildVineVoxelHashSlots(const TArray<FIntVector4>& VoxelCells, TArray<uint32>& OutHashSlots, uint32& OutHashSlotCount)
-{
-	OutHashSlots.Reset();
-	OutHashSlotCount = 0;
-
-	const int32 VoxelCount = VoxelCells.Num();
-	if (VoxelCount <= 0)
-	{
-		return false;
-	}
-
-	uint64 DesiredSlotCount = FMath::Max<uint64>(2ull, uint64(VoxelCount) * 2ull);
-	if (DesiredSlotCount > (1ull << 30))
-	{
-		return false;
-	}
-
-	uint32 SlotCount = 1u;
-	while (uint64(SlotCount) < DesiredSlotCount)
-	{
-		SlotCount <<= 1u;
-	}
-
-	OutHashSlots.Init(0u, int32(SlotCount));
-	const uint32 SlotMask = SlotCount - 1u;
-
-	for (int32 VoxelIndex = 0; VoxelIndex < VoxelCount; ++VoxelIndex)
-	{
-		const FIntVector4& Cell = VoxelCells[VoxelIndex];
-		uint32 Slot = HashVineVoxelCell(Cell.X, Cell.Y, Cell.Z) & SlotMask;
-		bool bInserted = false;
-
-		for (uint32 Probe = 0u; Probe < SlotCount; ++Probe)
-		{
-			uint32& PackedVoxelIndex = OutHashSlots[int32(Slot)];
-			if (PackedVoxelIndex == 0u)
-			{
-				PackedVoxelIndex = uint32(VoxelIndex) + 1u;
-				bInserted = true;
-				break;
-			}
-
-			const int32 ExistingVoxelIndex = int32(PackedVoxelIndex - 1u);
-			if (VoxelCells.IsValidIndex(ExistingVoxelIndex) && SameVineVoxelCell(VoxelCells[ExistingVoxelIndex], Cell))
-			{
-				bInserted = true;
-				break;
-			}
-
-			Slot = (Slot + 1u) & SlotMask;
-		}
-
-		if (!bInserted)
-		{
-			OutHashSlots.Reset();
-			return false;
-		}
-	}
-
-	OutHashSlotCount = SlotCount;
-	return true;
-}
-
 // FVineTargetBucketBuffers is defined at global scope above (moved so FVineBuildInput can embed it).
 
 static void EnsureVineTargetBucketDummyBuffers(FVineTargetBucketBuffers& Buffers)
@@ -1673,97 +1588,6 @@ static void EnsureVineTargetBucketDummyBuffers(FVineTargetBucketBuffers& Buffers
 	{
 		Buffers.HashSlots.Add(0u);
 	}
-}
-
-static FIntVector GetVineTargetBucketCell(const FVector4f& Target, const FVector3f& Origin, float BucketSize)
-{
-	const float SafeBucketSize = FMath::Max(BucketSize, UE_KINDA_SMALL_NUMBER);
-	return FIntVector(
-		FMath::FloorToInt((double(Target.X) - double(Origin.X)) / double(SafeBucketSize)),
-		FMath::FloorToInt((double(Target.Y) - double(Origin.Y)) / double(SafeBucketSize)),
-		FMath::FloorToInt((double(Target.Z) - double(Origin.Z)) / double(SafeBucketSize)));
-}
-
-static bool BuildVineTargetBucketBuffers(
-	const TArray<FVector4f>& TargetPositions,
-	const FVector3f& Origin,
-	float VoxelSize,
-	FVineTargetBucketBuffers& OutBuffers)
-{
-	OutBuffers = FVineTargetBucketBuffers();
-	OutBuffers.BucketSize = FMath::Max(VoxelSize * 16.0f, 25.0f);
-	OutBuffers.SearchRadius = 8u;
-
-	TMap<FIntVector, TArray<uint32>> BucketMap;
-	BucketMap.Reserve(TargetPositions.Num());
-	for (int32 TargetIndex = 0; TargetIndex < TargetPositions.Num(); ++TargetIndex)
-	{
-		const FVector4f& Target = TargetPositions[TargetIndex];
-		if (!FMath::IsFinite(Target.X) || !FMath::IsFinite(Target.Y) || !FMath::IsFinite(Target.Z))
-		{
-			continue;
-		}
-
-		TArray<uint32>& BucketIndices = BucketMap.FindOrAdd(GetVineTargetBucketCell(Target, Origin, OutBuffers.BucketSize));
-		BucketIndices.Add(uint32(TargetIndex));
-	}
-
-	if (BucketMap.Num() == 0)
-	{
-		EnsureVineTargetBucketDummyBuffers(OutBuffers);
-		return false;
-	}
-
-	TArray<FIntVector> BucketKeys;
-	BucketMap.GetKeys(BucketKeys);
-	BucketKeys.Sort([](const FIntVector& A, const FIntVector& B)
-	{
-		if (A.X != B.X)
-		{
-			return A.X < B.X;
-		}
-		if (A.Y != B.Y)
-		{
-			return A.Y < B.Y;
-		}
-		return A.Z < B.Z;
-	});
-
-	OutBuffers.Ranges.Reserve(BucketKeys.Num());
-	OutBuffers.RangeCounts.Reserve(BucketKeys.Num());
-	OutBuffers.VoxelIndices.Reserve(TargetPositions.Num());
-	for (const FIntVector& BucketKey : BucketKeys)
-	{
-		const TArray<uint32>* BucketIndices = BucketMap.Find(BucketKey);
-		if (!BucketIndices || BucketIndices->Num() == 0)
-		{
-			continue;
-		}
-		if (OutBuffers.VoxelIndices.Num() > MAX_int32)
-		{
-			OutBuffers = FVineTargetBucketBuffers();
-			EnsureVineTargetBucketDummyBuffers(OutBuffers);
-			return false;
-		}
-
-		const int32 RangeStart = OutBuffers.VoxelIndices.Num();
-		OutBuffers.Ranges.Add(FIntVector4(BucketKey.X, BucketKey.Y, BucketKey.Z, RangeStart));
-		OutBuffers.RangeCounts.Add(uint32(BucketIndices->Num()));
-		OutBuffers.MaxBucketItemCount = FMath::Max<uint32>(OutBuffers.MaxBucketItemCount, uint32(BucketIndices->Num()));
-		OutBuffers.VoxelIndices.Append(*BucketIndices);
-	}
-
-	OutBuffers.BucketCount = uint32(OutBuffers.Ranges.Num());
-	if (OutBuffers.BucketCount == 0u || !BuildVineVoxelHashSlots(OutBuffers.Ranges, OutBuffers.HashSlots, OutBuffers.HashSlotCount))
-	{
-		OutBuffers.HashSlots.Reset();
-		OutBuffers.HashSlotCount = 0u;
-		EnsureVineTargetBucketDummyBuffers(OutBuffers);
-		return false;
-	}
-
-	EnsureVineTargetBucketDummyBuffers(OutBuffers);
-	return true;
 }
 
 // Dispatch-arg slots VineDispatchArgsCS publishes, one uint3 each, in this order.
@@ -2529,12 +2353,12 @@ static void AddVineMeshPasses(FRDGBuilder& GraphBuilder, ERHIFeatureLevel::Type 
 	}
 }
 
-// Shared CPU-prep for the vine mesh pass graph: repacks the surface voxels into GPU-upload
-// arrays, builds the voxel hash + target-position buckets, derives the output vertex/index counts
-// and the sanitized scalar parameters, and captures the GPU-resident line/voxel pooled refs.
-// Produces a self-owning FVineBuildInput consumed by BuildVineGeometryIntoMesh.
-// On failure it returns bValid=false, with the same warning log. The optional out-params
-// report the same per-phase timings the dispatch logs.
+// Shared CPU-prep for the vine mesh pass graph: derives the output vertex/index counts and the
+// sanitized scalar parameters, and captures the GPU-resident line/voxel inputs (fused or pooled
+// surface voxels; the voxel hash is rebuilt on the GPU). Produces a self-owning FVineBuildInput
+// consumed by BuildVineGeometryIntoMesh. On failure it returns bValid=false, with a warning log.
+// The CPU voxel-array path (repack + CPU hash + target buckets) had no caller left and was removed
+// on 2026-11-05.
 static FVineBuildInput VineLeaf_BuildVineBuildInput(
 	const TArray<FVector4f>& PathPoints,
 	const TArray<FVector4f>& PathPointAxes,
@@ -2558,7 +2382,6 @@ static FVineBuildInput VineLeaf_BuildVineBuildInput(
 	float PerlinNoiseStrength,
 	float PerlinNoiseFrequency,
 	int32 NoiseIterations,
-	const FCSSurfaceVoxelData& VoxelData,
 	// 表面吸附总开关（见 `FVV::bSurfaceAdsorption`）。为假时**整条体素链不参与**：
 	// 下面的哑缓冲只为让 SRV 绑得上，采样由 shader 的 `VineSurfaceAdsorption` uniform 短路。
 	bool bSurfaceAdsorption,
@@ -2567,9 +2390,6 @@ static FVineBuildInput VineLeaf_BuildVineBuildInput(
 	// 融合体素输入。非空且有效时优先于 GPUVoxels：体素改在叶子自己的图里现算，
 	// 省掉独立图、pooled extract 与 FlushRenderingCommands。会被 MoveTemp 进 bundle。
 	FCSSurfaceVoxelPassInputs* FusedVoxels,
-	double* OutBuildVoxelUploadMs = nullptr,
-	double* OutBuildHashMs = nullptr,
-	double* OutBuildTargetBucketsMs = nullptr,
 	TSharedPtr<FCSVineTriangleSurfaceInputs, ESPMode::ThreadSafe> TriangleSurface = nullptr,
 	bool bUseGlobalDistanceField = false)
 {
@@ -2653,7 +2473,7 @@ static FVineBuildInput VineLeaf_BuildVineBuildInput(
 		B.bUseFusedVoxels = false;
 		B.VoxelCount = 1u;
 		B.VoxelOrigin = FVector3f::ZeroVector;
-		B.VoxelSize = FMath::Max(VoxelData.VoxelSize > 0.0 ? float(VoxelData.VoxelSize) : 1.0f, 1.0f);
+		B.VoxelSize = 1.0f;
 		B.GPUVoxelCells.Init(FIntVector4(0, 0, 0, 0), 1);
 		B.GPUVoxelNormals.Init(FVector4f(0.0f, 0.0f, 1.0f, 0.0f), 1);
 		B.GPUVoxelTargetPositions.Init(FVector4f(0.0f, 0.0f, 0.0f, 0.0f), 1);
@@ -2694,160 +2514,41 @@ static FVineBuildInput VineLeaf_BuildVineBuildInput(
 	// 融合路径下体素还没跑，容量是 CPU 侧就知道的 MaxVoxels；旧路径下取 pooled 的容量。
 	// 两条路这里都是「容量」而非真实数量 —— 真实数量只有 GPU 的 Counter[0] 知道。
 	const uint32 VoxelCount = bUseFusedVoxels ? FusedVoxelCapacity
-		: (bUseGPUVoxels ? uint32(GPUVoxels->VoxelCapacity) : uint32(VoxelData.Cells.Num()));
+		: (bUseGPUVoxels ? uint32(GPUVoxels->VoxelCapacity) : 0u);
 	if (VoxelCount == 0)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[VisVineGPU_Voxel] No voxel data available."));
 		return B; // bValid stays false
 	}
 	B.VoxelCount = VoxelCount;
-	B.VoxelOrigin = bUseFusedVoxels ? FVector3f(FusedVoxels->GetVoxelOrigin())
-		: (bUseGPUVoxels ? FVector3f(GPUVoxels->VoxelOrigin) : FVector3f(VoxelData.VoxelOrigin));
-	B.VoxelSize = bUseFusedVoxels ? FusedVoxels->GetVoxelSize()
-		: (bUseGPUVoxels ? GPUVoxels->VoxelSize : float(VoxelData.VoxelSize));
+	// 走到这里时 VoxelCount > 0 ⇒ 体素必在 GPU 上（融合或 pooled）；CPU 体素数组这条路 2026-11-05 已删。
+	B.VoxelOrigin = bUseFusedVoxels ? FVector3f(FusedVoxels->GetVoxelOrigin()) : FVector3f(GPUVoxels->VoxelOrigin);
+	B.VoxelSize = bUseFusedVoxels ? FusedVoxels->GetVoxelSize() : GPUVoxels->VoxelSize;
 
-	if (bUseGPUVoxels)
+	// 融合路径把 pooled ref 留空 —— 图内 buffer 要等构建那张图记录 pass 时才存在。
+	B.bUseFusedVoxels = bUseFusedVoxels;
+	if (bUseFusedVoxels) B.SurfaceVoxelInputs = MoveTemp(*FusedVoxels);
+	else
 	{
-		// 融合路径把 pooled ref 留空 —— 图内 buffer 要等构建那张图记录 pass 时才存在。
-		B.bUseFusedVoxels = bUseFusedVoxels;
-		if (bUseFusedVoxels) B.SurfaceVoxelInputs = MoveTemp(*FusedVoxels);
-		else
-		{
-			B.GPUVoxCells = GPUVoxels->Cells;
-			B.GPUVoxNormals = GPUVoxels->Normals;
-			B.GPUVoxTargets = GPUVoxels->TargetPositions;
-			B.GPUVoxCounter = GPUVoxels->Counter;
-		}
-		B.GPUVoxCount = VoxelCount;
-		B.GPUVoxelHashSlotCount = GpuVoxelHashSlotCountPow2;
-		B.TargetBucketOrigin = B.VoxelOrigin;
-		// This path never builds the target-position buckets (the voxels stay on the GPU), and a
-		// zero-length upload yields a null SRV. TargetBucketCount == 0 already makes the shaders
-		// skip the bucket lookup, but the bindings still have to exist or parameter validation
-		// kills the render thread, so give them the one-element dummies.
-		EnsureVineTargetBucketDummyBuffers(B.TargetBuckets);
-		B.LocalBounds = bUseFusedVoxels ? B.SurfaceVoxelInputs.GetWorldBounds() : GPUVoxels->WorldBounds;
-		if (!B.LocalBounds.IsValid)
-		{
-			const FVector Origin(B.VoxelOrigin);
-			B.LocalBounds = FBox(Origin, Origin + FVector(B.VoxelSize * 4.0f));
-		}
-		B.bValid = true;
-		return B;
+		B.GPUVoxCells = GPUVoxels->Cells;
+		B.GPUVoxNormals = GPUVoxels->Normals;
+		B.GPUVoxTargets = GPUVoxels->TargetPositions;
+		B.GPUVoxCounter = GPUVoxels->Counter;
 	}
-
-	// Convert voxel data to GPU-compatible format (repack), accumulating a conservative bounds.
-	TArray<FVector4f>& GPUVoxelTargetPositions = B.GPUVoxelTargetPositions;
-	TArray<FVector4f>& GPUVoxelNormals = B.GPUVoxelNormals;
-	TArray<FIntVector4>& GPUVoxelCells = B.GPUVoxelCells;
-	GPUVoxelTargetPositions.Reserve(VoxelCount);
-	GPUVoxelNormals.Reserve(VoxelCount);
-	GPUVoxelCells.Reserve(VoxelCount);
-
-	auto IsFiniteVector = [](const FVector& Vector)
+	B.GPUVoxCount = VoxelCount;
+	B.GPUVoxelHashSlotCount = GpuVoxelHashSlotCountPow2;
+	B.TargetBucketOrigin = B.VoxelOrigin;
+	// This path never builds the target-position buckets (the voxels stay on the GPU), and a
+	// zero-length upload yields a null SRV. TargetBucketCount == 0 already makes the shaders
+	// skip the bucket lookup, but the bindings still have to exist or parameter validation
+	// kills the render thread, so give them the one-element dummies.
+	EnsureVineTargetBucketDummyBuffers(B.TargetBuckets);
+	B.LocalBounds = bUseFusedVoxels ? B.SurfaceVoxelInputs.GetWorldBounds() : GPUVoxels->WorldBounds;
+	if (!B.LocalBounds.IsValid)
 	{
-		return FMath::IsFinite(Vector.X) && FMath::IsFinite(Vector.Y) && FMath::IsFinite(Vector.Z);
-	};
-
-	FBox TargetBounds(ForceInit);
-	const float SafeVoxelSize = FMath::Max(VoxelData.VoxelSize, UE_KINDA_SMALL_NUMBER);
-	const double MaxTargetDistanceSq = FMath::Square(double(SafeVoxelSize * 2.0f));
-	int32 InvalidTargetCount = 0;
-	int32 InvalidNormalCount = 0;
-	int32 CoincidentTargetCount = 0;
-	double TargetCenterDistanceSum = 0.0;
-	double TargetCenterDistanceMax = 0.0;
-	const double BuildVoxelUploadStartSeconds = FPlatformTime::Seconds();
-	for (uint32 i = 0; i < VoxelCount; ++i)
-	{
-		const FIntVector& Cell = VoxelData.Cells[i];
-		const FVector CellCenter(
-			(double(Cell.X) + 0.5) * SafeVoxelSize + VoxelData.VoxelOrigin.X,
-			(double(Cell.Y) + 0.5) * SafeVoxelSize + VoxelData.VoxelOrigin.Y,
-			(double(Cell.Z) + 0.5) * SafeVoxelSize + VoxelData.VoxelOrigin.Z);
-		const FVector VoxelCenter = VoxelData.Positions.IsValidIndex(int32(i)) && IsFiniteVector(VoxelData.Positions[i])
-			? VoxelData.Positions[i]
-			: CellCenter;
-
-		FVector Target = VoxelData.TargetPositions.IsValidIndex(int32(i)) ? VoxelData.TargetPositions[i] : VoxelCenter;
-		if (!IsFiniteVector(Target) || FVector::DistSquared(Target, VoxelCenter) > MaxTargetDistanceSq)
-		{
-			Target = VoxelCenter;
-			++InvalidTargetCount;
-		}
-		const double TargetCenterDistance = FVector::Dist(Target, VoxelCenter);
-		TargetCenterDistanceSum += TargetCenterDistance;
-		TargetCenterDistanceMax = FMath::Max(TargetCenterDistanceMax, TargetCenterDistance);
-		if (TargetCenterDistance <= UE_DOUBLE_KINDA_SMALL_NUMBER)
-		{
-			++CoincidentTargetCount;
-		}
-
-		FVector Normal = VoxelData.Normals.IsValidIndex(int32(i)) ? VoxelData.Normals[i] : FVector::UpVector;
-		if (!IsFiniteVector(Normal) || !Normal.Normalize())
-		{
-			Normal = FVector::UpVector;
-			++InvalidNormalCount;
-		}
-
-		GPUVoxelTargetPositions.Add(FVector4f(float(Target.X), float(Target.Y), float(Target.Z), 1.0f));
-		GPUVoxelNormals.Add(FVector4f(float(Normal.X), float(Normal.Y), float(Normal.Z), 0.0f));
-		GPUVoxelCells.Add(FIntVector4(Cell.X, Cell.Y, Cell.Z, 0));
-		TargetBounds += Target;
+		const FVector Origin(B.VoxelOrigin);
+		B.LocalBounds = FBox(Origin, Origin + FVector(B.VoxelSize * 4.0f));
 	}
-	if (OutBuildVoxelUploadMs) *OutBuildVoxelUploadMs = (FPlatformTime::Seconds() - BuildVoxelUploadStartSeconds) * 1000.0;
-
-	if (InvalidTargetCount > 0 || InvalidNormalCount > 0)
-	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("[VisVineGPU_Voxel] Sanitized voxel upload. Voxels=%u InvalidTargets=%d InvalidNormals=%d"),
-			VoxelCount,
-			InvalidTargetCount,
-			InvalidNormalCount);
-	}
-	UE_LOG(LogTemp, Display,
-		TEXT("[VisVineGPU_Voxel] Upload target stats. Voxels=%u TargetCenterDist(avg=%.3f max=%.3f) CoincidentTargets=%d InvalidTargets=%d InvalidNormals=%d"),
-		VoxelCount,
-		VoxelCount > 0u ? TargetCenterDistanceSum / double(VoxelCount) : 0.0,
-		TargetCenterDistanceMax,
-		CoincidentTargetCount,
-		InvalidTargetCount,
-		InvalidNormalCount);
-
-	uint32 GPUVoxelHashSlotCount = 0u;
-	const double BuildHashStartSeconds = FPlatformTime::Seconds();
-	if (!BuildVineVoxelHashSlots(GPUVoxelCells, B.GPUVoxelHashSlots, GPUVoxelHashSlotCount))
-	{
-		B.GPUVoxelHashSlots.Init(0u, 1);
-		UE_LOG(LogTemp, Warning, TEXT("[VisVineGPU_Voxel] Failed to build voxel hash slots; shader will use linear voxel lookup fallback."));
-	}
-	if (OutBuildHashMs) *OutBuildHashMs = (FPlatformTime::Seconds() - BuildHashStartSeconds) * 1000.0;
-
-	const double BuildTargetBucketsStartSeconds = FPlatformTime::Seconds();
-	B.TargetBucketOrigin = FVector3f(VoxelData.VoxelOrigin);
-	if (!BuildVineTargetBucketBuffers(GPUVoxelTargetPositions, B.TargetBucketOrigin, SafeVoxelSize, B.TargetBuckets))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[VisVineGPU_Voxel] Failed to build target-position buckets; shader will use voxel-cell fallback."));
-	}
-	if (OutBuildTargetBucketsMs) *OutBuildTargetBucketsMs = (FPlatformTime::Seconds() - BuildTargetBucketsStartSeconds) * 1000.0;
-
-	// Capture the GPU-resident voxel buffers (null on the CPU-array path). On the GPU-voxel
-	// path the vine hash is rebuilt on the GPU, so bind the pow2 slot count.
-	B.GPUVoxCells = bUseGPUVoxels ? GPUVoxels->Cells : nullptr;
-	B.GPUVoxNormals = bUseGPUVoxels ? GPUVoxels->Normals : nullptr;
-	B.GPUVoxTargets = bUseGPUVoxels ? GPUVoxels->TargetPositions : nullptr;
-	B.GPUVoxCounter = bUseGPUVoxels ? GPUVoxels->Counter : nullptr;
-	B.GPUVoxCount = bUseGPUVoxels ? uint32(GPUVoxels->VoxelCount) : 0u;
-	B.GPUVoxelHashSlotCount = bUseGPUVoxels ? GpuVoxelHashSlotCountPow2 : GPUVoxelHashSlotCount;
-
-	// World-space render bounds for the leaf: the surface targets bound where the vine settles;
-	// expand generously (vine offset + a few voxels) so the indirect draw is never view-culled.
-	if (TargetBounds.IsValid)
-	{
-		const double Margin = double(FMath::Max3(VinesOffset * 2.0f, SafeVoxelSize * 4.0f, 50.0f));
-		B.LocalBounds = TargetBounds.ExpandBy(FVector(Margin));
-	}
-
 	B.bValid = true;
 	return B;
 }
@@ -3061,7 +2762,7 @@ static bool BuildVineGeometryIntoMeshAsync(UCSMesh* Target, FVineBuildInput Inpu
 		// transform), so local == world and the emit kernel must not move the positions.
 		Out.VineWorldToLocal = Input.VineWorldToLocal;
 
-		// No SetStandardStreamAccessFinal and no GraphBuilder.Execute() here: both belong to
+		// No SetStreamAccessFinal and no GraphBuilder.Execute() here: both belong to
 		// EditMeshSync, which restores every resident stream's access state for the whole edit.
 		// Doing either by hand is the failure that has no symptom but "it stopped drawing".
 		AddVineMeshPasses(GraphBuilder, GMaxRHIFeatureLevel, In, Out);
@@ -3269,21 +2970,6 @@ static void RefreshVineDisplayComponent(UInstancedStaticMeshComponent* Component
 	Component->MarkRenderStateDirty();
 }
 
-static void RebuildVineDisplayInstances(UInstancedStaticMeshComponent* Component, const TArray<FTransform>& Transforms)
-{
-	if (!Component)
-	{
-		return;
-	}
-
-	Component->ClearInstances();
-	if (!Transforms.IsEmpty())
-	{
-		Component->AddInstances(Transforms, false, true, false);
-	}
-	RefreshVineDisplayComponent(Component);
-}
-
 static bool ResolveVineReferenceComponent(
 	AVineContainer* Container,
 	const UFoliageType* InFoliageType,
@@ -3386,7 +3072,7 @@ bool AVineContainer::EnsureVineGeometry()
 	// The source and target instance sets are the only serialized inputs a vine is derived from;
 	// everything else (surface voxels, the solved center lines, the build bundle) is transient GPU
 	// state a level load does not restore. With either side empty GenerateVineGPU() bails anyway —
-	// but only after EnsureTriangleCacheByBox and the scene voxel prep have already run, so the
+	// but only after the generator box placement and the scene voxel prep have already run, so the
 	// cheap check has to happen here. An actor that never had a vine therefore stays silent.
 	const int32 SourceCount = TubeVineSource ? TubeVineSource->GetInstanceCount() : 0;
 	const int32 TargetCount = GrowTarget ? GrowTarget->GetInstanceCount() : 0;
@@ -3688,7 +3374,7 @@ void AVineContainer::ClearDebugVineSplineActor()
 	}
 }
 
-// 藤蔓生成的 GPU 段：三角形缓存 -> 表面体素 -> 空间殖民求解 -> concat -> 建网格。
+// 藤蔓生成的 GPU 段：摆盒子 -> 表面体素 -> 空间殖民求解 -> concat -> 建网格。
 //
 // 这些以前是 4 张 RDG 图外加一次 FlushRenderingCommands：EnsureTriangleCache 之后
 // PrepareBoxSceneSurfaceVoxelsGPU 自己开三张图（清零 / 分批体素化 / finalize+blur），把结果
@@ -3754,7 +3440,7 @@ bool AVineContainer::GenerateVineGPUInternal(bool bGlobalDistanceField)
 		// 1. 摆盒子：后面的体素查询范围（GetGeneratorBoundsWorldBox）就是从 GeneratorBounds 读的。
 		//    纯 CPU / 组件操作，不碰 GPU。
 		//
-		//    这里以前调的是 EnsureTriangleCacheByBox，但藤蔓只需要「盒子被摆好」这个副作用：表面体素
+		//    这里以前调的是 EnsureTriangleCacheByBox（脏页三角缓存，2026-11-05 已删），但藤蔓只需要「盒子被摆好」这个副作用：表面体素
 		//    走的是 PrepareSurfaceVoxelPassInputs 自己的场景三角形收集，从不读脏页三角缓存的任何产出
 		//    （句柄当场就被 (void) 丢掉了），而那次调用要为每个参考点扫一遍 17³ 邻域并管理页分配。
 		//    产出无人消费，改为只摆盒子。VoxelGridSettings 仍要写：缓存以外的路径也读它。
@@ -3845,7 +3531,6 @@ bool AVineContainer::GenerateVineGPUInternal(bool bGlobalDistanceField)
 	// 	UE_LOG(LogTemp, Warning, TEXT("[VisVineGPU] No retained GPU surface voxel data for visualization."));
 	// 	return false;
 	// }
-	const FCSSurfaceVoxelData EmptySurfaceVoxelData;
 
 	// The space-colonization solve is recorded into the leaf's own graph, so all this side needs
 	// is its CPU-prepped inputs; the resulting counts stay on the GPU. 复用上面算包围盒时取到的
@@ -3960,14 +3645,13 @@ bool AVineContainer::GenerateVineGPUInternal(bool bGlobalDistanceField)
 			VV.PerlinNoiseScale,
 			VV.PerlinNoiseFre,
 			VV.VisVineGPUNoiseIterations,
-			EmptySurfaceVoxelData,
 			VV.bSurfaceAdsorption,
 			&FusedSCInputs,
 			!bGlobalDistanceField && LastSurfaceVoxelGPUBuffers.IsValid() ? &LastSurfaceVoxelGPUBuffers : nullptr,
 			// GenerateVineGPU 备好的融合体素输入。有效时体素在构建那张图里现算，
 			// 上面那个 pooled 参数就用不上了；会被 MoveTemp 进 bundle，故本次消费后即失效。
 			!bGlobalDistanceField && PendingSurfaceVoxelInputs.IsValid() ? &PendingSurfaceVoxelInputs : nullptr,
-			nullptr, nullptr, nullptr, MoveTemp(PendingTriangleSurface), bUseGDF);
+			MoveTemp(PendingTriangleSurface), bUseGDF);
 		if (bUseGDF) LeafInput.LocalBounds = Bounds.ExpandBy(VV.GDFMaxProjectionDistance + FMath::Abs(VV.VinesOffset) + FMath::Abs(VV.CircleScale) * 40.0f);
 		if (!LeafInput.bValid)
 		{
@@ -4178,11 +3862,14 @@ int32 AVineContainer::DrawDebugVineSurfaceVoxelArrows(float Duration, bool bUseC
 
 		VoxelGridSettings.VoxelSize = SafeVoxelSize;
 		VoxelGridSettings.ActivationRadius = SafeVoxelSize * 8.0f;
-		EnsureTriangleCacheByBox(
-			TEXT("VineDebugSurfaceVoxelArrows"),
-			Bounds.GetCenter(),
-			Bounds.GetExtent(),
-			false);
+		// 与 GenerateVineGPU 同理：体素查询范围从 GeneratorBounds 读，只需把盒子摆好。
+		if (GeneratorBounds)
+		{
+			const FVector Extent = Bounds.GetExtent();
+			GeneratorBounds->SetWorldLocation(Bounds.GetCenter());
+			GeneratorBounds->SetBoxExtent(FVector(
+				FMath::Max(0.0, Extent.X), FMath::Max(0.0, Extent.Y), FMath::Max(0.0, Extent.Z)));
+		}
 		if (!PrepareBoxSceneSurfaceVoxelsGPU(SafeVoxelSize)) return 0;
 	}
 
@@ -5005,7 +4692,6 @@ bool BuildTubeIntoMesh(
 
 	// 体素那一套整条不参与：`bSurfaceAdsorption = false` 会让 VineLeaf_BuildVineBuildInput 走
 	// 专用出口（1 元素哑缓冲 + 折线自算包围盒），采样由 shader 的 VineSurfaceAdsorption 短路。
-	const FCSSurfaceVoxelData EmptyVoxelData;
 	FVineBuildInput Input = VineLeaf_BuildVineBuildInput(
 		PathPoints,
 		PathPointAxes,
@@ -5029,7 +4715,6 @@ bool BuildTubeIntoMesh(
 		/*PerlinNoiseStrength*/ 0.0f,
 		/*PerlinNoiseFrequency*/ 1.0f,
 		/*NoiseIterations*/ 0,
-		EmptyVoxelData,
 		/*bSurfaceAdsorption*/ false,
 		/*GPULines*/ nullptr,             // ⇒ 走 CPU 折线通路，空间殖民整条不跑
 		/*GPUVoxels*/ nullptr,

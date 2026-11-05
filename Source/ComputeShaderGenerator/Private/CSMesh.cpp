@@ -375,19 +375,6 @@ void FCSMeshResident::AddStandardTriangleStreams(uint32 InNumIndirectDraws)
 	}
 }
 
-bool FCSMeshResident::AddStream(const FCSGpuStreamDesc& Desc)
-{
-	if (!CSMesh_IsStreamDescUsable(Desc)) return false;
-	if (const FStream* Existing = FindStream(Desc.Role, Desc.TexCoordIndex))
-	{
-		UE_LOG(LogCSMesh, Warning, TEXT("[CSMesh] Stream '%s' rejected: role %u slot %u is already held by '%s'."),
-			Desc.DebugName, uint32(Desc.Role), uint32(Desc.TexCoordIndex), Existing->Desc.DebugName);
-		return false;
-	}
-	Streams.AddDefaulted_GetRef().Desc = Desc;
-	return true;
-}
-
 void FCSMeshResident::AllocateBuffers()
 {
 	check(IsInRenderingThread());

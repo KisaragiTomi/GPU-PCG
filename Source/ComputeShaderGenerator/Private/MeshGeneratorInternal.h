@@ -20,10 +20,6 @@ class FTextureRenderTargetResource;
 class UMaterialInterface;
 class UPrimitiveComponent;
 
-// Voxel cache cell key. The public headers unify the cell key type on FIntVector; this alias keeps
-// the legacy name used throughout the cache implementation pointing at that same type.
-using FCSMeshGeneratorVoxelKey = FIntVector;
-
 namespace CSMeshGenInternal
 {
 

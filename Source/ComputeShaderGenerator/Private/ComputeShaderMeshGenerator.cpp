@@ -459,28 +459,8 @@ class FBlurSurfaceVoxelsCS : public FGlobalShader
 
 IMPLEMENT_GLOBAL_SHADER(FBlurSurfaceVoxelsCS, "/Plugin/PCGPlugins/Shaders/Private/StaticMeshPointSampler.usf", "BlurSurfaceVoxelsCS", SF_Compute);
 // -----------------------------------------------------------------------------
-// Triangle Soup → Heightmap rasterization
+// Mesh → Heightmap rasterization（uint 高度图 → float 转换）
 // -----------------------------------------------------------------------------
-
-class FTriangleSoupToHeightmapCS : public FGlobalShader
-{
-	DECLARE_GLOBAL_SHADER(FTriangleSoupToHeightmapCS);
-	SHADER_USE_PARAMETER_STRUCT(FTriangleSoupToHeightmapCS, FGlobalShader);
-
-	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<float4>, RW_OutTriangleVertices)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RW_TriangleCounter)
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, RW_HeightmapUint)
-		SHADER_PARAMETER(FVector2f, HM_BoundsMin)
-		SHADER_PARAMETER(FVector2f, HM_BoundsInvSize)
-		SHADER_PARAMETER(float, HM_CameraHeight)
-		SHADER_PARAMETER(FIntPoint, HM_TextureSize)
-	END_SHADER_PARAMETER_STRUCT()
-
-	CSGEN_SHADER_PERM_SM5_GROUPSIZE_X(64)
-};
-
-IMPLEMENT_GLOBAL_SHADER(FTriangleSoupToHeightmapCS, "/Plugin/PCGPlugins/Shaders/Private/StaticMeshPointSampler.usf", "TriangleSoupToHeightmapCS", SF_Compute);
 
 class FConvertHeightmapUintToFloatCS : public FGlobalShader
 {
@@ -2202,16 +2182,14 @@ FCSTriangleMeshData AComputeShaderMeshGenerator::GetBoxSceneTrianglesFromGPUFilt
 
 	TArray<FResolvedStaticMeshTriangleRequest> ResolvedRequests;
 	// 与全局收集约定一致：Nanite 用 render fallback（不做 MeshDescription 全精度 CPU 提取）。
-	// 全精度是 Mesh Boolean 勾选项专属；这个 legacy 回读/诊断入口跟随默认，NaniteTriangles
-	// 保持为空，下游按空集自然跳过追加 pass。
-	FCSNaniteSourceTriangleData NaniteTriangles;
+	// 全精度是 Mesh Boolean 勾选项专属；这个 legacy 回读/诊断入口跟随默认，不追加 Nanite 源三角。
 	const uint64 TotalStaticMeshTriangleCount = ResolveStaticMeshTriangleRequests(
 		Requests,
 		this,
 		ExcludedActorTags,
 		true,
 		ResolvedRequests);
-	if (ResolvedRequests.IsEmpty() && !bHasLandscapeTriangles && NaniteTriangles.IsEmpty())
+	if (ResolvedRequests.IsEmpty() && !bHasLandscapeTriangles)
 	{
 		return ResultTriangleData;
 	}
@@ -2227,15 +2205,12 @@ FCSTriangleMeshData AComputeShaderMeshGenerator::GetBoxSceneTrianglesFromGPUFilt
 
 	ENQUEUE_RENDER_COMMAND(GetBoxSceneTrianglesFromGPUFilteredGPU)(
 		[ResolvedRequests = MoveTemp(ResolvedRequests), TotalStaticMeshTriangleCount, LandscapeTriangleData = MoveTemp(LandscapeTriangleData),
-		 NaniteTriangles = MoveTemp(NaniteTriangles),
 		 VertexReadback, NormalReadback, CounterReadback, CounterReadbackBytes,
 		 ReferencePointsForRender, SafeFilterDistance, SafeMaxTriangles,
 		 &bRenderWorkQueued, &bHasGPUOutput, &VertexCapacity, &ActualVertexReadbackBytes](FRHICommandListImmediate& RHICmdList)
 		{
 			FRDGBuilder GraphBuilder(RHICmdList);
 			const FCSTriangleMeshData* InitialTriangleData = GetTriangleMeshDataTriangleCount(LandscapeTriangleData) > 0 ? &LandscapeTriangleData : nullptr;
-			const FCSNaniteSourceTriangleData* NaniteTrianglesPtr = !NaniteTriangles.IsEmpty() ? &NaniteTriangles : nullptr;
-
 			FCSStaticMeshTriangleRDGOutput TriangleOutput = AddResolvedStaticMeshTrianglesToRDGInternal(
 				GraphBuilder,
 				RHICmdList,
@@ -2246,7 +2221,7 @@ FCSTriangleMeshData AComputeShaderMeshGenerator::GetBoxSceneTrianglesFromGPUFilt
 				SafeMaxTriangles,
 				InitialTriangleData,
 				TEXT("CS.BoxSceneTrianglesFiltered"),
-				NaniteTrianglesPtr);
+				nullptr);
 
 			if (TriangleOutput.TriangleVertices && TriangleOutput.TriangleNormals && TriangleOutput.TriangleCounter)
 			{
@@ -3137,9 +3112,8 @@ void AComputeShaderMeshGenerator::BuildBoxSceneFilteredSurfaceVoxels(float Voxel
 	LastSurfaceVoxelGPUBuffers.VoxelOrigin = LastSurfaceVoxelData.VoxelOrigin;
 }
 
-FCSSurfaceVoxelData AComputeShaderMeshGenerator::ReadbackBoxSceneSurfaceVoxelsSync(float VoxelSize, const TCHAR* DebugName)
+FCSSurfaceVoxelData AComputeShaderMeshGenerator::ReadbackBoxSceneSurfaceVoxelsSync(float VoxelSize)
 {
-	(void)DebugName;
 	TArray<FVector> UnusedPositions;
 	TArray<FVector> UnusedNormals;
 	GetBoxSceneFilteredSurfaceVoxels(VoxelSize, 0.0f, UnusedPositions, UnusedNormals);
@@ -4080,86 +4054,6 @@ FBox AComputeShaderMeshGenerator::GetGeneratorBoundsWorldBox() const
 	return FBox(GeneratorBounds->GetComponentLocation() - SafeExtent, GeneratorBounds->GetComponentLocation() + SafeExtent);
 }
 
-
-// -----------------------------------------------------------------------------
-// Triangle Soup → Heightmap RDG pass
-// -----------------------------------------------------------------------------
-
-void AComputeShaderMeshGenerator::RasterizeTriangleSoupToHeightmapRDG(
-	FRDGBuilder& GraphBuilder,
-	const FCSStaticMeshTriangleRDGOutput& TriangleOutput,
-	FRDGTextureRef OutputHeightmap,
-	const FBox& WorldBounds,
-	float CameraHeight)
-{
-	if (!TriangleOutput.TriangleVertices || !TriangleOutput.TriangleCounter || TriangleOutput.MaxTriangles == 0)
-	{
-		return;
-	}
-
-	FIntPoint TexSize;
-	{
-		FRDGTextureDesc Desc = OutputHeightmap->Desc;
-		TexSize = FIntPoint(Desc.Extent.X, Desc.Extent.Y);
-	}
-
-	FVector2f BoundsMin(WorldBounds.Min.X, WorldBounds.Min.Y);
-	FVector2f BoundsSize(WorldBounds.Max.X - WorldBounds.Min.X, WorldBounds.Max.Y - WorldBounds.Min.Y);
-	FVector2f BoundsInvSize(
-		BoundsSize.X > 0.01f ? 1.0f / BoundsSize.X : 0.0f,
-		BoundsSize.Y > 0.01f ? 1.0f / BoundsSize.Y : 0.0f);
-
-	FRDGTextureDesc UintDesc = FRDGTextureDesc::Create2D(
-		FIntPoint(TexSize.X, TexSize.Y),
-		PF_R32_UINT,
-		FClearValueBinding::None,
-		TexCreate_ShaderResource | TexCreate_UAV);
-	FRDGTextureRef HeightmapUint = GraphBuilder.CreateTexture(UintDesc, TEXT("CS.HeightmapUint"));
-	FRDGTextureUAVRef HeightmapUintUAV = GraphBuilder.CreateUAV(HeightmapUint);
-
-	AddClearUAVPass(GraphBuilder, HeightmapUintUAV, 0xFFFFFFFFu);
-
-	{
-		TShaderMapRef<FTriangleSoupToHeightmapCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
-		auto* PassParams = GraphBuilder.AllocParameters<FTriangleSoupToHeightmapCS::FParameters>();
-		PassParams->RW_OutTriangleVertices = TriangleOutput.TriangleVerticesUAV;
-		PassParams->RW_TriangleCounter = TriangleOutput.TriangleCounterUAV;
-		PassParams->RW_HeightmapUint = HeightmapUintUAV;
-		PassParams->HM_BoundsMin = BoundsMin;
-		PassParams->HM_BoundsInvSize = BoundsInvSize;
-		PassParams->HM_CameraHeight = CameraHeight;
-		PassParams->HM_TextureSize = TexSize;
-
-		FIntVector GroupCount(FMath::DivideAndRoundUp(int32(TriangleOutput.MaxTriangles), 64), 1, 1);
-		FComputeShaderUtils::AddPass(
-			GraphBuilder,
-			RDG_EVENT_NAME("TriangleSoupToHeightmap"),
-			ERDGPassFlags::Compute,
-			CS,
-			PassParams,
-			GroupCount);
-	}
-
-	{
-		TShaderMapRef<FConvertHeightmapUintToFloatCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
-		auto* ConvertParams = GraphBuilder.AllocParameters<FConvertHeightmapUintToFloatCS::FParameters>();
-		ConvertParams->T_HeightmapUint = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(HeightmapUint));
-		ConvertParams->RW_HeightmapFloat = GraphBuilder.CreateUAV(OutputHeightmap);
-		ConvertParams->HM_TextureSize = TexSize;
-
-		FIntVector GroupCount(
-			FMath::DivideAndRoundUp(TexSize.X, 8),
-			FMath::DivideAndRoundUp(TexSize.Y, 8),
-			1);
-		FComputeShaderUtils::AddPass(
-			GraphBuilder,
-			RDG_EVENT_NAME("ConvertHeightmapUintToFloat"),
-			ERDGPassFlags::Compute,
-			CS,
-			ConvertParams,
-			GroupCount);
-	}
-}
 
 namespace
 {

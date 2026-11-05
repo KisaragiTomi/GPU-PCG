@@ -161,23 +161,4 @@ void SetStreamAccessFinal(FRDGBuilder& GraphBuilder, FRDGBufferRef Buffer, ECSGp
 	if (!Buffer) return;
 	GraphBuilder.SetBufferAccessFinal(Buffer, FinalAccessForRole(Role));
 }
-
-void SetStandardStreamAccessFinal(
-	FRDGBuilder& GraphBuilder,
-	FRDGBufferRef Positions,
-	FRDGBufferRef Tangents,
-	FRDGBufferRef TexCoords,
-	FRDGBufferRef Colors,
-	FRDGBufferRef Indices,
-	FRDGBufferRef IndirectArgs,
-	FRDGBufferRef MeshCounters)
-{
-	SetStreamAccessFinal(GraphBuilder, Positions, ECSGpuStreamRole::Position);
-	SetStreamAccessFinal(GraphBuilder, Tangents, ECSGpuStreamRole::TangentBasis);
-	SetStreamAccessFinal(GraphBuilder, TexCoords, ECSGpuStreamRole::TexCoord);
-	SetStreamAccessFinal(GraphBuilder, Colors, ECSGpuStreamRole::Color);
-	SetStreamAccessFinal(GraphBuilder, Indices, ECSGpuStreamRole::Index);
-	SetStreamAccessFinal(GraphBuilder, IndirectArgs, ECSGpuStreamRole::IndirectArgs);
-	SetStreamAccessFinal(GraphBuilder, MeshCounters, ECSGpuStreamRole::MeshCounters);
-}
 }

@@ -107,11 +107,7 @@ bool FCSBrushEdModeBase::MouseMove(FEditorViewportClient* ViewportClient, FViewp
 
 bool FCSBrushEdModeBase::CapturedMouseMove(FEditorViewportClient* ViewportClient, FViewport* Viewport, int32 x, int32 y)
 {
-	UpdateBrushTraceFromMouse(ViewportClient, Viewport, x, y);
-	UpdateBrushComponent(ViewportClient);
-	if (!bStrokeActive) return false;
-	UpdateStroke();
-	return true;
+	return MouseMove(ViewportClient, Viewport, x, y);
 }
 
 bool FCSBrushEdModeBase::InputKey(FEditorViewportClient* ViewportClient, FViewport* Viewport, FKey Key, EInputEvent Event)

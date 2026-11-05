@@ -229,16 +229,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Options)
 	float RandomRotation = 0;
 
-	bool IsValid()
-	{
-		return TMeshDepth != nullptr && SceneDepth != nullptr &&
-			SceneNormal != nullptr && DebugView != nullptr && Result != nullptr;
-	}
-	bool IsValidMult()
-	{
-		return TMeshDepth != nullptr && SceneDepth != nullptr &&
-			SceneNormal != nullptr && DebugView != nullptr && Result != nullptr ;
-	}
 };
 
 UCLASS()

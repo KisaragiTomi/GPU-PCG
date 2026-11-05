@@ -185,16 +185,6 @@ struct COMPUTESHADERGENERATOR_API FCSMeshResident
 	 *  declaration. Does not allocate; call AllocateBuffers() after setting the capacities. */
 	void AddStandardTriangleStreams(uint32 InNumIndirectDraws = 1);
 
-	/** Appends one stream beyond the standard set. A stream is addressed by its (Role,
-	 *  TexCoordIndex) pair and Find() returns the first match, so a duplicate pair would
-	 *  silently shadow the stream it collides with — that is refused and logged instead.
-	 *  Note the standard resident set already owns AuxVertex slot 0 (the material ids).
-	 *
-	 *  Declaration-time only: on an already-allocated mesh the new stream has no buffer, which
-	 *  makes IsAllocated() false and every edit fail. Go through UCSMesh::SetStreamLayoutSync,
-	 *  which reallocates. */
-	bool AddStream(const FCSGpuStreamDesc& Desc);
-
 	/** Allocates a pooled buffer for every registered stream from the current capacities.
 	 *  Render thread only. Existing buffers are dropped without copying — UCSMesh's capacity
 	 *  and layout entry points are what preserve contents across a reallocation. */

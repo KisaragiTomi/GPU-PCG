@@ -25,7 +25,6 @@
 #include "Parameterization/DynamicMeshUVEditor.h"
 #include "Selections/MeshConnectedComponents.h"
 #include "tbb/parallel_reduce.h"
-#include "GeometryAttribute.h"
 #include "GroupTopology.h"
 #include "MinVolumeBox3.h"
 #include "OrientedBoxTypes.h"
@@ -584,8 +583,6 @@ void UGeometryGeneral::WindDataForTree(UDynamicMesh* TargetMesh,
 		//=================================================================================
 		if (LeafMaterialIndex >= 0)
 		{
-			// TMap<int, FWindTreeReduceData> ReduceComponentMap = FindNearestComponents<FWindTreeReduceData>(EditMesh, BVH, ComponentDatas);
-
 			TMap<int, FWindTreeCombineLeafData> ReduceComponentMap;
 				
 			for (TPair<int, FWindTreeComponentData> LeafComponentData :  LeafComponentDatas)
@@ -863,12 +860,6 @@ void UGeometryGeneral::WindDataForTree(UDynamicMesh* TargetMesh,
 		}
 	});
 	
-}
-
-void UGeometryGeneral::TreeWindMergeComponents(FDynamicMesh3& EditMesh, FGeometryScriptDynamicMeshBVH BVH,
-	TMap<int, FDynamicMeshComponentData> ComponentDatas)
-{
-
 }
 
 UDynamicMesh* UGeometryGeneral::WeldDynamicMesh(UDynamicMesh* TargetMesh, float Tolerance)
@@ -1212,69 +1203,6 @@ UDynamicMesh* UGeometryGeneral::UVAttribTransf(UDynamicMesh* SourceMesh, UDynami
 
 	});
 	return TargetMesh;
-}
-
-template<typename ReduceDatatype, typename  ComponentType>
-TMap<int, ReduceDatatype> UGeometryGeneral::FindNearestComponents(FDynamicMesh3& EditMesh, FGeometryScriptDynamicMeshBVH BVH, TMap<int, ComponentType> ComponentDatas)
-{
-	TMap<int, ReduceDatatype> ReduceComponentMap;
-	if (!EditMesh.Attributes()->HasAttachedAttribute(FName("TI_Class"))) return ReduceComponentMap;
-		
-	for (TPair<int, ComponentType> ComponentData :  ComponentDatas)
-	{
-		int ParentClass = TNumericLimits<int>::Max();      
-		int Class = ComponentData.Key;
-		ComponentType& Data = ComponentData.Value;
-		TMap<int, ReduceDatatype> TempComponentMap;
-		TDynamicMeshTriangleAttribute<int, 1>* AttribClass = static_cast<TDynamicMeshTriangleAttribute<int, 1>*>(EditMesh.Attributes()->GetAttachedAttribute(FName("TI_Class")));
-		IMeshSpatial::FQueryOptions QueryOptionsXYZ([&](int32 TID)
-		{
-			if (TID == TNumericLimits<int>::Max()) return false;
-			int FindClass = -1;
-			AttribClass->GetValue(TID, &FindClass);
-			
-			return FindClass != Class;
-		});
-		for (int TID : Data.TIDs)
-		{
-			FIndex3i TVIDs = EditMesh.GetTriangle(TID);
-			FVector3d VertexPos = EditMesh.GetVertex(TVIDs[0]);
-			int HitTID = TNumericLimits<int>::Max();
-
-			double Dist;
-			HitTID = BVH.Spatial->FindNearestTriangle(VertexPos, Dist, QueryOptionsXYZ);
-			
-			if (HitTID < 0) continue;
-			
-			int ParentClassNum = -1;
-			AttribClass->GetValue(HitTID, &ParentClassNum);
-			float ParentClassDist = 0;
-			ReduceDatatype ComponentReduceData;
-			
-			if (TempComponentMap.Find(ParentClassNum) != nullptr) ComponentReduceData = *TempComponentMap.Find(ParentClassNum);
-
-			ComponentReduceData.CollectedData(EditMesh, TID, Dist);
-			TempComponentMap.Add(ParentClassNum, ComponentReduceData);
-			
-		}
-		//Find Main Nearest Component
-		//=================================================================================
-		TPair<int, ReduceDatatype> MinDistComponentReduceData;
-		for (TPair<int, ReduceDatatype> ComponentReduceData: TempComponentMap)
-		{
-			if ( MinDistComponentReduceData.Value.Count <  ComponentReduceData.Value.Count)
-			{
-				MinDistComponentReduceData = ComponentReduceData;
-				MinDistComponentReduceData.Value.ParentClass = ComponentReduceData.Key;
-			}
-		}
-
-		ReduceComponentMap.Add(Class, MinDistComponentReduceData.Value);
-		
-	}
-	return ReduceComponentMap;
-	
-
 }
 
 UDynamicMesh* UGeometryGeneral::FillUVData(UDynamicMesh* TargetMesh, int32 UVLayerNum)
@@ -1689,25 +1617,3 @@ UStaticMesh* UGeometryGeneral::SaveDynamicMeshToStaticMeshWithMaterials(
 	return NewStaticMesh;
 }
 
-UStaticMesh* UGeometryGeneral::SaveDynamicMeshToStaticMesh(UDynamicMesh* TargetMesh, int32 ResultIndex)
-{
-	if (!TargetMesh || TargetMesh->GetTriangleCount() == 0)
-	{
-		return nullptr;
-	}
-
-	const FString AssetFolderPath = TEXT("/Game/AutoResult");
-	FString AssetName = ObjectTools::SanitizeObjectName(FString::Printf(TEXT("DynamicMesh_%d"), ResultIndex));
-	if (!AssetName.StartsWith(TEXT("SM_")))
-	{
-		AssetName = FString(TEXT("SM_")) + AssetName;
-	}
-
-	return SaveDynamicMeshToStaticMesh(
-		TargetMesh,
-		AssetFolderPath / AssetName,
-		nullptr,
-		true,
-		false,
-		true);
-}

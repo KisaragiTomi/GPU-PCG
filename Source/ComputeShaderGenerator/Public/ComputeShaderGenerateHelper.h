@@ -15,21 +15,6 @@
 #include "ComputeShaderSceneCapture.h"
 
 
-// ConvertToUAVRWBuffer(GraphBuilder, TRDGB_##Name, RDGUAVB_##Name, Name, EPixelFormat::PF_A32B32G32R32F, TEXT("UAV_SourceData"));
-#define CREATE_UAVB(Format, Name) \
-FRDGBufferRef TRDGB_##Name = nullptr; \
-FRDGBufferUAVRef RDGUAVB_##Name = nullptr; \
-ConvertToUAVRWBuffer(GraphBuilder, TRDGB_##Name, RDGUAVB_##Name, Name, Format, TEXT("UAV_"#Name)); \
-PassParameters->BCount_##Name = Name.Num();
-
-#define CREATE_UAVB_16(Name) \
-CREATE_UAVB(EPixelFormat::PF_A16B16G16R16, Name) \
-PassParameters->RWB_##Name = RDGUAVB_##Name;
-
-#define CREATE_UAVB_32(Name) \
-CREATE_UAVB(EPixelFormat::PF_A32B32G32R32F, Name) \
-PassParameters->RWB_##Name = RDGUAVB_##Name;
-
 #define CREATE_UAV(Size, Format, Name) \
 FRDGTextureRef TRDG_##Name = nullptr; \
 FRDGTextureUAVRef RDGUAV_##Name = nullptr; \
@@ -38,9 +23,6 @@ PassParameters->RW_##Name = RDGUAV_##Name;
 
 #define CREATE_TEXTURE_UAV_32(Name) \
 CREATE_UAV(TextureSize, PF_A32B32G32R32F, Name)
-
-#define CREATE_TEXTURE_UAV_16(Name) \
-CREATE_UAV(TextureSize, PF_FloatRGBA, Name)
 
 #define CREATE_TEXTURE_UAV_16_OUT(Name) \
 CREATE_UAV(TextureSize, PF_FloatRGBA, Name) \
@@ -56,11 +38,6 @@ PassParameters->T_##Name = RDG_##Name;
 CREATE_UAV(TextureSize, PF_A32B32G32R32F, Name) \
 FRDGTextureRef RDG_##Name = RegisterExternalTexture(GraphBuilder, R_##Name->GetRenderTargetTexture(), TEXT("R_"#Name)); 
 
-
-#define CREATE_TEXTURE_UAV_32_OUTP(Name) \
-CREATE_UAV(TextureSize, PF_A32B32G32R32F, Name) \
-FRDGTextureRef RDG_##Name = RegisterExternalTexture(GraphBuilder, R_##Name->GetRenderTargetTexture(), TEXT("R_"#Name)); \
-PassParameters->T_##Name = RDG_##Name;
 
 #define CREATE_RDG(Name) \
 FRDGTextureRef RDG_##Name = RegisterExternalTexture(GraphBuilder, R_##Name->GetRenderTargetTexture(), TEXT("R_"#Name));\

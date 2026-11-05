@@ -63,7 +63,7 @@ inline const TCHAR* PatternScaleParameterName = TEXT("RockShellPatternScale");
 /**
  * 岩壳 `UCSMesh` 的额外 aux 流槽位。从 32 起：AuxVertex 槽 0 归标准集的逐三角材质 id，
  * `CSGpuInstancedMeshSceneProxy` 那个 leaf 已经占了 16..22。
- * ⚠️ **槽位冲撞不会报错**：`AddStream` 直接返回 false，之后绑上一个空 buffer，日志里什么都没有。
+ * ⚠️ **槽位冲撞不会报错**：`UCSMesh::SetStreamLayoutSync` 直接返回 false，之后绑上一个空 buffer，日志里只有一条通用警告。
  */
 enum class EAuxSlot : uint8
 {

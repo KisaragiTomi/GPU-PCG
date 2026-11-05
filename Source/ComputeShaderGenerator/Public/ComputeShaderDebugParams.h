@@ -184,30 +184,3 @@ public:
 	int32 MaxDirectionsToDraw = 0;
 };
 
-/** Debug draw options for DrawDebugActiveVoxels. */
-USTRUCT(BlueprintType, meta = (DisplayName = "CS Active Voxel Debug"))
-struct COMPUTESHADERGENERATOR_API FCSDebugActiveVoxelOptions
-{
-	GENERATED_BODY()
-public:
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Debug|Active Voxels")
-	FName RequestId = NAME_None;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Debug|Active Voxels")
-	FLinearColor DebugColor = FLinearColor::Green;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Debug|Active Voxels", meta = (ClampMin = "0.0"))
-	float Duration = 5.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Debug|Active Voxels", meta = (ClampMin = "0.0"))
-	float Thickness = 2.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Debug|Active Voxels")
-	bool bPersistentLines = false;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Debug|Active Voxels")
-	bool bDrawCacheBounds = true;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CS Debug|Active Voxels", meta = (ClampMin = "0"))
-	int32 MaxVoxelsToDraw = 0;
-};

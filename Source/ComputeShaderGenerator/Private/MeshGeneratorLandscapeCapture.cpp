@@ -5,7 +5,7 @@
 // ConvertLandscapeHeightmapToDepthRDG / CaptureLandscapeHeightmap(+ToDepth/GPU) /
 // ConvertLandscapeHeightmapToNormalHeightRDG / RenderLandscapeToNormalHeightRT /
 // CaptureLandscapeTrianglesGPU，以及仅本 TU 使用的 3 个 FLandscape* shader。
-// 通用的 mesh->heightmap 光栅化（RasterizeTriangleSoup/IndexedMeshToHeightmapRDG）
+// 通用的 mesh->heightmap 光栅化（IndexedMeshToHeightmapRDG）
 // 仍在 ComputeShaderMeshGenerator.cpp（被 ShallowWater / LandscapeRoad 复用）。
 // -----------------------------------------------------------------------------
 

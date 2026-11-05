@@ -7,7 +7,6 @@
 namespace CSGpuSurfaceBudget
 {
 	constexpr uint64_t Alignment = 64ull * 1024ull;
-	constexpr uint64_t MaxBytes = 128ull * 1024ull * 1024ull;
 
 	constexpr uint64_t BufferBytes(uint64_t Bytes)
 	{

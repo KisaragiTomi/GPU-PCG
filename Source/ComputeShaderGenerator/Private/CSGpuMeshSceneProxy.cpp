@@ -261,29 +261,11 @@ void FCSGpuMeshSceneProxy::AddStream(const FCSGpuStreamDesc& Desc)
 	Streams.Add(MoveTemp(Runtime));
 }
 
-void FCSGpuMeshSceneProxy::AddStandardTriangleStreams(uint32 NumIndirectDraws)
-{
-	// The descriptor list itself lives in CSGpuMeshStreams so the retained UCSMesh set and
-	// this proxy-owned set cannot drift apart.
-	CSGpuMeshStreams::FStandardStreamOptions Options;
-	Options.NumIndirectDraws = NumIndirectDraws;
-
-	TArray<FCSGpuStreamDesc> Descs;
-	CSGpuMeshStreams::BuildStandardTriangleStreamDescs(Descs, Options);
-	for (const FCSGpuStreamDesc& D : Descs) AddStream(D);
-}
-
 const FCSGpuMeshSceneProxy::FCSGpuStreamRuntime* FCSGpuMeshSceneProxy::FindStream(ECSGpuStreamRole Role, uint8 Index) const
 {
 	for (const TUniquePtr<FCSGpuStreamRuntime>& S : Streams)
 		if (S->Desc.Role == Role && S->Desc.TexCoordIndex == Index) return S.Get();
 	return nullptr;
-}
-
-TRefCountPtr<FRDGPooledBuffer> FCSGpuMeshSceneProxy::GetStreamBuffer(ECSGpuStreamRole Role, uint8 Index) const
-{
-	const FCSGpuStreamRuntime* S = FindStream(Role, Index);
-	return S ? S->Pooled : TRefCountPtr<FRDGPooledBuffer>();
 }
 
 FRHIShaderResourceView* FCSGpuMeshSceneProxy::GetStreamSRV(ECSGpuStreamRole Role, uint8 Index) const

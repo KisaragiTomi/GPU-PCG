@@ -8,8 +8,6 @@
 #include "RHI.h"
 #include "RHICommandList.h"
 
-#define ROAD_SHADER TEXT("/Plugin/PCGPlugins/Shaders/Private/RoadBuilder.usf")
-
 IMPLEMENT_GLOBAL_SHADER(FRoadClearCS, "/Plugin/PCGPlugins/Shaders/Private/RoadBuilder.usf", "ClearCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FRoadIntersectCS, "/Plugin/PCGPlugins/Shaders/Private/RoadBuilder.usf", "IntersectCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FRoadClusterCS, "/Plugin/PCGPlugins/Shaders/Private/RoadBuilder.usf", "ClusterCS", SF_Compute);
@@ -21,7 +19,6 @@ IMPLEMENT_GLOBAL_SHADER(FRoadDepthToResultCS, "/Plugin/PCGPlugins/Shaders/Privat
 IMPLEMENT_GLOBAL_SHADER(FRoadDiffuseCS, "/Plugin/PCGPlugins/Shaders/Private/RoadBuilder.usf", "RoadDiffuseCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FRoadUnpremultCS, "/Plugin/PCGPlugins/Shaders/Private/RoadBuilder.usf", "RoadUnpremultCS", SF_Compute);
 
-#undef ROAD_SHADER
 
 void AddRoadDepthToResultPass(
 	FRDGBuilder& GraphBuilder,
@@ -384,7 +381,7 @@ bool BuildRoadGeometryIntoMesh(UCSMesh* Target, const FRoadBuildInput& Input, co
 		if (!Out.Positions || !Out.Tangents || !Out.TexCoords || !Out.Colors) return;
 		if (!Out.Indices || !Out.IndirectArgs || !Out.MeshCounters) return;
 
-		// No SetStandardStreamAccessFinal and no GraphBuilder.Execute() here: both belong to
+		// No SetStreamAccessFinal and no GraphBuilder.Execute() here: both belong to
 		// EditMeshSync, which restores every resident stream's access state for the whole edit.
 		// Doing either by hand is the failure that has no symptom but "it stopped drawing".
 		BuildRoadGeometryRDG(Context.GraphBuilder, GMaxRHIFeatureLevel, Input, Out);

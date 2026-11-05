@@ -50,23 +50,4 @@ namespace ProcessAsync
 		return Results;
 	}
 	
-	template <typename RangeType, typename FunctorType>
-	void Parallel_For(const RangeType& Range, const FunctorType& Functor, const bool bParallel = true)
-	{
-		TRACE_CPUPROFILER_EVENT_SCOPE(ProxyLOD::Parallel_For)
-		if (bParallel) // run in parallel
-		{
-			// Functor can be passed by reference since we wait until completion
-			tbb::parallel_for(Range,
-				[&Functor](const RangeType& Range)
-				{
-
-					Functor(Range);
-				});
-		}
-		else // single threaded
-		{
-			Functor(Range);
-		}
-	}
 }
