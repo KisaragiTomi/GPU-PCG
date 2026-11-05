@@ -1,0 +1,260 @@
+{
+  "success": true,
+  "assets": [
+    {
+      "mesh": "SM_C351A38A42B01B7D",
+      "state": "Ready",
+      "regions": 3,
+      "triangles": 8,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_EF7D6D6E176263CE",
+      "state": "Ready",
+      "regions": 4,
+      "triangles": 10,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_5674B1687D5C13A5",
+      "state": "PendingReview",
+      "regions": 0,
+      "triangles": 0,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_8ACDCF9295DB9A27",
+      "state": "Ready",
+      "regions": 4,
+      "triangles": 8,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_2AD19E7A082AF185",
+      "state": "Ready",
+      "regions": 4,
+      "triangles": 8,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_D5ECAB658C2D2675",
+      "state": "Ready",
+      "regions": 4,
+      "triangles": 44,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_86D572AD0625E2C0",
+      "state": "Ready",
+      "regions": 4,
+      "triangles": 36,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_C462863AFD826788",
+      "state": "PendingReview",
+      "regions": 0,
+      "triangles": 0,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_75C359765B5FB481",
+      "state": "Ready",
+      "regions": 4,
+      "triangles": 37,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_6E499BBB42F56C0C",
+      "state": "Ready",
+      "regions": 3,
+      "triangles": 8,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_0E9AF77303C296FB",
+      "state": "Ready",
+      "regions": 4,
+      "triangles": 44,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_02336DA4D4EDE17A",
+      "state": "Ready",
+      "regions": 3,
+      "triangles": 8,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_5049F2F99F36ED48",
+      "state": "Ready",
+      "regions": 4,
+      "triangles": 8,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_B25204784B87A187",
+      "state": "Ready",
+      "regions": 4,
+      "triangles": 36,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_8176775AFE67E83C",
+      "state": "Ready",
+      "regions": 3,
+      "triangles": 6,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_0EDBC88E98238FF6",
+      "state": "Ready",
+      "regions": 6,
+      "triangles": 20,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_C96045FA44760EA1",
+      "state": "Ready",
+      "regions": 3,
+      "triangles": 8,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_5C6EFBA6849E8C2F",
+      "state": "Ready",
+      "regions": 4,
+      "triangles": 43,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_C08B6F737DA1CEB4",
+      "state": "Ready",
+      "regions": 2,
+      "triangles": 4,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_DF37CE86930E0B10",
+      "state": "Ready",
+      "regions": 2,
+      "triangles": 4,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_00CA3C7834FCFF68",
+      "state": "Ready",
+      "regions": 2,
+      "triangles": 4,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_6D608E3F3A549283",
+      "state": "Ready",
+      "regions": 1,
+      "triangles": 2,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_A14C8454C64C5149",
+      "state": "Ready",
+      "regions": 2,
+      "triangles": 4,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    },
+    {
+      "mesh": "SM_9B09B2EB6DC684EE",
+      "state": "Ready",
+      "regions": 1,
+      "triangles": 2,
+      "source_fingerprint_unchanged": true,
+      "binding_reloaded": true,
+      "preview_matches_profile": true,
+      "backup_verified": true
+    }
+  ],
+  "negative_cases": [
+    "ready_empty",
+    "duplicate_id",
+    "bad_index",
+    "reversed_winding",
+    "non_planar",
+    "non_finite",
+    "bad_normal",
+    "bad_hash",
+    "wrong_source_binding_no_mutation"
+  ],
+  "review_source_actors": 24,
+  "review_region_actors": 22,
+  "region_count": 71,
+  "triangle_count": 352
+}

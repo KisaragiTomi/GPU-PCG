@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "data_revision": 1,
+  "profile_id": "5e130b1d-5a3d-5d70-9937-970a467c75b3",
+  "source_mesh": "/Game/BuildingGenerator/Cyberpunk2077/Meshes/56/SM_5674B1687D5C13A5.SM_5674B1687D5C13A5",
+  "mesh": "SM_5674B1687D5C13A5",
+  "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_a_wall_window_w600_h400_ag.mesh",
+  "loaded_instances": 3957,
+  "source_geometry_hash": "b61c4d2aa071f2ab165f2d661fb52a30fb75ca0cfe06bfe98c045e9154912dc1",
+  "state": "PendingReview",
+  "review_notes": "Built from source LOD0. Multilayer opaque surfaces only; window/parallax/decal support excluded; forward projected blockers removed; 2 cm inset. Geometric candidate regions only. Building exterior/use, device footprint, substrate strength and neighbouring objects must be checked separately. No load-bearing certification.",
+  "regions": [],
+  "rejections": {
+    "non_vertical_triangles": 108,
+    "unreliable_or_smoothed_normal_triangles": 82,
+    "non_structural_material_triangles": 120
+  },
+  "edge_margin_cm": 2.0,
+  "min_area_cm2": 2000.0,
+  "min_span_cm": 20.0,
+  "winding": "Profile triangles use cross(B-A,C-A) == outward normal; reverse index order for UE render mesh authoring."
+}

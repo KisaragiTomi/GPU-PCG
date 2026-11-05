@@ -1,0 +1,125 @@
+{
+  "selection_basis": "NightCity_WP MCP loaded-component snapshot, 2026-11-04; frequent Charter Hill and Corporate Plaza modules plus width/height/corner variants. Counts are snapshot counts, not global WP totals.",
+  "models": [
+    {
+      "mesh": "SM_C351A38A42B01B7D",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_w600_h400_ac.mesh",
+      "loaded_instances": 6229
+    },
+    {
+      "mesh": "SM_EF7D6D6E176263CE",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_w300_h400_corner_convex_ac.mesh",
+      "loaded_instances": 4941
+    },
+    {
+      "mesh": "SM_5674B1687D5C13A5",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_a_wall_window_w600_h400_ag.mesh",
+      "loaded_instances": 3957
+    },
+    {
+      "mesh": "SM_8ACDCF9295DB9A27",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_w425_h200_a45_aa.mesh",
+      "loaded_instances": 3607
+    },
+    {
+      "mesh": "SM_2AD19E7A082AF185",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_w600_h200_aa.mesh",
+      "loaded_instances": 3316
+    },
+    {
+      "mesh": "SM_D5ECAB658C2D2675",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_gf_w600_h400_ac.mesh",
+      "loaded_instances": 2376
+    },
+    {
+      "mesh": "SM_86D572AD0625E2C0",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_a_wall_w600_h400_aa.mesh",
+      "loaded_instances": 2190
+    },
+    {
+      "mesh": "SM_C462863AFD826788",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_a_wall_window_w300_h400_ac.mesh",
+      "loaded_instances": 2127
+    },
+    {
+      "mesh": "SM_75C359765B5FB481",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_a_wall_w300_h400_aa.mesh",
+      "loaded_instances": 1954
+    },
+    {
+      "mesh": "SM_6E499BBB42F56C0C",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_w300_h400_ac.mesh",
+      "loaded_instances": 1766
+    },
+    {
+      "mesh": "SM_0E9AF77303C296FB",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_gf_w600_h400_aa.mesh",
+      "loaded_instances": 1764
+    },
+    {
+      "mesh": "SM_02336DA4D4EDE17A",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_w100_h400_ac.mesh",
+      "loaded_instances": 1473
+    },
+    {
+      "mesh": "SM_5049F2F99F36ED48",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_w300_h200_aa.mesh",
+      "loaded_instances": 1473
+    },
+    {
+      "mesh": "SM_B25204784B87A187",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_a_wall_w600_h400_ab.mesh",
+      "loaded_instances": 1047
+    },
+    {
+      "mesh": "SM_8176775AFE67E83C",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_w600_h400_ab.mesh",
+      "loaded_instances": 992
+    },
+    {
+      "mesh": "SM_0EDBC88E98238FF6",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_w1200_h800_ac.mesh",
+      "loaded_instances": 975
+    },
+    {
+      "mesh": "SM_C96045FA44760EA1",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_w200_h400_ac.mesh",
+      "loaded_instances": 914
+    },
+    {
+      "mesh": "SM_5C6EFBA6849E8C2F",
+      "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_a_wall_w300_h400_corner_convex_aa.mesh",
+      "loaded_instances": 529
+    },
+    {
+      "mesh": "SM_C08B6F737DA1CEB4",
+      "depot": "base\\environment\\architecture\\city_center\\corporate_plaza\\cct_cpz_building_a_d_6m_h2m.mesh",
+      "loaded_instances": 12545
+    },
+    {
+      "mesh": "SM_DF37CE86930E0B10",
+      "depot": "base\\environment\\architecture\\city_center\\corporate_plaza\\cct_cpz_building_a_f_6m_h4m.mesh",
+      "loaded_instances": 12049
+    },
+    {
+      "mesh": "SM_00CA3C7834FCFF68",
+      "depot": "base\\environment\\architecture\\city_center\\corporate_plaza\\cct_cpz_building_a_f_6m.mesh",
+      "loaded_instances": 11809
+    },
+    {
+      "mesh": "SM_6D608E3F3A549283",
+      "depot": "base\\environment\\architecture\\city_center\\corporate_plaza\\cct_cpz_building_a_f_3m_h4m.mesh",
+      "loaded_instances": 9168
+    },
+    {
+      "mesh": "SM_A14C8454C64C5149",
+      "depot": "base\\environment\\architecture\\city_center\\corporate_plaza\\cct_cpz_building_a_f_12m.mesh",
+      "loaded_instances": 6508
+    },
+    {
+      "mesh": "SM_9B09B2EB6DC684EE",
+      "depot": "base\\environment\\architecture\\city_center\\corporate_plaza\\cct_cpz_building_a_d_6m.mesh",
+      "loaded_instances": 3569
+    }
+  ]
+}

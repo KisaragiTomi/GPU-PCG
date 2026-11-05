@@ -1,0 +1,1749 @@
+{
+  "date": "2026-11-05",
+  "script_sha256": "6f63fe38b96c75fc3feb14f9b5d03a9e70a284967f3084e263dae3513a2bf0b8",
+  "scope": "2026-11-04 MCP loaded snapshot and separately cached on-disk package exports; no new editor query",
+  "limitations": [
+    "Name-based roles are heuristics, not surface labels or building counts.",
+    "AABB similarity is not geometric, semantic or anchor equivalence.",
+    "Package CSVs are heuristic binary parses, not a fresh engine enumeration; ambiguous multi-mesh rows are excluded.",
+    "CSV axis lengths lose reflection signs; no claim about negative-scale incidence.",
+    "Mesh counters use short mesh IDs; identical IDs at different package paths are grouped. Loaded-path aliases are listed separately.",
+    "No triangle planarity, GPU runtime, placement success or network benchmark was measured."
+  ],
+  "inputs": {
+    "nc_instances.csv": {
+      "path": "C:\\Users\\KLW\\AppData\\Local\\Temp\\claude\\5571ff4c9b08733f\\dc50114d-2744-413c-8156-0d397b7dfe93\\scratchpad\\nc_instances.csv",
+      "bytes": 439529650,
+      "rows": 1813316,
+      "excluded_ambiguous_or_unknown": 538330,
+      "accepted": 1274986
+    },
+    "nc_chunks.csv": {
+      "path": "C:\\Users\\KLW\\AppData\\Local\\Temp\\claude\\5571ff4c9b08733f\\dc50114d-2744-413c-8156-0d397b7dfe93\\scratchpad\\nc_chunks.csv",
+      "bytes": 1836940646,
+      "rows": 17383222,
+      "excluded_ambiguous_or_unknown": 0,
+      "accepted": 17383222
+    },
+    "scene_snapshot.json": {
+      "path": "Saved\\CodexNightCityAnalysis\\scene_snapshot.json",
+      "bytes": 25959661,
+      "sha256": "957a85327f1a123011b05826045384f2cb3e4a34a901efc741e40cc969478dd4"
+    },
+    "detail_snapshot.json": {
+      "path": "Saved\\CodexNightCityAnalysis\\detail_snapshot.json",
+      "bytes": 2478010,
+      "sha256": "4ad8230b9d875de9b3b07cd67a792fd4fad7f3571d1723303995891ca49bfb2c"
+    },
+    "nc_catalog.csv": {
+      "path": "C:\\Users\\KLW\\AppData\\Local\\Temp\\claude\\5571ff4c9b08733f\\dc50114d-2744-413c-8156-0d397b7dfe93\\scratchpad\\nc_catalog.csv",
+      "bytes": 8519343,
+      "sha256": "b45e3f60d65fc13b9147a2dae2a577a4af75997c7ffd405575063213ff7b35fa"
+    },
+    "nc_sizes.csv": {
+      "path": "C:\\Users\\KLW\\AppData\\Local\\Temp\\claude\\5571ff4c9b08733f\\dc50114d-2744-413c-8156-0d397b7dfe93\\scratchpad\\nc_sizes.csv",
+      "bytes": 1741265,
+      "sha256": "421ca7bd4c4be68e1b295bea9e2a58ac3beb49ee1c1bdc0caed014302f4c43a5"
+    }
+  },
+  "loaded_mcp": {
+    "all_meshes": 13329,
+    "all_instances": 1854671,
+    "exterior_name_proxy": {
+      "meshes": 2698,
+      "instances": 505379,
+      "top_k_percent": {
+        "10": 15.805,
+        "50": 35.093,
+        "100": 48.209,
+        "200": 63.068
+      },
+      "meshes_needed_for_percent": {
+        "50": 109,
+        "80": 435,
+        "90": 736,
+        "95": 1062
+      }
+    },
+    "roles": {
+      "canopy": {
+        "meshes": 260,
+        "instances": 40786,
+        "top_k_percent": {
+          "10": 49.269,
+          "50": 82.168,
+          "100": 93.265,
+          "200": 99.492
+        },
+        "meshes_needed_for_percent": {
+          "50": 11,
+          "80": 45,
+          "90": 79,
+          "95": 117
+        }
+      },
+      "corner": {
+        "meshes": 436,
+        "instances": 61430,
+        "top_k_percent": {
+          "10": 36.15,
+          "50": 70.304,
+          "100": 85.868,
+          "200": 96.127
+        },
+        "meshes_needed_for_percent": {
+          "50": 21,
+          "80": 77,
+          "90": 126,
+          "95": 180
+        }
+      },
+      "facade": {
+        "meshes": 636,
+        "instances": 151178,
+        "top_k_percent": {
+          "10": 19.239,
+          "50": 53.369,
+          "100": 72.589,
+          "200": 89.715
+        },
+        "meshes_needed_for_percent": {
+          "50": 45,
+          "80": 132,
+          "90": 203,
+          "95": 274
+        }
+      },
+      "pillar": {
+        "meshes": 172,
+        "instances": 36178,
+        "top_k_percent": {
+          "10": 47.311,
+          "50": 87.462,
+          "100": 97.471,
+          "200": 100.0
+        },
+        "meshes_needed_for_percent": {
+          "50": 12,
+          "80": 38,
+          "90": 57,
+          "95": 81
+        }
+      },
+      "other": {
+        "meshes": 349,
+        "instances": 94317,
+        "top_k_percent": {
+          "10": 69.76,
+          "50": 91.562,
+          "100": 96.522,
+          "200": 99.239
+        },
+        "meshes_needed_for_percent": {
+          "50": 5,
+          "80": 18,
+          "90": 43,
+          "95": 78
+        }
+      },
+      "balcony": {
+        "meshes": 55,
+        "instances": 4841,
+        "top_k_percent": {
+          "10": 69.097,
+          "50": 99.835,
+          "100": 100.0,
+          "200": 100.0
+        },
+        "meshes_needed_for_percent": {
+          "50": 5,
+          "80": 15,
+          "90": 23,
+          "95": 30
+        }
+      },
+      "roof": {
+        "meshes": 253,
+        "instances": 48608,
+        "top_k_percent": {
+          "10": 41.261,
+          "50": 83.591,
+          "100": 94.661,
+          "200": 99.589
+        },
+        "meshes_needed_for_percent": {
+          "50": 15,
+          "80": 43,
+          "90": 72,
+          "95": 104
+        }
+      },
+      "stairs": {
+        "meshes": 35,
+        "instances": 4935,
+        "top_k_percent": {
+          "10": 80.162,
+          "50": 100.0,
+          "100": 100.0,
+          "200": 100.0
+        },
+        "meshes_needed_for_percent": {
+          "50": 5,
+          "80": 10,
+          "90": 15,
+          "95": 18
+        }
+      },
+      "floor": {
+        "meshes": 115,
+        "instances": 25193,
+        "top_k_percent": {
+          "10": 69.257,
+          "50": 95.828,
+          "100": 99.841,
+          "200": 100.0
+        },
+        "meshes_needed_for_percent": {
+          "50": 4,
+          "80": 18,
+          "90": 33,
+          "95": 47
+        }
+      },
+      "door": {
+        "meshes": 104,
+        "instances": 2302,
+        "top_k_percent": {
+          "10": 58.167,
+          "50": 92.224,
+          "100": 99.826,
+          "200": 100.0
+        },
+        "meshes_needed_for_percent": {
+          "50": 7,
+          "80": 27,
+          "90": 45,
+          "95": 60
+        }
+      },
+      "window": {
+        "meshes": 283,
+        "instances": 35611,
+        "top_k_percent": {
+          "10": 37.048,
+          "50": 72.506,
+          "100": 89.096,
+          "200": 99.118
+        },
+        "meshes_needed_for_percent": {
+          "50": 20,
+          "80": 68,
+          "90": 105,
+          "95": 137
+        }
+      }
+    },
+    "named_kits": 32,
+    "named_kit_instances": 346610,
+    "top_kits": [
+      [
+        "cct_cpz_building_a",
+        103558
+      ],
+      [
+        "wbr_cha_building_b",
+        52054
+      ],
+      [
+        "wbr_cha_building_a",
+        36388
+      ],
+      [
+        "wat_lch_building_c",
+        33782
+      ],
+      [
+        "hey_rey_building_b",
+        21254
+      ],
+      [
+        "wat_lch_building_e",
+        18948
+      ],
+      [
+        "cct_cpz_building_c",
+        18219
+      ],
+      [
+        "wat_kab_building_c",
+        7760
+      ],
+      [
+        "wat_awt_building_a",
+        7484
+      ],
+      [
+        "wbr_cha_building_c",
+        7139
+      ],
+      [
+        "hey_rey_building_a",
+        6819
+      ],
+      [
+        "wat_lch_building_d",
+        5944
+      ]
+    ],
+    "facade_window_door_name_subset": {
+      "meshes": 1023,
+      "instances": 189091,
+      "top_k_percent": {
+        "10": 16.316,
+        "50": 45.446,
+        "100": 62.87,
+        "200": 80.4
+      },
+      "meshes_needed_for_percent": {
+        "50": 61,
+        "80": 197,
+        "90": 311,
+        "95": 427
+      }
+    },
+    "thin_bounds_subset": {
+      "meshes": 674,
+      "instances": 143900,
+      "top_k_percent": {
+        "10": 20.923,
+        "50": 52.478,
+        "100": 70.76,
+        "200": 87.664
+      },
+      "meshes_needed_for_percent": {
+        "50": 46,
+        "80": 144,
+        "90": 224,
+        "95": 303
+      }
+    },
+    "top_host_dimensions_5cm_bins": [
+      {
+        "width_depth_height_cm": [
+          600,
+          50,
+          400
+        ],
+        "instances": 16109
+      },
+      {
+        "width_depth_height_cm": [
+          300,
+          50,
+          400
+        ],
+        "instances": 9037
+      },
+      {
+        "width_depth_height_cm": [
+          300,
+          30,
+          400
+        ],
+        "instances": 5511
+      },
+      {
+        "width_depth_height_cm": [
+          600,
+          30,
+          400
+        ],
+        "instances": 5430
+      },
+      {
+        "width_depth_height_cm": [
+          600,
+          90,
+          200
+        ],
+        "instances": 3316
+      },
+      {
+        "width_depth_height_cm": [
+          600,
+          20,
+          400
+        ],
+        "instances": 3286
+      },
+      {
+        "width_depth_height_cm": [
+          600,
+          50,
+          450
+        ],
+        "instances": 2901
+      },
+      {
+        "width_depth_height_cm": [
+          200,
+          35,
+          120
+        ],
+        "instances": 2806
+      },
+      {
+        "width_depth_height_cm": [
+          300,
+          25,
+          400
+        ],
+        "instances": 2799
+      },
+      {
+        "width_depth_height_cm": [
+          600,
+          35,
+          400
+        ],
+        "instances": 2667
+      },
+      {
+        "width_depth_height_cm": [
+          605,
+          50,
+          450
+        ],
+        "instances": 2434
+      },
+      {
+        "width_depth_height_cm": [
+          300,
+          20,
+          400
+        ],
+        "instances": 2369
+      }
+    ],
+    "top_exterior_meshes": [
+      {
+        "mesh": "SM_C08B6F737DA1CEB4",
+        "instances": 12545,
+        "name": "cct_cpz_building_a_d_6m_h2m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          600.0,
+          28.58,
+          200.0
+        ]
+      },
+      {
+        "mesh": "SM_DF37CE86930E0B10",
+        "instances": 12049,
+        "name": "cct_cpz_building_a_f_6m_h4m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          599.99,
+          28.0,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_00CA3C7834FCFF68",
+        "instances": 11809,
+        "name": "cct_cpz_building_a_f_6m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          600.0,
+          24.0,
+          800.0
+        ]
+      },
+      {
+        "mesh": "SM_6D608E3F3A549283",
+        "instances": 9168,
+        "name": "cct_cpz_building_a_f_3m_h4m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          300.0,
+          24.0,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_A14C8454C64C5149",
+        "instances": 6508,
+        "name": "cct_cpz_building_a_f_12m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          1200.0,
+          24.0,
+          800.0
+        ]
+      },
+      {
+        "mesh": "SM_C351A38A42B01B7D",
+        "instances": 6229,
+        "name": "wbr_cha_building_b_wall_w600_h400_ac",
+        "kit": "wbr_cha_building_b",
+        "role": "facade",
+        "size_cm": [
+          600.0,
+          50.2,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_52BAE0963F7ED325",
+        "instances": 5963,
+        "name": "wbr_cha_building_b_roof_cornice_w_600_aa",
+        "kit": "wbr_cha_building_b",
+        "role": "roof",
+        "size_cm": [
+          600.37,
+          52.05,
+          60.1
+        ]
+      },
+      {
+        "mesh": "SM_16D75D1E0656E2BB",
+        "instances": 5750,
+        "name": "slats_wall_h100_l100_b",
+        "kit": null,
+        "role": "canopy",
+        "size_cm": [
+          102.0,
+          23.08,
+          102.0
+        ]
+      },
+      {
+        "mesh": "SM_EF7D6D6E176263CE",
+        "instances": 4941,
+        "name": "wbr_cha_building_b_wall_w300_h400_corner_convex_ac",
+        "kit": "wbr_cha_building_b",
+        "role": "corner",
+        "size_cm": [
+          350.2,
+          350.3,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_2C092F3E2A67DFCB",
+        "instances": 4911,
+        "name": "wbr_cha_building_a_floor_w600_aa",
+        "kit": "wbr_cha_building_a",
+        "role": "floor",
+        "size_cm": [
+          600.0,
+          600.0,
+          22.02
+        ]
+      },
+      {
+        "mesh": "SM_A3F718EA13ECB798",
+        "instances": 4481,
+        "name": "std_arr_industrial_a_canopy_l100_a",
+        "kit": null,
+        "role": "canopy",
+        "size_cm": [
+          100.0,
+          50.0,
+          30.55
+        ]
+      },
+      {
+        "mesh": "SM_5674B1687D5C13A5",
+        "instances": 3957,
+        "name": "wbr_cha_building_a_wall_window_w600_h400_ag",
+        "kit": "wbr_cha_building_a",
+        "role": "window",
+        "size_cm": [
+          600.29,
+          50.14,
+          399.99
+        ]
+      },
+      {
+        "mesh": "SM_8ACDCF9295DB9A27",
+        "instances": 3607,
+        "name": "wbr_cha_building_b_wall_w425_h200_a45_aa",
+        "kit": "wbr_cha_building_b",
+        "role": "corner",
+        "size_cm": [
+          424.26,
+          90.0,
+          200.0
+        ]
+      },
+      {
+        "mesh": "SM_9B09B2EB6DC684EE",
+        "instances": 3569,
+        "name": "cct_cpz_building_a_d_6m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          600.0,
+          24.29,
+          800.0
+        ]
+      },
+      {
+        "mesh": "SM_4507A02D9B5759BF",
+        "instances": 3539,
+        "name": "hey_rey_building_b_corner_concave_e",
+        "kit": "hey_rey_building_b",
+        "role": "corner",
+        "size_cm": [
+          102.24,
+          104.33,
+          401.29
+        ]
+      },
+      {
+        "mesh": "SM_5378F1E33EAF400D",
+        "instances": 3512,
+        "name": "cct_cpz_building_a_d_3m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          300.0,
+          24.29,
+          800.0
+        ]
+      },
+      {
+        "mesh": "SM_2AD19E7A082AF185",
+        "instances": 3316,
+        "name": "wbr_cha_building_b_wall_w600_h200_aa",
+        "kit": "wbr_cha_building_b",
+        "role": "facade",
+        "size_cm": [
+          600.0,
+          90.0,
+          200.0
+        ]
+      },
+      {
+        "mesh": "SM_0C758BA09C7796A8",
+        "instances": 3249,
+        "name": "large_steelframe_a_frame_12w_24h_a",
+        "kit": null,
+        "role": "pillar",
+        "size_cm": [
+          1209.84,
+          78.66,
+          2411.79
+        ]
+      },
+      {
+        "mesh": "SM_59E0CEA672F88D17",
+        "instances": 3043,
+        "name": "cct_cpz_building_a_f_3m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          300.0,
+          24.0,
+          800.0
+        ]
+      },
+      {
+        "mesh": "SM_9F1CDAD1D8D0C05F",
+        "instances": 2798,
+        "name": "std_arr_industrial_a_wall_gf_h100_l200_c",
+        "kit": null,
+        "role": "facade",
+        "size_cm": [
+          202.18,
+          34.6,
+          120.45
+        ]
+      },
+      {
+        "mesh": "SM_8E97AF2470E0BF6B",
+        "instances": 2795,
+        "name": "wat_lch_building_c_facade_c_w600_h400_ai",
+        "kit": "wat_lch_building_c",
+        "role": "facade",
+        "size_cm": [
+          600.0,
+          30.0,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_87B921116688F85C",
+        "instances": 2726,
+        "name": "wat_lch_building_b_ceiling_600_a",
+        "kit": "wat_lch_building_b",
+        "role": "floor",
+        "size_cm": [
+          599.64,
+          600.0,
+          19.62
+        ]
+      },
+      {
+        "mesh": "SM_4B3BFA00426A2D21",
+        "instances": 2649,
+        "name": "wat_lch_building_b_ceiling_300_a",
+        "kit": "wat_lch_building_b",
+        "role": "floor",
+        "size_cm": [
+          299.64,
+          300.0,
+          19.62
+        ]
+      },
+      {
+        "mesh": "SM_E1363DCB43968994",
+        "instances": 2437,
+        "name": "wbr_cha_building_a_floor_w300_aa",
+        "kit": "wbr_cha_building_a",
+        "role": "floor",
+        "size_cm": [
+          300.0,
+          300.0,
+          22.0
+        ]
+      },
+      {
+        "mesh": "SM_8632A6664AA282C2",
+        "instances": 2418,
+        "name": "wat_lch_building_c_facade_c_w300_h400_ai",
+        "kit": "wat_lch_building_c",
+        "role": "facade",
+        "size_cm": [
+          300.0,
+          30.0,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_35336904B2CBF2A1",
+        "instances": 2404,
+        "name": "hey_rey_building_b_wall_l300_d",
+        "kit": "hey_rey_building_b",
+        "role": "facade",
+        "size_cm": [
+          301.79,
+          50.41,
+          400.09
+        ]
+      },
+      {
+        "mesh": "SM_D5ECAB658C2D2675",
+        "instances": 2376,
+        "name": "wbr_cha_building_b_wall_gf_w600_h400_ac",
+        "kit": "wbr_cha_building_b",
+        "role": "facade",
+        "size_cm": [
+          602.78,
+          50.08,
+          450.0
+        ]
+      },
+      {
+        "mesh": "SM_2DB463E0180F1C70",
+        "instances": 2296,
+        "name": "cct_cpz_building_c_w600_wall_a",
+        "kit": "cct_cpz_building_c",
+        "role": "facade",
+        "size_cm": [
+          600.31,
+          21.27,
+          400.04
+        ]
+      },
+      {
+        "mesh": "SM_67B4985FA963BABB",
+        "instances": 2263,
+        "name": "wat_lch_building_c_facade_bottom_a",
+        "kit": "wat_lch_building_c",
+        "role": "facade",
+        "size_cm": [
+          599.99,
+          330.0,
+          60.38
+        ]
+      },
+      {
+        "mesh": "SM_86D572AD0625E2C0",
+        "instances": 2190,
+        "name": "wbr_cha_building_a_wall_w600_h400_aa",
+        "kit": "wbr_cha_building_a",
+        "role": "facade",
+        "size_cm": [
+          600.07,
+          50.26,
+          400.02
+        ]
+      }
+    ],
+    "distinct_asset_paths": 13331,
+    "short_id_aliases": {
+      "SM_3760CE34168E77F2": [
+        "/Game/BuildingGenerator/Cyberpunk2077/Meshes/37/SM_3760CE34168E77F2.SM_3760CE34168E77F2",
+        "/Game/BuildingGenerator/Cyberpunk2077/Recovery/CityStaticLeaves/Meshes/SM_3760CE34168E77F2.SM_3760CE34168E77F2"
+      ],
+      "SM_785281D5A39BE5B5": [
+        "/Game/BuildingGenerator/Cyberpunk2077/Meshes/78/SM_785281D5A39BE5B5.SM_785281D5A39BE5B5",
+        "/Game/BuildingGenerator/Cyberpunk2077/Recovery/CityStaticLeaves/Meshes/SM_785281D5A39BE5B5.SM_785281D5A39BE5B5"
+      ]
+    }
+  },
+  "package_exports": {
+    "all_meshes": 50703,
+    "all_instances": 18658208,
+    "exterior_name_proxy": {
+      "meshes": 5751,
+      "instances": 2515152,
+      "top_k_percent": {
+        "10": 8.002,
+        "50": 23.136,
+        "100": 33.71,
+        "200": 47.173
+      },
+      "meshes_needed_for_percent": {
+        "50": 227,
+        "80": 821,
+        "90": 1361,
+        "95": 1934
+      }
+    },
+    "roles": {
+      "other": {
+        "meshes": 855,
+        "instances": 274370,
+        "top_k_percent": {
+          "10": 45.705,
+          "50": 74.14,
+          "100": 85.824,
+          "200": 94.319
+        },
+        "meshes_needed_for_percent": {
+          "50": 13,
+          "80": 70,
+          "90": 135,
+          "95": 216
+        }
+      },
+      "pillar": {
+        "meshes": 325,
+        "instances": 270020,
+        "top_k_percent": {
+          "10": 43.736,
+          "50": 80.206,
+          "100": 93.387,
+          "200": 99.351
+        },
+        "meshes_needed_for_percent": {
+          "50": 14,
+          "80": 50,
+          "90": 81,
+          "95": 112
+        }
+      },
+      "corner": {
+        "meshes": 935,
+        "instances": 260513,
+        "top_k_percent": {
+          "10": 18.593,
+          "50": 48.333,
+          "100": 66.295,
+          "200": 84.028
+        },
+        "meshes_needed_for_percent": {
+          "50": 54,
+          "80": 171,
+          "90": 263,
+          "95": 358
+        }
+      },
+      "door": {
+        "meshes": 273,
+        "instances": 25393,
+        "top_k_percent": {
+          "10": 45.107,
+          "50": 78.707,
+          "100": 91.71,
+          "200": 99.216
+        },
+        "meshes_needed_for_percent": {
+          "50": 13,
+          "80": 54,
+          "90": 90,
+          "95": 128
+        }
+      },
+      "balcony": {
+        "meshes": 205,
+        "instances": 56512,
+        "top_k_percent": {
+          "10": 56.825,
+          "50": 90.324,
+          "100": 98.37,
+          "200": 99.991
+        },
+        "meshes_needed_for_percent": {
+          "50": 8,
+          "80": 29,
+          "90": 50,
+          "95": 69
+        }
+      },
+      "facade": {
+        "meshes": 1111,
+        "instances": 722489,
+        "top_k_percent": {
+          "10": 16.957,
+          "50": 42.234,
+          "100": 59.377,
+          "200": 78.367
+        },
+        "meshes_needed_for_percent": {
+          "50": 70,
+          "80": 214,
+          "90": 330,
+          "95": 441
+        }
+      },
+      "canopy": {
+        "meshes": 401,
+        "instances": 167181,
+        "top_k_percent": {
+          "10": 35.046,
+          "50": 74.132,
+          "100": 88.639,
+          "200": 97.513
+        },
+        "meshes_needed_for_percent": {
+          "50": 20,
+          "80": 66,
+          "90": 109,
+          "95": 156
+        }
+      },
+      "window": {
+        "meshes": 641,
+        "instances": 189293,
+        "top_k_percent": {
+          "10": 22.935,
+          "50": 59.272,
+          "100": 77.373,
+          "200": 92.205
+        },
+        "meshes_needed_for_percent": {
+          "50": 35,
+          "80": 112,
+          "90": 178,
+          "95": 241
+        }
+      },
+      "floor": {
+        "meshes": 319,
+        "instances": 146623,
+        "top_k_percent": {
+          "10": 53.461,
+          "50": 85.605,
+          "100": 95.255,
+          "200": 99.45
+        },
+        "meshes_needed_for_percent": {
+          "50": 9,
+          "80": 37,
+          "90": 65,
+          "95": 98
+        }
+      },
+      "roof": {
+        "meshes": 603,
+        "instances": 382840,
+        "top_k_percent": {
+          "10": 28.547,
+          "50": 67.493,
+          "100": 83.24,
+          "200": 94.676
+        },
+        "meshes_needed_for_percent": {
+          "50": 26,
+          "80": 86,
+          "90": 145,
+          "95": 206
+        }
+      },
+      "stairs": {
+        "meshes": 83,
+        "instances": 19918,
+        "top_k_percent": {
+          "10": 66.533,
+          "50": 98.323,
+          "100": 100.0,
+          "200": 100.0
+        },
+        "meshes_needed_for_percent": {
+          "50": 6,
+          "80": 16,
+          "90": 25,
+          "95": 35
+        }
+      }
+    },
+    "named_kits": 38,
+    "named_kit_instances": 1556499,
+    "top_kits": [
+      [
+        "wbr_cha_building_a",
+        208746
+      ],
+      [
+        "cct_cpz_building_a",
+        195507
+      ],
+      [
+        "wbr_cha_building_b",
+        172016
+      ],
+      [
+        "bls_ina_building_a",
+        107560
+      ],
+      [
+        "wat_lch_building_c",
+        94218
+      ],
+      [
+        "wat_kab_building_c",
+        79498
+      ],
+      [
+        "wat_lch_building_e",
+        72028
+      ],
+      [
+        "std_rcr_house_a",
+        61922
+      ],
+      [
+        "wat_kab_building_f",
+        54785
+      ],
+      [
+        "wat_kab_building_a",
+        54126
+      ],
+      [
+        "wbr_cha_building_c",
+        47281
+      ],
+      [
+        "hey_rey_building_b",
+        44407
+      ]
+    ],
+    "facade_window_door_name_subset": {
+      "meshes": 2025,
+      "instances": 937175,
+      "top_k_percent": {
+        "10": 13.18,
+        "50": 33.714,
+        "100": 48.586,
+        "200": 66.863
+      },
+      "meshes_needed_for_percent": {
+        "50": 107,
+        "80": 335,
+        "90": 532,
+        "95": 733
+      }
+    },
+    "thin_bounds_subset": {
+      "meshes": 1240,
+      "instances": 739938,
+      "top_k_percent": {
+        "10": 16.495,
+        "50": 40.655,
+        "100": 57.534,
+        "200": 76.342
+      },
+      "meshes_needed_for_percent": {
+        "50": 75,
+        "80": 232,
+        "90": 367,
+        "95": 502
+      }
+    },
+    "top_host_dimensions_5cm_bins": [
+      {
+        "width_depth_height_cm": [
+          600,
+          50,
+          400
+        ],
+        "instances": 48026
+      },
+      {
+        "width_depth_height_cm": [
+          300,
+          50,
+          400
+        ],
+        "instances": 29089
+      },
+      {
+        "width_depth_height_cm": [
+          300,
+          20,
+          400
+        ],
+        "instances": 28119
+      },
+      {
+        "width_depth_height_cm": [
+          300,
+          25,
+          400
+        ],
+        "instances": 27167
+      },
+      {
+        "width_depth_height_cm": [
+          300,
+          30,
+          400
+        ],
+        "instances": 22185
+      },
+      {
+        "width_depth_height_cm": [
+          600,
+          20,
+          400
+        ],
+        "instances": 20515
+      },
+      {
+        "width_depth_height_cm": [
+          600,
+          90,
+          200
+        ],
+        "instances": 20490
+      },
+      {
+        "width_depth_height_cm": [
+          305,
+          25,
+          405
+        ],
+        "instances": 19462
+      },
+      {
+        "width_depth_height_cm": [
+          900,
+          20,
+          400
+        ],
+        "instances": 13404
+      },
+      {
+        "width_depth_height_cm": [
+          600,
+          30,
+          400
+        ],
+        "instances": 12786
+      },
+      {
+        "width_depth_height_cm": [
+          300,
+          40,
+          400
+        ],
+        "instances": 12521
+      },
+      {
+        "width_depth_height_cm": [
+          600,
+          40,
+          400
+        ],
+        "instances": 12397
+      }
+    ],
+    "top_exterior_meshes": [
+      {
+        "mesh": "SM_66F6CF0FCDB1B0BA",
+        "instances": 28080,
+        "name": "wbr_cha_building_a_wall_pillar_aa",
+        "kit": "wbr_cha_building_a",
+        "role": "pillar",
+        "size_cm": [
+          51.0,
+          50.0,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_CD80F7E15647B9E1",
+        "instances": 23889,
+        "name": "cinder_block",
+        "kit": null,
+        "role": "other",
+        "size_cm": [
+          40.0,
+          20.0,
+          20.0
+        ]
+      },
+      {
+        "mesh": "SM_B6B69560EF73AC15",
+        "instances": 23100,
+        "name": "bls_ina_building_a_roof_l300_w300_a",
+        "kit": "bls_ina_building_a",
+        "role": "roof",
+        "size_cm": [
+          309.0,
+          305.0,
+          17.0
+        ]
+      },
+      {
+        "mesh": "SM_2AD19E7A082AF185",
+        "instances": 20490,
+        "name": "wbr_cha_building_b_wall_w600_h200_aa",
+        "kit": "wbr_cha_building_b",
+        "role": "facade",
+        "size_cm": [
+          600.0,
+          90.0,
+          200.0
+        ]
+      },
+      {
+        "mesh": "SM_E155533B5D80C8C8",
+        "instances": 19760,
+        "name": "protein_farm_a_segment_support_aa",
+        "kit": null,
+        "role": "pillar",
+        "size_cm": [
+          88.0,
+          2605.0,
+          1140.0
+        ]
+      },
+      {
+        "mesh": "SM_532C4542D46326CC",
+        "instances": 19462,
+        "name": "bls_ina_building_a_wall_l300_a",
+        "kit": "bls_ina_building_a",
+        "role": "facade",
+        "size_cm": [
+          304.0,
+          25.0,
+          405.0
+        ]
+      },
+      {
+        "mesh": "SM_72162758C37AEC06",
+        "instances": 18240,
+        "name": "protein_farm_a_segment_support_ac",
+        "kit": null,
+        "role": "pillar",
+        "size_cm": [
+          600.0,
+          2036.0,
+          963.0
+        ]
+      },
+      {
+        "mesh": "SM_6D608E3F3A549283",
+        "instances": 16156,
+        "name": "cct_cpz_building_a_f_3m_h4m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          300.0,
+          24.0,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_00CA3C7834FCFF68",
+        "instances": 16139,
+        "name": "cct_cpz_building_a_f_6m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          600.0,
+          24.0,
+          800.0
+        ]
+      },
+      {
+        "mesh": "SM_52BAE0963F7ED325",
+        "instances": 15940,
+        "name": "wbr_cha_building_b_roof_cornice_w_600_aa",
+        "kit": "wbr_cha_building_b",
+        "role": "roof",
+        "size_cm": [
+          600.0,
+          52.0,
+          60.0
+        ]
+      },
+      {
+        "mesh": "SM_DF37CE86930E0B10",
+        "instances": 15242,
+        "name": "cct_cpz_building_a_f_6m_h4m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          600.0,
+          28.0,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_AC9C60320C9213CB",
+        "instances": 15200,
+        "name": "protein_farm_a_segment_w600_l_1800_h1000_aa",
+        "kit": null,
+        "role": "other",
+        "size_cm": [
+          602.0,
+          1831.0,
+          951.0
+        ]
+      },
+      {
+        "mesh": "SM_75C359765B5FB481",
+        "instances": 15055,
+        "name": "wbr_cha_building_a_wall_w300_h400_aa",
+        "kit": "wbr_cha_building_a",
+        "role": "facade",
+        "size_cm": [
+          300.0,
+          50.0,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_BFA789F31A93794E",
+        "instances": 13800,
+        "name": "wat_lch_building_d_uf_aa",
+        "kit": "wat_lch_building_d",
+        "role": "facade",
+        "size_cm": [
+          300.0,
+          25.0,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_C08B6F737DA1CEB4",
+        "instances": 13615,
+        "name": "cct_cpz_building_a_d_6m_h2m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          600.0,
+          29.0,
+          200.0
+        ]
+      },
+      {
+        "mesh": "SM_0618818BFF6086B0",
+        "instances": 13323,
+        "name": "wbr_cha_building_a_support_beam_w600_h100_aa",
+        "kit": "wbr_cha_building_a",
+        "role": "pillar",
+        "size_cm": [
+          601.0,
+          51.0,
+          101.0
+        ]
+      },
+      {
+        "mesh": "SM_87B921116688F85C",
+        "instances": 12872,
+        "name": "wat_lch_building_b_ceiling_600_a",
+        "kit": "wat_lch_building_b",
+        "role": "floor",
+        "size_cm": [
+          600.0,
+          600.0,
+          20.0
+        ]
+      },
+      {
+        "mesh": "SM_C351A38A42B01B7D",
+        "instances": 12690,
+        "name": "wbr_cha_building_b_wall_w600_h400_ac",
+        "kit": "wbr_cha_building_b",
+        "role": "facade",
+        "size_cm": [
+          600.0,
+          50.0,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_E1363DCB43968994",
+        "instances": 12659,
+        "name": "wbr_cha_building_a_floor_w300_aa",
+        "kit": "wbr_cha_building_a",
+        "role": "floor",
+        "size_cm": [
+          300.0,
+          300.0,
+          22.0
+        ]
+      },
+      {
+        "mesh": "SM_D1C4BF410262E8FF",
+        "instances": 12235,
+        "name": "backwall_b_uf_roof_floor_300_a",
+        "kit": null,
+        "role": "roof",
+        "size_cm": [
+          300.0,
+          300.0,
+          20.0
+        ]
+      },
+      {
+        "mesh": "SM_14FE133D17C678E5",
+        "instances": 10945,
+        "name": "bls_ina_building_a_parapet_l300_a",
+        "kit": "bls_ina_building_a",
+        "role": "roof",
+        "size_cm": [
+          306.0,
+          31.0,
+          81.0
+        ]
+      },
+      {
+        "mesh": "SM_2C092F3E2A67DFCB",
+        "instances": 10396,
+        "name": "wbr_cha_building_a_floor_w600_aa",
+        "kit": "wbr_cha_building_a",
+        "role": "floor",
+        "size_cm": [
+          600.0,
+          600.0,
+          22.0
+        ]
+      },
+      {
+        "mesh": "SM_8176775AFE67E83C",
+        "instances": 9942,
+        "name": "wbr_cha_building_b_wall_w600_h400_ab",
+        "kit": "wbr_cha_building_b",
+        "role": "facade",
+        "size_cm": [
+          600.0,
+          40.0,
+          400.0
+        ]
+      },
+      {
+        "mesh": "SM_464D5A8271C2BA15",
+        "instances": 9618,
+        "name": "slats_wall_h400_l300_a",
+        "kit": null,
+        "role": "canopy",
+        "size_cm": [
+          304.0,
+          24.0,
+          406.0
+        ]
+      },
+      {
+        "mesh": "SM_F9A552737C7749D1",
+        "instances": 9300,
+        "name": "wat_lch_building_c_facade_top_w600",
+        "kit": "wat_lch_building_c",
+        "role": "roof",
+        "size_cm": [
+          600.0,
+          40.0,
+          110.0
+        ]
+      },
+      {
+        "mesh": "SM_A14C8454C64C5149",
+        "instances": 9115,
+        "name": "cct_cpz_building_a_f_12m",
+        "kit": "cct_cpz_building_a",
+        "role": "other",
+        "size_cm": [
+          1200.0,
+          24.0,
+          800.0
+        ]
+      },
+      {
+        "mesh": "SM_4507A02D9B5759BF",
+        "instances": 9013,
+        "name": "hey_rey_building_b_corner_concave_e",
+        "kit": "hey_rey_building_b",
+        "role": "corner",
+        "size_cm": [
+          102.0,
+          104.0,
+          401.0
+        ]
+      },
+      {
+        "mesh": "SM_388A39396BCC29CC",
+        "instances": 9005,
+        "name": "wbr_cha_building_b_floor_w600_aa",
+        "kit": "wbr_cha_building_b",
+        "role": "floor",
+        "size_cm": [
+          600.0,
+          600.0,
+          22.0
+        ]
+      },
+      {
+        "mesh": "SM_CA014AEA03A090A3",
+        "instances": 8867,
+        "name": "wat_kab_building_f_balcony_w300_ab",
+        "kit": "wat_kab_building_f",
+        "role": "balcony",
+        "size_cm": [
+          300.0,
+          70.0,
+          399.0
+        ]
+      },
+      {
+        "mesh": "SM_A7BD7693BB286DE6",
+        "instances": 8782,
+        "name": "hangar_a_support_h180_l600_a",
+        "kit": null,
+        "role": "pillar",
+        "size_cm": [
+          611.0,
+          16.0,
+          196.0
+        ]
+      }
+    ]
+  },
+  "package_scale_axis_lengths": {
+    "exterior_total": 2515152,
+    "nonunit": 992851,
+    "nonuniform": 811115,
+    "unit": 1522301,
+    "top_scales": [
+      [
+        [
+          1.0,
+          1.0,
+          1.0
+        ],
+        1521835
+      ],
+      [
+        [
+          1.0,
+          1.008,
+          1.0
+        ],
+        38224
+      ],
+      [
+        [
+          0.094,
+          0.094,
+          0.094
+        ],
+        34506
+      ],
+      [
+        [
+          0.5,
+          0.5,
+          0.5
+        ],
+        26495
+      ],
+      [
+        [
+          1.0,
+          0.5,
+          1.0
+        ],
+        12993
+      ],
+      [
+        [
+          0.32,
+          0.32,
+          0.32
+        ],
+        8026
+      ],
+      [
+        [
+          2.0,
+          2.0,
+          2.0
+        ],
+        8025
+      ],
+      [
+        [
+          1.0,
+          1.0,
+          0.5
+        ],
+        7618
+      ],
+      [
+        [
+          1.333,
+          1.333,
+          1.333
+        ],
+        7463
+      ],
+      [
+        [
+          1.007,
+          1.0,
+          1.0
+        ],
+        6974
+      ],
+      [
+        [
+          1.0,
+          1.0,
+          0.75
+        ],
+        6269
+      ],
+      [
+        [
+          1.0,
+          1.0,
+          2.0
+        ],
+        6180
+      ]
+    ]
+  },
+  "loaded_focus_scales": {
+    "count": 6229,
+    "top_scales": [
+      [
+        [
+          1.0,
+          1.0,
+          1.0
+        ],
+        5139
+      ],
+      [
+        [
+          2.0,
+          1.0,
+          1.0
+        ],
+        414
+      ],
+      [
+        [
+          1.978,
+          1.0,
+          1.0
+        ],
+        62
+      ],
+      [
+        [
+          1.0,
+          1.027,
+          0.903
+        ],
+        50
+      ],
+      [
+        [
+          1.105,
+          1.0,
+          1.0
+        ],
+        36
+      ],
+      [
+        [
+          1.0,
+          1.0,
+          1.14
+        ],
+        24
+      ],
+      [
+        [
+          1.0,
+          1.0,
+          1.43
+        ],
+        24
+      ],
+      [
+        [
+          1.102,
+          1.0,
+          1.0
+        ],
+        24
+      ],
+      [
+        [
+          0.832,
+          1.0,
+          1.0
+        ],
+        22
+      ],
+      [
+        [
+          1.0,
+          1.0,
+          1.071
+        ],
+        20
+      ],
+      [
+        [
+          1.192,
+          1.0,
+          1.0
+        ],
+        20
+      ],
+      [
+        [
+          2.0,
+          1.0,
+          0.813
+        ],
+        18
+      ]
+    ]
+  }
+}

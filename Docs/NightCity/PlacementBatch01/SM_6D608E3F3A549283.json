@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "data_revision": 1,
+  "profile_id": "d59ee116-035c-5450-ab08-7ea0f5cda174",
+  "source_mesh": "/Game/BuildingGenerator/Cyberpunk2077/Meshes/6D/SM_6D608E3F3A549283.SM_6D608E3F3A549283",
+  "mesh": "SM_6D608E3F3A549283",
+  "depot": "base\\environment\\architecture\\city_center\\corporate_plaza\\cct_cpz_building_a_f_3m_h4m.mesh",
+  "loaded_instances": 9168,
+  "source_geometry_hash": "67a2cc0e9e97cce0dd528b1ef07775368d92be3b476659639313843d45c02cd5",
+  "state": "Ready",
+  "review_notes": "Built from source LOD0. Multilayer opaque surfaces only; window/parallax/decal support excluded; forward projected blockers removed; 2 cm inset. Geometric candidate regions only. Building exterior/use, device footprint, substrate strength and neighbouring objects must be checked separately. No load-bearing certification.",
+  "regions": [
+    {
+      "region_id": "eea9cde7-19ea-53c0-9eab-6caefc8974fc",
+      "label": "Surface_04_00",
+      "positions": [
+        [
+          -294.4980163574211,
+          -24.00011384850129,
+          394.4964904785156
+        ],
+        [
+          -294.49801635696804,
+          -24.00011384850129,
+          5.503525257110596
+        ],
+        [
+          -5.501760959623681,
+          -23.99975263709441,
+          394.4964904785156
+        ],
+        [
+          -5.501760959623681,
+          -23.99975263709441,
+          5.503525257110596
+        ]
+      ],
+      "triangles": [
+        [
+          0,
+          1,
+          2
+        ],
+        [
+          2,
+          1,
+          3
+        ]
+      ],
+      "outward_normal": [
+        1.24988265465207e-06,
+        -0.9999999999992188,
+        0.0
+      ],
+      "preferred_up": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "allowed_categories": [
+        "WallMountedCandidate"
+      ],
+      "area_cm2": 112417.51032507137,
+      "source_triangle_ids": [
+        30,
+        31
+      ],
+      "plane_d": 23.99974576052007,
+      "basis": [
+        [
+          0.9999999999992188,
+          1.24988265465207e-06,
+          -0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "boundary": [
+        [
+          -5.501790956493921,
+          5.503525257110596
+        ],
+        [
+          -294.498046354064,
+          5.503525257110596
+        ],
+        [
+          -294.49804635451704,
+          394.4964904785156
+        ],
+        [
+          -5.501790956493921,
+          394.4964904785156
+        ],
+        [
+          -5.501790956493921,
+          5.503525257110596
+        ]
+      ],
+      "holes": [],
+      "support_area_cm2": 115145.46720754818,
+      "occluded_area_cm2": 0.0,
+      "checks": {
+        "outside_source_support_cm2": 0.0,
+        "projected_obstacle_overlap_cm2": 0.0,
+        "triangulation_gap_cm2": 0.0
+      }
+    }
+  ],
+  "rejections": {
+    "non_vertical_triangles": 24,
+    "unreliable_or_smoothed_normal_triangles": 4
+  },
+  "edge_margin_cm": 2.0,
+  "min_area_cm2": 2000.0,
+  "min_span_cm": 20.0,
+  "winding": "Profile triangles use cross(B-A,C-A) == outward normal; reverse index order for UE render mesh authoring."
+}

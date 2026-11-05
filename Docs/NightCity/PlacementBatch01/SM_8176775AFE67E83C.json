@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "data_revision": 1,
+  "profile_id": "eacd5071-fb4b-5f18-b4ef-e2aa0cd8e94e",
+  "source_mesh": "/Game/BuildingGenerator/Cyberpunk2077/Meshes/81/SM_8176775AFE67E83C.SM_8176775AFE67E83C",
+  "mesh": "SM_8176775AFE67E83C",
+  "depot": "base\\environment\\architecture\\westbrook\\charter_hill\\wbr_cha_building_b_wall_w600_h400_ab.mesh",
+  "loaded_instances": 992,
+  "source_geometry_hash": "b8539a7f01cceebbcaa0c23dfdc72118b8397e1648c4c5f20aea6e3889e0cdb5",
+  "state": "Ready",
+  "review_notes": "Built from source LOD0. Multilayer opaque surfaces only; window/parallax/decal support excluded; forward projected blockers removed; 2 cm inset. Geometric candidate regions only. Building exterior/use, device footprint, substrate strength and neighbouring objects must be checked separately. No load-bearing certification.",
+  "regions": [
+    {
+      "region_id": "d6b210de-eb79-58c5-8625-c7e262357aba",
+      "label": "Surface_00_00",
+      "positions": [
+        [
+          4.76837158203125e-05,
+          -36.49976348876953,
+          398.0
+        ],
+        [
+          4.76837158203125e-05,
+          -36.49976348876953,
+          2.006091594696045
+        ],
+        [
+          4.76837158203125e-05,
+          -2.0001907348632812,
+          2.006091594696045
+        ],
+        [
+          4.76837158203125e-05,
+          -2.0001907348632812,
+          398.0
+        ]
+      ],
+      "triangles": [
+        [
+          0,
+          1,
+          2
+        ],
+        [
+          0,
+          2,
+          3
+        ]
+      ],
+      "outward_normal": [
+        1.0,
+        -0.0,
+        0.0
+      ],
+      "preferred_up": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "allowed_categories": [
+        "WallMountedCandidate"
+      ],
+      "area_cm2": 13661.620653132471,
+      "source_triangle_ids": [
+        0,
+        1
+      ],
+      "plane_d": 4.76837158203125e-05,
+      "basis": [
+        [
+          0.0,
+          1.0,
+          -0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "boundary": [
+        [
+          -2.0001907348632812,
+          2.006091594696045
+        ],
+        [
+          -36.49976348876953,
+          2.006091594696045
+        ],
+        [
+          -36.49976348876953,
+          398.0
+        ],
+        [
+          -2.0001907348632812,
+          398.0
+        ],
+        [
+          -2.0001907348632812,
+          2.006091594696045
+        ]
+      ],
+      "holes": [],
+      "support_area_cm2": 15399.594577769312,
+      "occluded_area_cm2": 0.0,
+      "checks": {
+        "outside_source_support_cm2": 0.0,
+        "projected_obstacle_overlap_cm2": 0.0,
+        "triangulation_gap_cm2": 0.0
+      }
+    },
+    {
+      "region_id": "1d9c06e0-3490-5003-a8f4-90393038e7a6",
+      "label": "Surface_01_00",
+      "positions": [
+        [
+          -596.4984741210938,
+          -40.00019454956055,
+          396.49847412109375
+        ],
+        [
+          -596.4984741210938,
+          -40.00019454956055,
+          3.5015006065368652
+        ],
+        [
+          -3.50146484375,
+          -40.00019454956055,
+          3.5015006065368652
+        ],
+        [
+          -3.50146484375,
+          -40.00019454956055,
+          396.49847412109375
+        ]
+      ],
+      "triangles": [
+        [
+          0,
+          1,
+          2
+        ],
+        [
+          0,
+          2,
+          3
+        ]
+      ],
+      "outward_normal": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "preferred_up": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "allowed_categories": [
+        "WallMountedCandidate"
+      ],
+      "area_cm2": 233046.0299491797,
+      "source_triangle_ids": [
+        4,
+        9
+      ],
+      "plane_d": 40.00019454956055,
+      "basis": [
+        [
+          1.0,
+          0.0,
+          -0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "boundary": [
+        [
+          -596.4984741210938,
+          3.5015006065368652
+        ],
+        [
+          -596.4984741210938,
+          396.49847412109375
+        ],
+        [
+          -3.50146484375,
+          396.49847412109375
+        ],
+        [
+          -3.50146484375,
+          3.5015006065368652
+        ],
+        [
+          -596.4984741210938,
+          3.5015006065368652
+        ]
+      ],
+      "holes": [],
+      "support_area_cm2": 237006.0058803473,
+      "occluded_area_cm2": 0.0,
+      "checks": {
+        "outside_source_support_cm2": 0.0,
+        "projected_obstacle_overlap_cm2": 0.0,
+        "triangulation_gap_cm2": 0.0
+      }
+    },
+    {
+      "region_id": "ec9da6fd-ab8e-5a13-af7a-29d00e391ebb",
+      "label": "Surface_02_00",
+      "positions": [
+        [
+          -600.0,
+          -2.0001907348632812,
+          398.0
+        ],
+        [
+          -600.0,
+          -2.0001907348632812,
+          2.006091594696045
+        ],
+        [
+          -600.0,
+          -36.49976348876953,
+          2.006091594696045
+        ],
+        [
+          -600.0,
+          -36.49976348876953,
+          398.0
+        ]
+      ],
+      "triangles": [
+        [
+          0,
+          1,
+          2
+        ],
+        [
+          0,
+          2,
+          3
+        ]
+      ],
+      "outward_normal": [
+        -1.0,
+        -0.0,
+        0.0
+      ],
+      "preferred_up": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "allowed_categories": [
+        "WallMountedCandidate"
+      ],
+      "area_cm2": 13661.620653132471,
+      "source_triangle_ids": [
+        16,
+        17
+      ],
+      "plane_d": 600.0,
+      "basis": [
+        [
+          0.0,
+          -1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "boundary": [
+        [
+          36.49976348876953,
+          2.006091594696045
+        ],
+        [
+          2.0001907348632812,
+          2.006091594696045
+        ],
+        [
+          2.0001907348632812,
+          398.0
+        ],
+        [
+          36.49976348876953,
+          398.0
+        ],
+        [
+          36.49976348876953,
+          2.006091594696045
+        ]
+      ],
+      "holes": [],
+      "support_area_cm2": 15399.594577769312,
+      "occluded_area_cm2": 0.0,
+      "checks": {
+        "outside_source_support_cm2": 0.0,
+        "projected_obstacle_overlap_cm2": 0.0,
+        "triangulation_gap_cm2": 0.0
+      }
+    }
+  ],
+  "rejections": {
+    "unreliable_or_smoothed_normal_triangles": 4,
+    "non_vertical_triangles": 8,
+    "non_structural_material_triangles": 12
+  },
+  "edge_margin_cm": 2.0,
+  "min_area_cm2": 2000.0,
+  "min_span_cm": 20.0,
+  "winding": "Profile triangles use cross(B-A,C-A) == outward normal; reverse index order for UE render mesh authoring."
+}
