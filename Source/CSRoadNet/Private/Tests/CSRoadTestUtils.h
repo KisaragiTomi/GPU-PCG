@@ -8,6 +8,8 @@
 #include "Dom/JsonObject.h"
 #include "Misc/AutomationTest.h"
 
+class UCSGpuInstancedMeshComponent;
+
 namespace CSRoadTest
 {
 // The CS2 data in the plugin (CSRoadDataDir): prefabs.json, raw-prefabs.json and pieces.bin, and the
@@ -49,7 +51,9 @@ TArray<T*> Built(const ACSRoadNetworkActor* Network)
 	return Out;
 }
 
-// The eight corners of every batch building piece (an instance of its tile component's mesh), world space.
+// The eight corners of every instance's mesh box, world space; instances written on the GPU are read back (blocking).
+TArray<FVector3f> InstanceCorners(const UCSGpuInstancedMeshComponent* Component);
+// InstanceCorners of every batch building component (a mesh or a facade kit slot of a building tile).
 TArray<FVector3f> BuildingCorners(const ACSRoadNetworkActor* Network);
 
 // Element-wise comparison with an absolute tolerance scaled by magnitude; logs the first mismatches.

@@ -4,13 +4,15 @@
   UnrealEditor.exe <project> /PCGPlugins/CSRoadNet/L_RoadTierTest -ExecCmds="py <this file>" -RenderOffscreen
       "-ini:EditorSettings:[/Script/UnrealEd.EditorPerformanceSettings]:bThrottleCPUWhenNotForeground=False"
 
-Waits until the network has written every tile and baked the road tiles into Nanite, checks that every house is a GPU
-instance drawn by Nanite, and shoots each main road. Then, one edit at a time: moves a main road, rebuilds, shoots it
-and from above, moves it back, rebuilds and checks that the roads and every house are as they were. Needs the real
-editor (in UnrealEditor-Cmd the captures come out black). Nothing is saved.
+Waits until the network settles (no pending tile, every road tile baked into Nanite, the counts unchanged for 30
+ticks), checks that every house is a GPU instance drawn by Nanite, and shoots each main road. Then, one edit at a
+time: moves a main road as a drag would (UpdateSpline tells the network, which updates the tiles near it in its tick),
+waits for it to settle, shoots it and from above, moves it back, waits again and checks that the roads and every
+house are as they were. Needs the real editor (in UnrealEditor-Cmd the captures come out black); an editor in the
+background ticks the network only with that -ini setting. Nothing is saved.
 
 The last edit lays a main road on a small road at 14 degrees, the kind of junction that once hung the GPU: if the editor
-goes down there, summary.json still holds the edits before it (it is written after each).
+goes down there, summary.json still holds the edits before it (it is written after each step).
 
 Output: Saved/CS2RoadTierShots, <view>.png and summary.json. Prints CS2ROADTIERSHOT VERDICT OK or FAILED at the end.
 """
@@ -18,15 +20,19 @@ import json
 import math
 import os
 import time
+import traceback
 
 import unreal
 
-OUT_DIR = os.path.join(unreal.Paths.project_saved_dir(), "CS2RoadTierShots")
+OUT_DIR = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_saved_dir()), "CS2RoadTierShots")
 W, H = 1600, 900
 # Lumen keeps history across frames: one capture per frame until it settles.
 WARMUP = 48
-# Longest wait for the tiles (seconds).
-TILES_TIMEOUT = 240.0
+# Ticks the counts must stay as they are, and the longest wait for the network to settle (seconds): the first build
+# bakes every tile, an edit only those near it.
+STABLE_TICKS = 30
+FIRST_TIMEOUT = 300.0
+EDIT_TIMEOUT = 180.0
 LOCAL = unreal.SplineCoordinateSpace.LOCAL
 
 ACTORS = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
@@ -34,7 +40,7 @@ world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_wor
 level_actors = ACTORS.get_all_level_actors()
 network = next(a for a in level_actors if a.get_class().get_name() == "CSRoadNetworkActor")
 ROADS = {a.get_actor_label(): a for a in level_actors if a.get_class().get_name() == "CSRoadSplineActor"}
-KEYS = ("num_splines", "num_roads", "num_tiles", "num_nanite_tiles", "pending_tiles", "num_buildings", "num_bridge_piers", "tiles_rebuilt", "building_tiles_rebuilt", "build_milliseconds", "last_error")
+KEYS = ("num_splines", "num_roads", "num_tiles", "num_nanite_tiles", "pending_tiles", "num_buildings", "num_bridge_piers", "skipped_bridge_piers", "last_error")
 
 
 def stats():
@@ -99,7 +105,9 @@ def spline_points(road):
 def set_spline_points(road, points):
     spline = ROADS[road].get_editor_property("spline")
     for i, point in enumerate(points):
-        spline.set_location_at_spline_point(i, point, LOCAL, i + 1 == len(points))
+        spline.set_location_at_spline_point(i, point, LOCAL, False)
+    # UCSRoadSplineComponent::UpdateSpline tells the network, as a drag in the editor does: the local update path.
+    spline.update_spline()
 
 
 rt = unreal.RenderingLibrary.create_render_target2d(world, W, H, unreal.TextureRenderTargetFormat.RTF_RGBA8, unreal.LinearColor(0, 0, 0, 1), False)
@@ -114,7 +122,9 @@ comp.set_editor_property("capture_on_movement", False)
 comp.set_editor_property("always_persist_rendering_state", True)
 
 SUMMARY = {"build": None, "houses": None, "edits": [], "failed": []}
-STATE = {"start": time.time(), "logged": 0.0, "queue": [], "view": None, "frames": 0, "handle": None, "phase": "tiles", "edit": -1, "saved": None, "base_places": None, "base_roads": 0}
+STATE = {"start": time.time(), "logged": 0.0, "phase": "settle", "then": None, "settle_start": time.time(), "timeout": FIRST_TIMEOUT,
+         "stable": 0, "last": None, "queue": [], "after": None, "view": None, "frames": 0, "handle": None, "edit": -1, "saved": None,
+         "base_places": None, "base_roads": 0}
 
 
 def write_summary():
@@ -126,6 +136,37 @@ def write_summary():
 def fail(text):
     SUMMARY["failed"].append(text)
     unreal.log_error("CS2ROADTIERSHOT FAILED " + text)
+
+
+def finish():
+    unreal.unregister_slate_post_tick_callback(STATE["handle"])
+    write_summary()
+    ACTORS.destroy_actor(capture)
+    unreal.log("CS2ROADTIERSHOT VERDICT {}".format("FAILED: " + "; ".join(SUMMARY["failed"]) if SUMMARY["failed"] else "OK"))
+    unreal.SystemLibrary.quit_editor()
+
+
+def settle(then, timeout):
+    STATE.update(phase="settle", then=then, settle_start=time.time(), timeout=timeout, stable=0, last=None)
+
+
+def settled(s):
+    key = (s["num_roads"], s["num_buildings"], s["pending_tiles"], s["num_tiles"], s["num_nanite_tiles"])
+    STATE["stable"] = STATE["stable"] + 1 if key == STATE["last"] else 0
+    STATE["last"] = key
+    return s["num_tiles"] > 0 and s["pending_tiles"] == 0 and s["num_nanite_tiles"] >= s["num_tiles"] and STATE["stable"] >= STABLE_TICKS
+
+
+def shoot(views, after):
+    STATE.update(phase="shoot", queue=list(views), after=after)
+    begin_view(STATE["queue"].pop(0))
+
+
+def begin_view(view):
+    name, location, target = view
+    capture.set_actor_location_and_rotation(location, unreal.MathLibrary.find_look_at_rotation(location, target), False, True)
+    STATE["view"] = view
+    STATE["frames"] = 0
 
 
 def check_houses():
@@ -143,11 +184,15 @@ def check_houses():
     return places
 
 
-def begin_view(view):
-    name, location, target = view
-    capture.set_actor_location_and_rotation(location, unreal.MathLibrary.find_look_at_rotation(location, target), False, True)
-    STATE["view"] = view
-    STATE["frames"] = 0
+def base():
+    s = stats()
+    s["settled_after_s"] = round(time.time() - STATE["start"], 1)
+    SUMMARY["build"] = s
+    unreal.log("CS2ROADTIERSHOT settled {}".format(json.dumps(s, ensure_ascii=False)))
+    STATE["base_places"] = check_houses()
+    STATE["base_roads"] = s["num_roads"]
+    write_summary()
+    shoot(VIEWS, next_edit)
 
 
 def next_edit():
@@ -162,83 +207,75 @@ def next_edit():
     else:
         points = [p + metres(*edit["offset"]) for p in STATE["saved"]]
     set_spline_points(edit["road"], points)
-    network.rebuild()
-    moved = stats()
-    moved["houses_moved"] = len(set(house_places()) ^ set(STATE["base_places"]))
-    SUMMARY["edits"].append({"name": edit["name"], "road": edit["road"], "moved": moved})
-    write_summary()
-    unreal.log("CS2ROADTIERSHOT edit {} {}".format(edit["name"], json.dumps(moved, ensure_ascii=False)))
-    if moved["last_error"]:
-        fail("{}: {}".format(edit["name"], moved["last_error"]))
-    if moved["houses_moved"] == 0:
-        fail("{}: no house changed".format(edit["name"]))
-    STATE["queue"] = [(edit["name"] + "_top", TOP[1], TOP[2]), orbit(edit["name"] + "_close", edit["look"], 200.0, 40.0, 130.0)]
-    STATE["phase"] = "edit"
-    begin_view(STATE["queue"].pop(0))
+    settle(moved, EDIT_TIMEOUT)
 
 
-def undo_edit():
+def moved():
     edit = EDITS[STATE["edit"]]
-    set_spline_points(edit["road"], STATE["saved"])
-    network.rebuild()
-    back = stats()
-    places = house_places()
-    different = len(set(places) ^ set(STATE["base_places"]))
-    back["houses_different"] = different
-    SUMMARY["edits"][-1]["back"] = back
+    s = stats()
+    s["settled_after_s"] = round(time.time() - STATE["settle_start"], 1)
+    s["houses_moved"] = len(set(house_places()) ^ set(STATE["base_places"]))
+    SUMMARY["edits"].append({"name": edit["name"], "road": edit["road"], "moved": s})
     write_summary()
-    unreal.log("CS2ROADTIERSHOT back {} {}".format(edit["name"], json.dumps(back, ensure_ascii=False)))
-    if back["last_error"]:
-        fail("{} back: {}".format(edit["name"], back["last_error"]))
-    if different or back["num_roads"] != STATE["base_roads"]:
-        fail("{} back: {} houses differ, {} roads for {}".format(edit["name"], different, back["num_roads"], STATE["base_roads"]))
+    unreal.log("CS2ROADTIERSHOT edit {} {}".format(edit["name"], json.dumps(s, ensure_ascii=False)))
+    if s["houses_moved"] == 0:
+        fail("{}: no house changed".format(edit["name"]))
+    shoot([(edit["name"] + "_top", TOP[1], TOP[2]), orbit(edit["name"] + "_close", edit["look"], 200.0, 40.0, 130.0)], undo)
+
+
+def undo():
+    set_spline_points(EDITS[STATE["edit"]]["road"], STATE["saved"])
+    settle(back, EDIT_TIMEOUT)
+
+
+def back():
+    edit = EDITS[STATE["edit"]]
+    s = stats()
+    s["settled_after_s"] = round(time.time() - STATE["settle_start"], 1)
+    different = len(set(house_places()) ^ set(STATE["base_places"]))
+    s["houses_different"] = different
+    SUMMARY["edits"][-1]["back"] = s
+    write_summary()
+    unreal.log("CS2ROADTIERSHOT back {} {}".format(edit["name"], json.dumps(s, ensure_ascii=False)))
+    if different or s["num_roads"] != STATE["base_roads"]:
+        fail("{} back: {} houses differ, {} roads for {}".format(edit["name"], different, s["num_roads"], STATE["base_roads"]))
     next_edit()
 
 
-def finish():
-    unreal.unregister_slate_post_tick_callback(STATE["handle"])
-    write_summary()
-    ACTORS.destroy_actor(capture)
-    unreal.log("CS2ROADTIERSHOT VERDICT {}".format("FAILED: " + "; ".join(SUMMARY["failed"]) if SUMMARY["failed"] else "OK"))
-    unreal.SystemLibrary.quit_editor()
-
-
 def tick(delta):
-    now = time.time() - STATE["start"]
-    if STATE["phase"] == "tiles":
-        s = stats()
-        if now - STATE["logged"] > 10.0:
-            STATE["logged"] = now
-            unreal.log("CS2ROADTIERSHOT waiting {:.0f} s {}".format(now, json.dumps(s, ensure_ascii=False)))
-        settled = s["pending_tiles"] == 0 and s["num_tiles"] > 0 and s["num_nanite_tiles"] >= s["num_tiles"]
-        if not settled and now < TILES_TIMEOUT and not s["last_error"]:
+    try:
+        if STATE["phase"] == "settle":
+            s = stats()
+            now = time.time()
+            if now - STATE["logged"] > 10.0:
+                STATE["logged"] = now
+                unreal.log("CS2ROADTIERSHOT waiting {:.0f} s {}".format(now - STATE["settle_start"], json.dumps(s, ensure_ascii=False)))
+            if s["last_error"]:
+                fail("the build failed: " + s["last_error"])
+                finish()
+                return
+            if settled(s):
+                STATE["then"]()
+            elif now - STATE["settle_start"] > STATE["timeout"]:
+                fail("did not settle in {:.0f} s: {}".format(STATE["timeout"], json.dumps(s, ensure_ascii=False)))
+                finish()
             return
-        SUMMARY["build"] = s
-        unreal.log("CS2ROADTIERSHOT tiles {} after {:.0f} s {}".format("settled" if settled else "NOT settled", now, json.dumps(s, ensure_ascii=False)))
-        if not settled:
-            fail("the tiles did not settle: {}".format(json.dumps(s, ensure_ascii=False)))
-            finish()
+        comp.capture_scene()
+        STATE["frames"] += 1
+        if STATE["frames"] < WARMUP:
             return
-        STATE["base_places"] = check_houses()
-        STATE["base_roads"] = s["num_roads"]
-        STATE["queue"] = list(VIEWS)
-        STATE["phase"] = "views"
-        begin_view(STATE["queue"].pop(0))
-        return
-    comp.capture_scene()
-    STATE["frames"] += 1
-    if STATE["frames"] < WARMUP:
-        return
-    name = STATE["view"][0]
-    unreal.RenderingLibrary.export_render_target(world, rt, OUT_DIR, name + ".png")
-    unreal.log("CS2ROADTIERSHOT shot " + name)
-    if STATE["queue"]:
-        begin_view(STATE["queue"].pop(0))
-    elif STATE["phase"] == "views":
-        next_edit()
-    else:
-        undo_edit()
+        name = STATE["view"][0]
+        unreal.RenderingLibrary.export_render_target(world, rt, OUT_DIR, name + ".png")
+        unreal.log("CS2ROADTIERSHOT shot " + name)
+        if STATE["queue"]:
+            begin_view(STATE["queue"].pop(0))
+        else:
+            STATE["after"]()
+    except Exception:
+        fail(traceback.format_exc())
+        finish()
 
 
 unreal.log("CS2ROADTIERSHOT start " + json.dumps(stats(), ensure_ascii=False))
+STATE["then"] = base
 STATE["handle"] = unreal.register_slate_post_tick_callback(tick)

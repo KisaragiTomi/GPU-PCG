@@ -674,7 +674,7 @@ bool FCSRoadTilesNoWaitTest::RunTest(const FString& Parameters)
 		{
 			if (!Component->GetName().StartsWith(TEXT("BuildingTile"))) continue;
 			Buildings++;
-			Drawn += Component->GetInstanceCount() > 0 && Component->IsNaniteRenderPath() ? 1 : 0;
+			Drawn += (Component->GetInstanceCount() > 0 || Component->HasInstanceSourceGPU()) && Component->IsNaniteRenderPath() ? 1 : 0;
 		}
 		for (const TPair<FString, const UCSMesh*>& Pair : Meshes()) Replaced += Before.Contains(Pair.Key) && Before[Pair.Key] && Pair.Value && Before[Pair.Key] != Pair.Value ? 1 : 0;
 		TestTrue(Case + TEXT(": building tiles drawn"), Buildings > 0 && Drawn == Buildings);
@@ -696,7 +696,15 @@ bool FCSRoadTilesNoWaitTest::RunTest(const FString& Parameters)
 		Special->SetActorLocation(Place);
 		Special->Rebuild();
 	});
-	TestTrue(TEXT("city building moved: drawn where it went"), Special->Blocks->GetInstanceCount() > 0 && FVector::Dist2D(Special->Blocks->CalcBounds(Special->Blocks->GetComponentTransform()).Origin, Place) < 2000.0);
+	int32 SpecialSlots = 0;
+	int32 SpecialThere = 0;
+	for (const UCSGpuInstancedMeshComponent* Component : Special->Facade)
+	{
+		if (!Component || !Component->HasInstanceSourceGPU()) continue;
+		SpecialSlots++;
+		SpecialThere += FVector::Dist2D(Component->GetComponentLocation(), Place) < 2000.0 ? 1 : 0;
+	}
+	TestTrue(TEXT("city building moved: drawn where it went"), SpecialSlots > 0 && SpecialThere == SpecialSlots);
 
 	Network->bLocalUpdate = false;
 	Network->Rebuild();

@@ -86,6 +86,9 @@ struct FRoadLine
 	double Frontage = -1.0;
 	// It has plots along it: with FLotSettings::bFill, the plots of other roads stop halfway to them.
 	bool bZoned = true;
+	// As an anchor, the sides it has plots on: bit 0 to its right (looking along it from above, +Y right of +X), bit 1 to
+	// its left.
+	uint8 Sides = 3;
 };
 
 // The alleys with the stretches under the roads taken out: where an alley comes within a road's half
@@ -121,6 +124,8 @@ struct FLot
 // candidate at all.
 TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine>& Roads, const TArray<FPolygon>& Reserved, const FLotSettings& Settings,
 	TFunctionRef<bool(FLot&)> Place = [](FLot&) { return true; });
+// The id LayoutLots gives the plot in slot Slot (from 0 at the anchor's start) on its right (bRight) or left.
+uint64 LotId(uint64 AnchorId, int32 Slot, bool bRight);
 
 // How far past an input's bounds the centres of the plots it can change lie (cm). Every plot lies in its strip,
 // Frontage - Gap wide, from its front back by the deepest a plot can be; LotStrip is the strip's diagonal. A plot
@@ -155,7 +160,7 @@ struct FLotState
 };
 
 // A box standing on the ground (world cm): the middle of its bottom, which way its front faces, and its size along the
-// front (Width), back from it (Depth) and up (Height).
+// front (Width), back from it (Depth) and up (Height). Buildings are put together on it from a facade kit (CSCityFacade.h).
 struct FBlock
 {
 	FVector Base = FVector::ZeroVector;
@@ -170,15 +175,6 @@ FBlock LotBlock(const FLot& Lot);
 // The smallest box around a convex footprint with a side along one of the footprint's, from Base up by Height; its front
 // faces out of that side. Fewer than three corners: an empty box.
 FBlock HullBlock(const FPolygon& Footprint, double Base, double Height);
-
-// A module stretched to fill Block, as an instance's transform. Bounds is the module's local box; its +Y side is its
-// front and +X runs along it (as BuildingMeshFrontYaw's default).
-FTransform BlockPiece(const FBlock& Block, const FBox& Bounds);
-
-// A building put together from copies of a module (Bounds as BlockPiece's), appended to Out: the rule for which copies
-// make a building and where. For now one copy per storey, stretched to the block's footprint: as many storeys as come
-// nearest StoreyHeight (one at least), sharing Height evenly. An empty block: none.
-void AssembleBlock(const FBlock& Block, const FBox& Bounds, double StoreyHeight, TArray<FTransform>& Out);
 
 // Which of Count meshes stands on a plot: drawn from its id, so an edit elsewhere leaves it as it was.
 int32 LotMesh(const FLot& Lot, int32 Seed, int32 Count);

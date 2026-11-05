@@ -2,6 +2,7 @@
 
 #include "CSCityBuildingActor.h"
 #include "CSCityLayout.h"
+#include "CSCityStreetActor.h"
 #include "CSRoadNet.h"
 #include "CSRoadNetworkActor.h"
 #include "CSRoadSplineActor.h"
@@ -54,6 +55,12 @@ void ACSCityAlleyRegion::Generate()
 		if (Building->GetLevel() != GetLevel()) continue;
 		const CSCity::FPolygon Plot = Building->Reservation();
 		if (Plot.Num() >= 3 && CSCity::Overlap(Plot, Region)) Reserved.Add(Plot);
+	}
+	// And the ground the city streets keep.
+	for (ACSCityStreetActor* Street : TActorRange<ACSCityStreetActor>(World))
+	{
+		if (Street->GetLevel() != GetLevel()) continue;
+		for (const CSCity::FPolygon& Kept : Street->Reservations()) if (Kept.Num() >= 3 && CSCity::Overlap(Kept, Region)) Reserved.Add(Kept);
 	}
 	CSCity::FAlleyLayoutSettings Settings;
 	Settings.BlockSize = double(BlockSize) * 100.0;

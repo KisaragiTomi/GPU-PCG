@@ -1,9 +1,12 @@
 #include "CSCityBuildingActor.h"
 
+#include "CSCityFacade.h"
+#include "CSCityFacadeKit.h"
 #include "CSCityLayout.h"
+#include "CSCityStreetActor.h"
+#include "CSGpuInstancedMeshComponent.h"
 #include "CSRoadNetworkActor.h"
-#include "Components/InstancedStaticMeshComponent.h"
-#include "Engine/StaticMesh.h"
+#include "Hash/xxhash.h"
 
 UCSCityOutlineComponent::UCSCityOutlineComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -31,8 +34,6 @@ ACSCityBuildingActor::ACSCityBuildingActor()
 	PrimaryActorTick.bCanEverTick = false;
 	Outline = CreateDefaultSubobject<UCSCityOutlineComponent>(TEXT("Outline"));
 	RootComponent = Outline;
-	Blocks = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("Blocks"));
-	Blocks->SetupAttachment(Outline);
 }
 
 TArray<FVector2D> ACSCityBuildingActor::Footprint() const
@@ -79,41 +80,46 @@ TArray<FString> ACSCityBuildingActor::GetRoadPrefabOptions() const
 
 void ACSCityBuildingActor::Rebuild()
 {
-	if (!Blocks || IsTemplate() || !GetWorld()) return;
-	UStaticMesh* Piece = Module ? Module.Get() : DefaultModule();
-	if (Blocks->GetStaticMesh() != Piece) Blocks->SetStaticMesh(Piece);
-	TArray<FTransform> Pieces;
-	if (Piece)
+	if (!Outline || IsTemplate() || !GetWorld()) return;
+	UCSCityFacadeKit* Used = Kit ? Kit.Get() : UCSCityFacadeKit::Default();
+	if (!Used)
 	{
-		const FBox Bounds = Piece->GetBoundingBox();
-		CSCity::AssembleBlock(CSCity::HullBlock(Footprint(), GetActorLocation().Z, double(Height) * 100.0), Bounds, double(StoreyHeight) * 100.0, Pieces);
-		// The garage door: a slab 3 m wide and 2.6 m high, 10 cm into the wall and 20 cm out of it.
-		FVector Door;
-		FVector Facing;
-		if (GarageDoor(Door, Facing))
-		{
-			CSCity::FBlock Slab;
-			Slab.Base = Door + Facing * 5.0;
-			Slab.Front = FVector2D(Facing);
-			Slab.Width = 300.0;
-			Slab.Depth = 30.0;
-			Slab.Height = 260.0;
-			Pieces.Add(CSCity::BlockPiece(Slab, Bounds));
-		}
+		CSCity::ReleaseFacade(Facade, FacadeGpu);
+		NotifyNetwork();
+		return;
 	}
-	Blocks->ClearInstances();
-	Blocks->AddInstances(Pieces, /*bShouldReturnIndices*/ false, /*bWorldSpace*/ true);
+	CSCity::FFacadeBuilding Building;
+	Building.Block = CSCity::HullBlock(Footprint(), GetActorLocation().Z, double(Height) * 100.0);
+	// Its windows drawn from its actor name, the same in every session.
+	const FString Identity = GetPathName(GetOuter());
+	Building.Seed = uint32(FXxHash64::HashBuffer(*Identity, Identity.Len() * sizeof(TCHAR)).Hash);
+	Building.Shape = MassShape;
+	Building.Stack = MassStack;
+	// The door on the side facing the garage, where the garage is along it; else in the middle of the front.
+	FVector Door;
+	FVector Facing;
+	if (GarageDoor(Door, Facing))
+	{
+		CSCity::FBlock& Block = Building.Block;
+		const FVector2D Front = Block.Front.GetSafeNormal();
+		// The sides' outward directions: the front, the building's +X, the back, its -X.
+		const FVector2D Out[4] = { Front, FVector2D(Front.Y, -Front.X), -Front, FVector2D(-Front.Y, Front.X) };
+		int32 Best = 0;
+		for (int32 Side = 1; Side < 4; Side++) if (FVector2D::DotProduct(Out[Side], FVector2D(Facing)) > FVector2D::DotProduct(Out[Best], FVector2D(Facing))) Best = Side;
+		if (Best % 2 == 1) Swap(Block.Width, Block.Depth);
+		Block.Front = Out[Best];
+		const FVector2D Along(Block.Front.Y, -Block.Front.X);
+		Building.DoorAt = Block.Width > 0.0 ? FMath::Clamp((FVector2D(Door - Block.Base).Dot(Along) + 0.5 * Block.Width) / Block.Width, 0.0, 1.0) : 0.5;
+	}
+	CSCity::WriteFacade(*this, Outline, TEXT("Facade"), Building.Block.Base, *Used, MakeArrayView(&Building, 1), Facade, FacadeGpu, /*bFollowParent*/ true);
 	NotifyNetwork();
-}
-
-UStaticMesh* ACSCityBuildingActor::DefaultModule()
-{
-	return LoadObject<UStaticMesh>(nullptr, TEXT("/PCGPlugins/CSRoadNet/Houses/SM_CityBlock.SM_CityBlock"));
 }
 
 void ACSCityBuildingActor::NotifyNetwork() const
 {
 	if (ACSRoadNetworkActor* Network = ACSRoadNetworkActor::NetworkOf(this)) Network->RequestRebuild();
+	// With no network the streets make way themselves.
+	else ACSCityStreetActor::RelayoutStreets(GetLevel());
 }
 
 void ACSCityBuildingActor::OnConstruction(const FTransform& Transform)
@@ -125,12 +131,13 @@ void ACSCityBuildingActor::OnConstruction(const FTransform& Transform)
 void ACSCityBuildingActor::PostRegisterAllComponents()
 {
 	Super::PostRegisterAllComponents();
-	// A building saved before it had copies (or with the module gone) puts them where they go.
-	if (!IsTemplate() && GetWorld() && Blocks && Blocks->GetInstanceCount() == 0) Rebuild();
+	// The modules are made at build time and never saved: a loaded or copied building writes them.
+	if (!IsTemplate() && GetWorld() && Facade.Num() == 0) Rebuild();
 }
 
 void ACSCityBuildingActor::Destroyed()
 {
+	CSCity::ReleaseFacade(Facade, FacadeGpu);
 	NotifyNetwork();
 	Super::Destroyed();
 }

@@ -1,10 +1,12 @@
 #include "CSRoadMeshWrite.h"
 
+#include "Async/Async.h"
 #include "Async/TaskGraphInterfaces.h"
 #include "Containers/Ticker.h"
 #include "CSMesh.h"
 #include "CSMeshRenderComponent.h"
 #include "Engine/World.h"
+#include "RenderingThread.h"
 
 namespace
 {
@@ -90,6 +92,22 @@ void ShowLatest(UCSMeshRenderComponent* Component, UCSMesh* Latest, UCSMesh* Lan
 		Shown = Latest;
 	}
 	if (Landed && Landed != Shown && Landed != Latest && Landed->GetOuter() == Component) Landed->ReleaseDeferred();
+}
+
+void AfterRenderThread(UWorld* World, TFunction<void()> Land)
+{
+	GCSRoadMeshWrites++;
+	ENQUEUE_RENDER_COMMAND(CSRoadAfterRenderThread)([World = TWeakObjectPtr<UWorld>(World), Land = MoveTemp(Land)](FRHICommandListImmediate&) mutable
+	{
+		AsyncTask(ENamedThreads::GameThread, [World, Land = MoveTemp(Land)]() mutable
+		{
+			CSRoadMeshWrite_AtSafePoint(World, [Land = MoveTemp(Land)]()
+			{
+				GCSRoadMeshWrites--;
+				Land();
+			});
+		});
+	});
 }
 
 int32 MeshWritesInFlight()

@@ -74,14 +74,15 @@ double CSCityGarage_Distance(const TArray<FVector2d>& Outline, const FVector2d& 
 }
 
 bool CSCity::Driveway(const FGarage& Garage, const TArray<CSRoad::FSplineRoad>& Splines, const TArray<FObstacle>& Obstacles, CSRoad::FAssets& Assets,
-	CSRoad::FSplineRoad& Out, FString& OutWhy)
+	CSRoad::FSplineRoad& Out, FString& OutWhy, const CSRoad::FSplineRoad** OutTarget)
 {
 	if (!Assets.HasRoad(Garage.Prefab))
 	{
 		OutWhy = FString::Printf(TEXT("no road prefab \"%s\" for the driveway"), *Garage.Prefab);
 		return false;
 	}
-	// The nearest point of a main road in front of the door within reach, about every quarter metre, then closer around it.
+	// The nearest point of a main road (or with none, of a small road) in front of the door within reach, about every
+	// quarter metre, then closer around it.
 	const FVector2d Door = CSCityGarage_Flat(Garage.Door);
 	constexpr double MinCosine = 0.5;
 	double Best = Garage.Reach;
@@ -89,36 +90,43 @@ bool CSCity::Driveway(const FGarage& Garage, const TArray<CSRoad::FSplineRoad>& 
 	FCSCityGarage_Curve Curve;
 	double At = 0.0;
 	double Step = 0.0;
-	for (const CSRoad::FSplineRoad& Road : Splines)
+	for (const bool bSmall : { false, true })
 	{
-		const int32 Count = Road.Points.Num();
-		if (Road.bAlley || Count < 2 || Road.Arrive.Num() != Count || Road.Leave.Num() != Count || !Assets.HasRoad(Road.Prefab)) continue;
-		for (int32 I = 0; I < (Road.bClosed ? Count : Count - 1); I++)
+		if (Target) break;
+		for (const CSRoad::FSplineRoad& Road : Splines)
 		{
-			const FCSCityGarage_Curve Segment = CSCityGarage_Segment(Road, I);
-			// A Bezier lies within its control points' box: a box farther than the best so far holds nothing nearer.
-			FBox2d Box(ForceInit);
-			for (const FVector3d& Control : { Segment.A, Segment.B, Segment.C, Segment.D }) Box += CSCityGarage_Flat(Control);
-			if (Box.ComputeSquaredDistanceToPoint(Door) >= Best * Best) continue;
-			const int32 Steps = FMath::Clamp(FMath::CeilToInt32(Segment.Length() * 4.0), 8, 4096);
-			for (int32 S = 0; S <= Steps; S++)
+			const int32 Count = Road.Points.Num();
+			if (Road.bAlley != bSmall || Count < 2 || Road.Arrive.Num() != Count || Road.Leave.Num() != Count || !Assets.HasRoad(Road.Prefab)) continue;
+			for (int32 I = 0; I < (Road.bClosed ? Count : Count - 1); I++)
 			{
-				const FVector2d To = CSCityGarage_Flat(Segment.At(double(S) / Steps)) - Door;
-				const double Distance = To.Length();
-				if (Distance >= Best || Distance < UE_KINDA_SMALL_NUMBER || FVector2d::DotProduct(To / Distance, Garage.Facing) < MinCosine) continue;
-				Best = Distance;
-				Target = &Road;
-				Curve = Segment;
-				At = double(S) / Steps;
-				Step = 1.0 / Steps;
+				const FCSCityGarage_Curve Segment = CSCityGarage_Segment(Road, I);
+				// A Bezier lies within its control points' box: a box farther than the best so far holds nothing nearer.
+				FBox2d Box(ForceInit);
+				for (const FVector3d& Control : { Segment.A, Segment.B, Segment.C, Segment.D }) Box += CSCityGarage_Flat(Control);
+				if (Box.ComputeSquaredDistanceToPoint(Door) >= Best * Best) continue;
+				const int32 Steps = FMath::Clamp(FMath::CeilToInt32(Segment.Length() * 4.0), 8, 4096);
+				for (int32 S = 0; S <= Steps; S++)
+				{
+					const FVector2d To = CSCityGarage_Flat(Segment.At(double(S) / Steps)) - Door;
+					const double Distance = To.Length();
+					if (Distance >= Best || Distance < UE_KINDA_SMALL_NUMBER || FVector2d::DotProduct(To / Distance, Garage.Facing) < MinCosine) continue;
+					Best = Distance;
+					Target = &Road;
+					Curve = Segment;
+					At = double(S) / Steps;
+					Step = 1.0 / Steps;
+				}
 			}
 		}
 	}
+	if (OutTarget) *OutTarget = Target;
 	if (!Target)
 	{
-		OutWhy = FString::Printf(TEXT("no main road within %.0f m in front of the garage"), Garage.Reach);
+		OutWhy = FString::Printf(TEXT("no road within %.0f m in front of the garage"), Garage.Reach);
 		return false;
 	}
+	// A small road only when no main road is in reach: say so.
+	const FString Fallback = Target->bAlley ? FString::Printf(TEXT(" (no main road within %.0f m)"), Garage.Reach) : FString();
 	double Low = FMath::Max(At - Step, 0.0);
 	double High = FMath::Min(At + Step, 1.0);
 	for (int32 K = 0; K < 40; K++)
@@ -138,12 +146,13 @@ bool CSCity::Driveway(const FGarage& Garage, const TArray<CSRoad::FSplineRoad>& 
 	const double HalfWidth = double(Assets.Geometry(Garage.Prefab).m_DefaultWidth) * 0.5;
 	const double RoadHalfWidth = double(Assets.Geometry(Target->Prefab).m_DefaultWidth) * 0.5;
 	const double Length = (CSCityGarage_Flat(Foot) - Door).Length();
-	// The network cuts the driveway back to its half width and the clearance past the road's edge, and joins it on the
-	// centre line from there. A door nearer than that and the driveway's width opens onto the road: no driveway.
+	// The network cuts the driveway back to its half width and the clearance past a main road's edge, and joins it on the
+	// centre line from there; a small road's junction takes about as much. A door nearer than that and the driveway's
+	// width opens onto the road: no driveway.
 	if (Length < RoadHalfWidth + HalfWidth * 2.0 + Garage.Clearance)
 	{
 		Out = CSRoad::FSplineRoad();
-		OutWhy = FString::Printf(TEXT("opens onto %s, %.1f m from the door"), *Target->Name, Length);
+		OutWhy = FString::Printf(TEXT("opens onto %s%s, %.1f m from the door"), *Target->Name, *Fallback, Length);
 		return true;
 	}
 
@@ -176,6 +185,6 @@ bool CSCity::Driveway(const FGarage& Garage, const TArray<CSRoad::FSplineRoad>& 
 		}
 	}
 	Out = MoveTemp(Road);
-	OutWhy = FString::Printf(TEXT("joins %s, %.1f m from the door"), *Target->Name, Length);
+	OutWhy = FString::Printf(TEXT("joins %s%s, %.1f m from the door"), *Target->Name, *Fallback, Length);
 	return true;
 }

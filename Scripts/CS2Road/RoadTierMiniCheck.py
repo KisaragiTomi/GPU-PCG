@@ -37,14 +37,16 @@ failed = []
 # (name, what, road, new points in m or None, offset in m, garages joined while moved). What: a main road, the house
 # (moved by the offset) or its garage (turned to the side facing away from A). The offsets stay short of covering the
 # parallel small road (a main road reaches 21 m from a small road's centre line): that is the other case, a road covered
-# along its length. A dragged in leaves nothing in front of the garage.
+# along its length. A dragged in leaves nothing in front of the garage. Turned away from A, the garage faces the last
+# alley 23 m off and no main road: it joins the alley, which leads on to B and C (GARAGE_VIA is what its status says).
 EDITS = [
     ("a_in", "road", "A Drag me", [(0.0, 120.0), (100.0, 120.0), (200.0, 120.0)], None, 0),
     ("b_east", "road", "B Drawn", None, (10.0, 0.0), 1),
     ("c_west", "road", "C Crossing", None, (-10.0, 0.0), 1),
     ("house_east", "house", None, None, (25.0, 0.0), 1),
-    ("garage_back", "garage", None, None, None, 0),
+    ("garage_back", "garage", None, None, None, 1),
 ]
+GARAGE_VIA = {"garage_back": "(no main road within 50 m)"}
 
 
 def stats():
@@ -166,6 +168,8 @@ def step():
             failed.append("{}: the move changed nothing ({})".format(name, moved["last_error"] or "same counts"))
         if moved["num_joined_garages"] != joined:
             failed.append("{}: {} garages joined for {} ({})".format(name, moved["num_joined_garages"], joined, status))
+        if name in GARAGE_VIA and GARAGE_VIA[name] not in status:
+            failed.append("{}: the garage joins no small road ({})".format(name, status))
         shoot(name + "_top", "undo")
     elif nxt == "undo":
         if EDITS[STATE["edit"]][1] == "road":

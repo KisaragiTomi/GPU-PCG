@@ -31,20 +31,43 @@ void TickBuild(ACSRoadNetworkActor* Network)
 	CSRoad::LandMeshWrites();
 }
 
-TArray<FVector3f> BuildingCorners(const ACSRoadNetworkActor* Network)
+TArray<FVector3f> InstanceCorners(const UCSGpuInstancedMeshComponent* Component)
 {
 	TArray<FVector3f> Out;
-	for (const UCSGpuInstancedMeshComponent* Component : Built<UCSGpuInstancedMeshComponent>(Network))
+	if (!Component || !Component->BaseMesh) return Out;
+	const FBox Box = Component->BaseMesh->GetBoundingBox();
+	auto Corners = [&Out, &Box](TFunctionRef<FVector(const FVector&)> Place)
 	{
-		if (!Component->GetName().StartsWith(TEXT("BuildingTile")) || !Component->BaseMesh) continue;
-		const FBox Box = Component->BaseMesh->GetBoundingBox();
-		for (int32 I = 0; I < Component->GetInstanceCount(); I++)
+		for (int32 Corner = 0; Corner < 8; Corner++) Out.Add(FVector3f(Place(FVector((Corner & 1) ? Box.Max.X : Box.Min.X, (Corner & 2) ? Box.Max.Y : Box.Min.Y, (Corner & 4) ? Box.Max.Z : Box.Min.Z))));
+	};
+	if (Component->HasInstanceSourceGPU())
+	{
+		// Written on the GPU: the rows read back (blocking), each its axes and origin in component space.
+		TArray<FVector4f> Rows;
+		if (!Component->DebugReadInstanceRowsSync(Rows)) return Out;
+		const FTransform ToWorld = Component->GetComponentTransform();
+		for (int32 Row = 0; Row + CS_GPU_INSTANCED_ROW_FLOAT4S <= Rows.Num(); Row += CS_GPU_INSTANCED_ROW_FLOAT4S)
 		{
-			FTransform Transform;
-			Component->GetInstanceTransform(I, Transform, /*bWorldSpace*/ true);
-			for (int32 Corner = 0; Corner < 8; Corner++) Out.Add(FVector3f(Transform.TransformPosition(FVector((Corner & 1) ? Box.Max.X : Box.Min.X, (Corner & 2) ? Box.Max.Y : Box.Min.Y, (Corner & 4) ? Box.Max.Z : Box.Min.Z))));
+			const FVector X(Rows[Row]), Y(Rows[Row + 1]), Z(Rows[Row + 2]), O(Rows[Row + 3]);
+			Corners([&](const FVector& P) { return ToWorld.TransformPosition(X * P.X + Y * P.Y + Z * P.Z + O); });
 		}
+		return Out;
 	}
+	for (int32 I = 0; I < Component->GetInstanceCount(); I++)
+	{
+		FTransform Transform;
+		Component->GetInstanceTransform(I, Transform, /*bWorldSpace*/ true);
+		Corners([&Transform](const FVector& P) { return Transform.TransformPosition(P); });
+	}
+	return Out;
+}
+
+TArray<FVector3f> BuildingCorners(const ACSRoadNetworkActor* Network)
+{
+	// Facade writes still on their way, landed.
+	CSRoad::LandMeshWrites();
+	TArray<FVector3f> Out;
+	for (const UCSGpuInstancedMeshComponent* Component : Built<UCSGpuInstancedMeshComponent>(Network)) if (Component->GetName().StartsWith(TEXT("BuildingTile"))) Out.Append(InstanceCorners(Component));
 	return Out;
 }
 

@@ -1,17 +1,23 @@
-// A building placed by hand in the city layout: copies of a module on the smallest box around its outline's convex hull,
-// as the batch buildings are put together (CSCity::AssembleBlock), drawn as instances; it makes no mesh of its own. Its
-// footprint grown by Setback is the plot it reserves: alleys laid out afterwards
+// A building placed by hand in the city layout: a facade kit's modules round the smallest box about its outline's convex
+// hull, put together on the GPU as the batch buildings are (CSCityFacade.h), its door on the side its garage is on; it
+// makes no mesh of its own. Its footprint grown by Setback is the plot it reserves: alleys laid out afterwards
 // (ACSCityAlleyRegion) keep out of it, and a road network's batch buildings leave it free. A garage on it the network
-// joins to the nearest main road with a driveway it derives on every build (CSCityGarage).
+// joins to the nearest main road (or, none in reach, the nearest small road leading to one) with a driveway it derives on
+// every build (CSCityGarage).
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Components/SplineComponent.h"
 #include "GameFramework/Actor.h"
+#include "CSCityFacadeKit.h"
 #include "CSCityBuildingActor.generated.h"
 
-class UInstancedStaticMeshComponent;
-class UStaticMesh;
+class UCSCityFacadeKit;
+class UCSGpuInstancedMeshComponent;
+namespace CSCity
+{
+class FFacadeGpu;
+}
 
 /** The outline of an ACSCityBuildingActor: a closed loop; only its points' x and y count. */
 UCLASS(ClassGroup = (CS2Road))
@@ -45,16 +51,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building", meta = (ClampMin = "0", Units = "m"))
 	float Setback = 4.0f;
 
-	/** What it is put together from, as ACSRoadNetworkActor::BuildingModule. Empty: DefaultModule. */
-	UPROPERTY(EditAnywhere, Category = "City Building")
-	TObjectPtr<UStaticMesh> Module;
+	/** What it is put together from, as ACSRoadNetworkActor::BuildingKit (Height rounded to its storeys). Empty:
+	 *  UCSCityFacadeKit::Default. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building")
+	TObjectPtr<UCSCityFacadeKit> Kit;
 
-	/** The storeys Module's copies stack in come nearest this height. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building", meta = (ClampMin = "0.5", Units = "m"))
-	float StoreyHeight = 3.0f;
+	/** Its footprint on the kit's bay grid. Auto: drawn from the kit's shape weights and the building's name. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building")
+	ECSCityMassShape MassShape = ECSCityMassShape::Auto;
+
+	/** How its upper storeys sit on the lower ones. Auto: drawn from the kit's chances and the building's name. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building")
+	ECSCityMassStack MassStack = ECSCityMassStack::Auto;
 
 	/** A garage: the road network joins it to the nearest main road in front of it (within GarageReach) with a driveway of
-	 *  GarageRoad, which batch buildings keep clear of but do not line. */
+	 *  GarageRoad, which batch buildings keep clear of but do not line. With no main road there, to the nearest small road
+	 *  in front of it, which counts as joined when it leads on to a main road. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building|Garage")
 	bool bHasGarage = false;
 
@@ -67,17 +79,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building|Garage", meta = (GetOptions = "GetRoadPrefabOptions", EditCondition = "bHasGarage"))
 	FString GarageRoad = TEXT("Alley");
 
-	/** How far from the door a main road may be for the garage to join it: a driveway no longer than that. */
+	/** How far from the door a road may be for the garage to join it: a driveway no longer than that. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building|Garage", meta = (ClampMin = "1", Units = "m", EditCondition = "bHasGarage"))
 	float GarageReach = 50.0f;
 
-	/** What the road network made of the garage when it last built: the road it joins, or why it joins none. */
+	/** What the road network made of the garage when it last built: the road it joins (a small road: and the main road it
+	 *  leads to), or why it joins none. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "City Building|Garage")
 	FString GarageStatus;
 
-	/** The module's copies (and the garage door's). */
-	UPROPERTY(VisibleAnywhere, Category = "City Building")
-	TObjectPtr<UInstancedStaticMeshComponent> Blocks;
+	/** The kit's modules, a component per slot (null where the kit has none), made when it builds. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "City Building")
+	TArray<TObjectPtr<UCSGpuInstancedMeshComponent>> Facade;
 
 	// World space (cm), counter-clockwise from above.
 	TArray<FVector2D> Footprint() const;
@@ -87,12 +100,9 @@ public:
 	// without a garage or a footprint.
 	bool GarageDoor(FVector& OutDoor, FVector& OutFacing) const;
 
-	// Puts the copies where they go again, and tells the road network its plot may have moved.
+	// Writes its modules again (drawn a frame or two later, no wait for the render thread), and tells the road network its
+	// plot may have moved.
 	void Rebuild();
-
-	// What buildings are put together from when nothing else is set: /PCGPlugins/CSRoadNet/Houses/SM_CityBlock, a 1 m box
-	// with Nanite on (Scripts/CS2Road/MakeCityBlock.py makes it).
-	static UStaticMesh* DefaultModule();
 
 	UFUNCTION()
 	TArray<FString> GetRoadPrefabOptions() const;
@@ -106,5 +116,7 @@ public:
 #endif
 
 private:
+	TSharedPtr<CSCity::FFacadeGpu> FacadeGpu;
+
 	void NotifyNetwork() const;
 };

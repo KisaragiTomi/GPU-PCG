@@ -4,11 +4,14 @@
 
 #include "CSCityAlleyRegion.h"
 #include "CSCityBuildingActor.h"
+#include "CSCityFacade.h"
+#include "CSCityFacadeKit.h"
 #include "CSCityLayout.h"
 #include "CSGpuInstancedMeshComponent.h"
 #include "CSGpuInstancedNaniteComponent.h"
 #include "CSMesh.h"
 #include "CSMeshRenderComponent.h"
+#include "CSRoadMeshWrite.h"
 #include "CSRoadNetworkActor.h"
 #include "CSRoadSplineActor.h"
 #include "CSRoadSplineNetwork.h"
@@ -56,12 +59,19 @@ bool CSCityTests_SameLots(const TArray<CSCity::FLot>& A, const TArray<CSCity::FL
 	return true;
 }
 
-// Each building tile component by name, with what changes when its instances are written: the component made anew, or
-// its instances packed again.
+// Each building tile (its components' name without the number), with what changes when its instances are written: a
+// component made anew, or its instances packed again.
 TMap<FString, uint32> CSCityTests_BuildingSerials(ACSRoadNetworkActor* Network)
 {
+	// Writes still on their way count once landed.
+	CSRoad::LandMeshWrites();
 	TMap<FString, uint32> Out;
-	for (const UCSGpuInstancedMeshComponent* Component : CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network)) if (Component->GetName().StartsWith(TEXT("BuildingTile"))) Out.Add(Component->GetName(), HashCombine(GetTypeHash(Component), uint32(Component->GetInstancePackSerial())));
+	for (const UCSGpuInstancedMeshComponent* Component : CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network))
+	{
+		if (!Component->GetName().StartsWith(TEXT("BuildingTile"))) continue;
+		uint32& Serial = Out.FindOrAdd(Component->GetFName().GetPlainNameString());
+		Serial = HashCombine(Serial, HashCombine(GetTypeHash(Component), uint32(Component->GetInstancePackSerial())));
+	}
 	return Out;
 }
 
@@ -211,75 +221,127 @@ bool FCSCityLotInstanceTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// A building put together from copies of a module: on each plot the copies fill the Width by Depth rectangle on its
-// front, from its base up by its height, in storeys stacked without gap or overlap, as many as come nearest the storey
-// height; the module's +Y side faces the road; any module box (a pivot off the middle, a flat one) fills it the same.
-// The smallest box around a hull holds it and is the hull for a rectangle.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityAssembleTest, "PCGPlugins.CSRoadNet.City.Assemble",
+namespace
+{
+// A tier's footprint counted as the layout should see it: cells, outline edges (one per cell side facing out), outer
+// corners (a diagonal touch counts two) and inner corners.
+struct FCSCityTestsOutline
+{
+	int32 Cells = 0;
+	int32 Edges = 0;
+	int32 Outer = 0;
+	int32 Inner = 0;
+};
+
+FCSCityTestsOutline CSCityTests_Outline(const CSCity::FFacadeMassing& M, int32 Tier)
+{
+	FCSCityTestsOutline Out;
+	for (int32 J = 0; J < M.GridY; J++)
+	{
+		for (int32 I = 0; I < M.GridX; I++)
+		{
+			if (!M.At(Tier, I, J)) continue;
+			Out.Cells++;
+			Out.Edges += int32(!M.At(Tier, I + 1, J)) + int32(!M.At(Tier, I - 1, J)) + int32(!M.At(Tier, I, J + 1)) + int32(!M.At(Tier, I, J - 1));
+		}
+	}
+	for (int32 VY = 0; VY <= M.GridY; VY++)
+	{
+		for (int32 VX = 0; VX <= M.GridX; VX++)
+		{
+			const bool A = M.At(Tier, VX - 1, VY - 1);
+			const bool B = M.At(Tier, VX, VY - 1);
+			const bool C = M.At(Tier, VX - 1, VY);
+			const bool D = M.At(Tier, VX, VY);
+			const int32 N = int32(A) + int32(B) + int32(C) + int32(D);
+			if (N == 1) Out.Outer++;
+			else if (N == 2 && A == D) Out.Outer += 2;
+			else if (N == 3) Out.Inner++;
+		}
+	}
+	return Out;
+}
+
+CSCity::FFacadeKitShape CSCityTests_Kit()
+{
+	CSCity::FFacadeKitShape Kit;
+	for (bool& bHas : Kit.bHas) bHas = true;
+	Kit.Bay = 300.0;
+	Kit.Storey = 400.0;
+	Kit.Corner = 40.0;
+	Kit.Parapet = 110.0;
+	return Kit;
+}
+}
+
+// A box building's cells from a facade kit: whole storeys nearest its height (one at least), a grid of bays nearest the
+// bay width, the end bays giving the corner pieces their width, the door in the front bay asked for, the corners a storey
+// at a time and once more for the parapet, a parapet bay over each top bay and a roof tile over each bay; a slot the kit
+// leaves empty takes none of it. A ground storey of its own height lifts the storeys above. The smallest box around a hull
+// holds it and is the hull for a rectangle.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityFacadeLayoutTest, "PCGPlugins.CSRoadNet.City.FacadeLayout",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FCSCityAssembleTest::RunTest(const FString& Parameters)
+bool FCSCityFacadeLayoutTest::RunTest(const FString& Parameters)
 {
-	CSCity::FLotSettings Settings;
-	const TArray<CSCity::FRoadLine> Streets = { CSCityTests_Street(1, FVector(0.0, 0.0, 300.0), FVector(16000.0, 0.0, 300.0), 400.0), CSCityTests_Street(2, FVector(30000.0, 0.0, 300.0), FVector(42000.0, 9000.0, 300.0), 800.0) };
-	const TArray<CSCity::FLot> Lots = CSCity::LayoutLots(Streets, Streets, {}, Settings);
-	if (!TestTrue(TEXT("plots laid out"), Lots.Num() >= 8)) return false;
-
-	const FBox Modules[] = { FBox(FVector(-50.0), FVector(50.0)), FBox(FVector(-12.0, -1200.0, 34.0), FVector(1188.0, -400.0, 334.0)) };
-	const double StoreyHeight = 300.0;
-	for (const FBox& Bounds : Modules)
+	const CSCity::FFacadeKitShape Kit = CSCityTests_Kit();
+	CSCity::FFacadeBuilding Building;
+	Building.Block.Width = 1240.0;
+	Building.Block.Depth = 680.0;
+	Building.Block.Height = 1300.0;
+	Building.Shape = ECSCityMassShape::Box;
+	Building.Stack = ECSCityMassStack::None;
+	const CSCity::FFacadeLayout Full = CSCity::LayoutFacade(Kit, Building);
+	TestEqual(TEXT("storeys: nearest the height"), Full.Massing.Storeys, 3);
+	TestEqual(TEXT("front bays: nearest 3 m"), Full.Massing.GridX, 4);
+	TestEqual(TEXT("side bays"), Full.Massing.GridY, 2);
+	TestTrue(TEXT("a box, one tier"), Full.Massing.Shape == ECSCityMassShape::Box && Full.Massing.Stack == ECSCityMassStack::None && Full.Massing.Tiers.Num() == 1);
+	TestEqual(TEXT("facade cells"), Full.FacadeCells, 3u * 12u);
+	TestEqual(TEXT("ground cells"), Full.GroundCells, 12u);
+	TestEqual(TEXT("corners: a storey at a time and the parapet's"), Full.Corners, 4u * 4u);
+	TestEqual(TEXT("no inner corners"), Full.InnerCorners, 0u);
+	TestEqual(TEXT("parapet bays"), Full.Parapets, 12u);
+	TestEqual(TEXT("roof tiles"), Full.Roofs, 8u);
+	TestEqual(TEXT("door: the front's middle bay"), Full.DoorCell, 2);
+	TestEqual(TEXT("threads"), Full.Threads(), 36u + 16u + 12u + 8u);
+	// The end bays give the corner piece its width; the others are a bay each.
+	for (const CSCity::FFacadeRun& Run : Full.Runs)
 	{
-		int32 Outside = 0;
-		int32 StoreysOff = 0;
-		int32 StackOff = 0;
-		int32 FrontOff = 0;
-		int32 Pieces = 0;
-		for (const CSCity::FLot& Lot : Lots)
-		{
-			TArray<FTransform> Out;
-			CSCity::AssembleBlock(CSCity::LotBlock(Lot), Bounds, StoreyHeight, Out);
-			Pieces += Out.Num();
-			StoreysOff += Out.Num() == FMath::Max(1, FMath::RoundToInt32(Lot.Height / StoreyHeight)) ? 0 : 1;
-			const CSCity::FPolygon Kept = CSCity::Grow(Lot.Corners, 1.0);
-			double Top = Lot.Base;
-			for (const FTransform& Piece : Out)
-			{
-				double Bottom = TNumericLimits<double>::Max();
-				double High = TNumericLimits<double>::Lowest();
-				FBox2D Plan(ForceInit);
-				for (const FVector& Corner : CSCityTests_Corners(Bounds, Piece))
-				{
-					Outside += CSCity::Contains(Kept, FVector2D(Corner)) ? 0 : 1;
-					Bottom = FMath::Min(Bottom, Corner.Z);
-					High = FMath::Max(High, Corner.Z);
-					const FVector2D Local(FVector2D(Corner - FVector(Lot.Centre, 0.0)).Dot(FVector2D(-Lot.Front.Y, Lot.Front.X)), FVector2D(Corner - FVector(Lot.Centre, 0.0)).Dot(Lot.Front));
-					Plan += Local;
-				}
-				// Each storey on the last, the plot's rectangle in plan.
-				StackOff += FMath::IsNearlyEqual(Bottom, Top, 0.01) && Plan.Min.Equals(FVector2D(-Lot.Width, -Lot.Depth) * 0.5, 0.01) && Plan.Max.Equals(FVector2D(Lot.Width, Lot.Depth) * 0.5, 0.01) ? 0 : 1;
-				Top = High;
-				const FVector Front = Piece.TransformVectorNoScale(FVector::YAxisVector);
-				FrontOff += FVector2D(Front).Equals(Lot.Front, 1e-6) ? 0 : 1;
-			}
-			StackOff += FMath::IsNearlyEqual(Top, Lot.Base + Lot.Height, 0.01) ? 0 : 1;
-		}
-		const FString Case = FString::Printf(TEXT("module %s"), *Bounds.ToString());
-		TestTrue(Case + TEXT(": pieces"), Pieces > Lots.Num());
-		TestEqual(Case + TEXT(": corners outside the plot"), Outside, 0);
-		TestEqual(Case + TEXT(": storey counts"), StoreysOff, 0);
-		TestEqual(Case + TEXT(": not stacked on the plot's rectangle up to its height"), StackOff, 0);
-		TestEqual(Case + TEXT(": not facing the road"), FrontOff, 0);
+		if (Run.Kind != CSCity::EFacadeRun::Facade) continue;
+		TestTrue(TEXT("facade run: trimmed at both outer corners"), Run.bTrimStart && Run.bTrimEnd);
+		TestTrue(TEXT("facade run: the side's bays"), Run.Count == ((Run.Side & 1) == 0 ? 4 : 2) && FMath::IsNearlyEqual(Run.Cell, (Run.Side & 1) == 0 ? 310.0 : 340.0, 0.01));
 	}
 
-	TArray<FTransform> None;
-	CSCity::AssembleBlock(CSCity::FBlock(), Modules[0], StoreyHeight, None);
-	CSCity::AssembleBlock(CSCity::HullBlock({ FVector2D(0.0), FVector2D(1.0, 0.0) }, 0.0, 1000.0), Modules[0], StoreyHeight, None);
-	TestEqual(TEXT("an empty box: no pieces"), None.Num(), 0);
-	TArray<FTransform> Low;
-	CSCity::FLot Short = Lots[0];
-	Short.Height = 100.0;
-	CSCity::AssembleBlock(CSCity::LotBlock(Short), Modules[0], StoreyHeight, Low);
-	TestEqual(TEXT("lower than a storey: one"), Low.Num(), 1);
+	CSCity::FFacadeBuilding NoDoor = Building;
+	NoDoor.DoorAt = -1.0;
+	TestTrue(TEXT("no door asked for: none"), CSCity::LayoutFacade(Kit, NoDoor).DoorCell == INDEX_NONE && CSCity::LayoutFacade(Kit, NoDoor).Doors == 0u);
+	NoDoor.DoorAt = 0.0;
+	TestEqual(TEXT("door at the start: the first bay"), CSCity::LayoutFacade(Kit, NoDoor).DoorCell, 0);
+
+	CSCity::FFacadeKitShape Bare = Kit;
+	Bare.bHas[int32(CSCity::EFacadeSlot::Corner)] = false;
+	Bare.bHas[int32(CSCity::EFacadeSlot::Parapet)] = false;
+	Bare.Corner = 0.0;
+	Bare.Parapet = 0.0;
+	const CSCity::FFacadeLayout NoCorners = CSCity::LayoutFacade(Bare, Building);
+	TestTrue(TEXT("no corners: the bays run corner to corner"), NoCorners.FacadeCells == 36u && NoCorners.Corners == 0u && NoCorners.Parapets == 0u);
+	for (const CSCity::FFacadeRun& Run : NoCorners.Runs) TestFalse(TEXT("no corners: nothing trimmed"), Run.bTrimStart || Run.bTrimEnd);
+	CSCity::FFacadeKitShape NoParapet = Kit;
+	NoParapet.bHas[int32(CSCity::EFacadeSlot::Parapet)] = false;
+	TestEqual(TEXT("no parapet: corners a storey at a time only"), CSCity::LayoutFacade(NoParapet, Building).Corners, 12u);
+
+	CSCity::FFacadeBuilding Low = Building;
+	Low.Block.Height = 100.0;
+	TestEqual(TEXT("lower than a storey: one"), CSCity::LayoutFacade(Kit, Low).Massing.Storeys, 1);
+	CSCity::FFacadeBuilding Narrow = Building;
+	Narrow.Block.Depth = 60.0;
+	TestEqual(TEXT("a side narrower than its corners: only the front and back have cells"), CSCity::LayoutFacade(Kit, Narrow).FacadeCells, 3u * 8u);
+	TestEqual(TEXT("an empty box: nothing"), CSCity::LayoutFacade(Kit, CSCity::FFacadeBuilding()).Threads(), 0u);
+
+	CSCity::FFacadeKitShape Tall = Kit;
+	Tall.Ground = 450.0;
+	TestTrue(TEXT("ground storey 450: the storeys above start on it"), Tall.StoreyBase(0) == 0.0 && Tall.StoreyBase(1) == 450.0 && Tall.StoreyBase(3) == 1250.0);
+	TestTrue(TEXT("no ground height: the storey's"), Kit.GroundHeight() == 400.0 && Kit.StoreyBase(2) == 800.0);
 
 	// The smallest box around a turned rectangle is the rectangle; around a triangle it holds every corner.
 	const CSCity::FPolygon Rectangle = CSCityTests_Box(FVector2D(500.0, -300.0), FVector2D(1000.0, 700.0), 20.0);
@@ -288,26 +350,166 @@ bool FCSCityAssembleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("rectangle: its middle"), Box.Base.Equals(FVector(500.0, -300.0, 50.0), 0.01));
 	const CSCity::FPolygon Triangle = CSCity::ConvexHull({ FVector2D(0.0, 0.0), FVector2D(3000.0, 200.0), FVector2D(800.0, 1900.0) });
 	const CSCity::FBlock Around = CSCity::HullBlock(Triangle, 0.0, 600.0);
-	TArray<FTransform> One;
-	CSCity::AssembleBlock(Around, Modules[0], 1000.0, One);
-	if (TestEqual(TEXT("triangle: one storey"), One.Num(), 1))
+	const FVector2D Front = Around.Front.GetSafeNormal();
+	const FVector2D Along(Front.Y, -Front.X);
+	int32 Out = 0;
+	for (const FVector2D& Corner : Triangle)
 	{
-		// In the piece's own space, within the module's box.
-		int32 Out = 0;
-		for (const FVector2D& Corner : Triangle)
-		{
-			const FVector Local = One[0].InverseTransformPosition(FVector(Corner, 0.0));
-			Out += Local.X >= Modules[0].Min.X - 0.01 && Local.X <= Modules[0].Max.X + 0.01 && Local.Y >= Modules[0].Min.Y - 0.01 && Local.Y <= Modules[0].Max.Y + 0.01 ? 0 : 1;
-		}
-		TestEqual(TEXT("triangle: corners outside the box"), Out, 0);
+		const FVector2D Local = Corner - FVector2D(Around.Base);
+		Out += FMath::Abs(Local.Dot(Along)) <= Around.Width * 0.5 + 0.01 && FMath::Abs(Local.Dot(Front)) <= Around.Depth * 0.5 + 0.01 ? 0 : 1;
 	}
+	TestEqual(TEXT("triangle: corners outside the box"), Out, 0);
+	return true;
+}
+
+// Massing on the bay grid. Each footprint keeps the front row whole and has its own corners (an L one inner corner, a U
+// or T two, a courtyard four round its hole) and the layout's cells follow the outline: facade cells a storey at a time
+// on every outline edge, outer and inner corner pieces a storey at a time and once more for the parapet, a parapet on
+// every edge and a roof tile on every cell. Setbacks and towers keep fewer cells higher up, every tier inside the one
+// below, the storeys shared out without gaps; every cell is roofed once, at the top of the highest tier on it. A grid
+// too small for a shape gets a box; Auto draws every shape the kit weighs, the same each time for one seed.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityFacadeMassingTest, "PCGPlugins.CSRoadNet.City.FacadeMassing",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSCityFacadeMassingTest::RunTest(const FString& Parameters)
+{
+	CSCity::FFacadeKitShape Kit = CSCityTests_Kit();
+	CSCity::FFacadeBuilding Building;
+	Building.Block.Width = 1800.0;
+	Building.Block.Depth = 1200.0;
+	Building.Block.Height = 2400.0;
+	Building.Stack = ECSCityMassStack::None;
+	struct FWant
+	{
+		ECSCityMassShape Shape;
+		int32 Outer;
+		int32 Inner;
+	};
+	const FWant Wants[] = { { ECSCityMassShape::Box, 4, 0 }, { ECSCityMassShape::L, 5, 1 }, { ECSCityMassShape::U, 6, 2 }, { ECSCityMassShape::T, 6, 2 }, { ECSCityMassShape::Courtyard, 4, 4 } };
+	for (const FWant& Want : Wants)
+	{
+		const FString Name = StaticEnum<ECSCityMassShape>()->GetNameStringByValue(int64(Want.Shape));
+		int32 Wrong = 0;
+		for (uint32 Seed = 1; Seed <= 24; Seed++)
+		{
+			Building.Shape = Want.Shape;
+			Building.Seed = Seed * 0x9E3779B1u;
+			const CSCity::FFacadeLayout Layout = CSCity::LayoutFacade(Kit, Building);
+			const CSCity::FFacadeMassing& M = Layout.Massing;
+			if (M.Shape != Want.Shape || M.Tiers.Num() != 1 || M.GridX != 6 || M.GridY != 4 || M.Storeys != 6)
+			{
+				Wrong++;
+				continue;
+			}
+			const FCSCityTestsOutline O = CSCityTests_Outline(M, 0);
+			bool bFront = true;
+			for (int32 I = 0; I < M.GridX; I++) bFront &= M.At(0, I, M.GridY - 1);
+			const uint32 S = uint32(M.Storeys);
+			const bool bRight = O.Outer == Want.Outer && O.Inner == Want.Inner && bFront && (Want.Shape == ECSCityMassShape::Box) == (O.Cells == 24)
+				&& Layout.FacadeCells == uint32(O.Edges) * S && Layout.Corners == uint32(O.Outer) * (S + 1) && Layout.InnerCorners == uint32(O.Inner) * (S + 1)
+				&& Layout.Parapets == uint32(O.Edges) && Layout.Roofs == uint32(O.Cells) && Layout.Doors == 1u && Layout.GroundCells == uint32(O.Edges);
+			if (!bRight)
+			{
+				Wrong++;
+				AddInfo(FString::Printf(TEXT("%s seed %u: cells %d edges %d outer %d inner %d front %d; layout facade %u corners %u inner %u parapets %u roofs %u"), *Name, Seed, O.Cells, O.Edges, O.Outer, O.Inner, int32(bFront), Layout.FacadeCells, Layout.Corners, Layout.InnerCorners, Layout.Parapets, Layout.Roofs));
+			}
+		}
+		TestEqual(FString::Printf(TEXT("%s: footprints and cells as its outline says"), *Name), Wrong, 0);
+	}
+
+	// Setbacks and towers.
+	Building.Block.Depth = 1500.0;
+	Building.Block.Height = 6000.0;
+	Building.Shape = ECSCityMassShape::Box;
+	for (const ECSCityMassStack Stack : { ECSCityMassStack::Setback, ECSCityMassStack::PodiumTower })
+	{
+		const FString Name = StaticEnum<ECSCityMassStack>()->GetNameStringByValue(int64(Stack));
+		int32 Wrong = 0;
+		int32 ThreeTiers = 0;
+		for (uint32 Seed = 1; Seed <= 24; Seed++)
+		{
+			Building.Stack = Stack;
+			Building.Seed = Seed * 0x85EBCA6Bu;
+			const CSCity::FFacadeLayout Layout = CSCity::LayoutFacade(Kit, Building);
+			const CSCity::FFacadeMassing& M = Layout.Massing;
+			bool bRight = M.Stack == Stack && M.Tiers.Num() >= 2 && M.Tiers[0].First == 0 && M.Tiers.Last().End == M.Storeys;
+			uint32 Facade = 0;
+			for (int32 T = 0; T < M.Tiers.Num() && bRight; T++)
+			{
+				const FCSCityTestsOutline O = CSCityTests_Outline(M, T);
+				Facade += uint32(O.Edges) * uint32(M.Tiers[T].End - M.Tiers[T].First);
+				bRight &= O.Cells > 0 && M.Tiers[T].End > M.Tiers[T].First;
+				if (T == 0) continue;
+				bRight &= M.Tiers[T].First == M.Tiers[T - 1].End && O.Cells < CSCityTests_Outline(M, T - 1).Cells;
+				for (int32 J = 0; J < M.GridY; J++) for (int32 I = 0; I < M.GridX; I++) bRight &= !M.At(T, I, J) || M.At(T - 1, I, J);
+				// A setback leaves the front row; a tower is a rectangle off the podium's edge.
+				if (Stack == ECSCityMassStack::Setback) for (int32 I = 0; I < M.GridX; I++) bRight &= !M.At(T, I, M.GridY - 1);
+				else bRight &= O.Outer == 4 && O.Inner == 0 && M.Tiers[0].End <= 3;
+			}
+			bRight &= Layout.FacadeCells == Facade && Layout.Roofs == uint32(CSCityTests_Outline(M, 0).Cells);
+			ThreeTiers += M.Tiers.Num() == 3 ? 1 : 0;
+			if (!bRight)
+			{
+				Wrong++;
+				AddInfo(FString::Printf(TEXT("%s seed %u: %d tiers, stack %d, facade %u (want %u), roofs %u"), *Name, Seed, M.Tiers.Num(), int32(M.Stack), Layout.FacadeCells, Facade, Layout.Roofs));
+			}
+		}
+		TestEqual(FString::Printf(TEXT("%s: tiers inside each other, storeys shared, every cell roofed once"), *Name), Wrong, 0);
+		if (Stack == ECSCityMassStack::Setback) TestTrue(TEXT("Setback: tall ones sometimes step twice"), ThreeTiers > 0);
+	}
+
+	// Too small for the shape asked: a box.
+	CSCity::FFacadeBuilding Small;
+	Small.Block.Width = 300.0;
+	Small.Block.Depth = 900.0;
+	Small.Block.Height = 800.0;
+	Small.Stack = ECSCityMassStack::None;
+	for (const ECSCityMassShape Shape : { ECSCityMassShape::L, ECSCityMassShape::U, ECSCityMassShape::T, ECSCityMassShape::Courtyard })
+	{
+		Small.Shape = Shape;
+		TestTrue(TEXT("one bay wide: a box"), CSCity::MassFacade(Kit, Small).Shape == ECSCityMassShape::Box);
+	}
+	Small.Block.Width = 600.0;
+	Small.Block.Depth = 600.0;
+	Small.Shape = ECSCityMassShape::Courtyard;
+	TestTrue(TEXT("2 by 2: no room for a courtyard"), CSCity::MassFacade(Kit, Small).Shape == ECSCityMassShape::Box);
+	Small.Shape = ECSCityMassShape::L;
+	TestTrue(TEXT("2 by 2: an L fits"), CSCity::MassFacade(Kit, Small).Shape == ECSCityMassShape::L);
+
+	// Auto: every weighed shape drawn somewhere, the same for the same seed.
+	for (float& Weight : Kit.ShapeWeights) Weight = 1.0f;
+	Kit.SetbackChance = 0.5f;
+	Kit.PodiumChance = 0.3f;
+	Building.Block.Depth = 1200.0;
+	Building.Block.Height = 2800.0;
+	Building.Shape = ECSCityMassShape::Auto;
+	Building.Stack = ECSCityMassStack::Auto;
+	TSet<int32> Shapes;
+	TSet<int32> Stacks;
+	int32 Changed = 0;
+	for (uint32 Seed = 1; Seed <= 200; Seed++)
+	{
+		Building.Seed = Seed * 0xC2B2AE35u;
+		const CSCity::FFacadeMassing A = CSCity::MassFacade(Kit, Building);
+		const CSCity::FFacadeMassing B = CSCity::MassFacade(Kit, Building);
+		Shapes.Add(int32(A.Shape));
+		Stacks.Add(int32(A.Stack));
+		bool bSame = A.Shape == B.Shape && A.Stack == B.Stack && A.Tiers.Num() == B.Tiers.Num();
+		for (int32 T = 0; T < A.Tiers.Num() && bSame; T++) bSame = A.Tiers[T].Cells == B.Tiers[T].Cells && A.Tiers[T].First == B.Tiers[T].First;
+		Changed += bSame ? 0 : 1;
+	}
+	TestEqual(TEXT("auto: every shape"), Shapes.Num(), 5);
+	TestEqual(TEXT("auto: every stacking"), Stacks.Num(), 3);
+	TestEqual(TEXT("auto: one seed, one massing"), Changed, 0);
+	AddInfo(FString::Printf(TEXT("auto over 200 seeds: %d shapes, %d stackings"), Shapes.Num(), Stacks.Num()));
 	return true;
 }
 
 // Plots laid out along two streets and written as a build writes them, with no prefab data, so it runs anywhere: two
 // Nanite meshes draw them as GPU instances through Nanite, one component per mesh, every instance within its plot.
 // Fewer plots rewrite the components in place; a mesh no plot takes loses its component; no meshes, the tile goes
-// to the default module's copies (Nanite, a storey each), and back. No mesh is ever made for the buildings.
+// to the default facade kit (a component per slot, the modules written on the GPU: as many in each slot as the layout
+// has cells for, every one within its plot), and back. No mesh is ever made for the buildings.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityInstancedTileTest, "PCGPlugins.CSRoadNet.City.InstancedTile",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
 
@@ -391,23 +593,72 @@ bool FCSCityInstancedTileTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("one mesh: instances"), CSCityTests_Instances(Network).Num(), OneMesh.Num());
 	}
 
-	// No meshes: the default module's copies, and back.
-	UStaticMesh* Module = ACSCityBuildingActor::DefaultModule();
-	if (!TestNotNull(TEXT("the default module (Scripts/CS2Road/MakeCityBlock.py)"), Module)) return false;
-	TestTrue(TEXT("the default module has Nanite data"), Module->HasValidNaniteData());
+	// No meshes: the default kit's modules, written on the GPU, a component per slot, and back.
+	UCSCityFacadeKit* Kit = UCSCityFacadeKit::Default();
+	if (!TestNotNull(TEXT("the default kit (Scripts/CS2Road/MakeFacadeKit.py)"), Kit)) return false;
+	const CSCity::FFacadeKitShape Shape = CSCity::KitShape(*Kit);
 	Network->BuildingMeshes.Reset();
 	Network->WriteBuildingTileForTest(Tile, Lots);
+	CSRoad::LandMeshWrites();
 	Again = CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network);
-	TestTrue(TEXT("module: one component, the module's"), Again.Num() == 1 && Again[0]->BaseMesh == Module);
-	int32 Storeys = 0;
-	for (const CSCity::FLot& Lot : Lots) Storeys += FMath::Max(1, FMath::RoundToInt32(Lot.Height / (double(Network->StoreyHeight) * 100.0)));
-	TestEqual(TEXT("module: a copy per storey"), CSCityTests_Instances(Network).Num(), Storeys);
-	if (Again.Num() == 1) TestTrue(TEXT("module: drawn by Nanite"), Again[0]->IsNaniteRenderPath());
-	TestEqual(TEXT("module: no building meshes"), CSCityTests_BuildingMeshes(Network), 0);
+	int32 Slots = 0;
+	for (const bool bHas : Shape.bHas) Slots += bHas ? 1 : 0;
+	TestEqual(TEXT("kit: a component per slot"), Again.Num(), Slots);
+	// What each slot must hold: the layout's cells (each plot's massing drawn from its seed, as the network draws it), the
+	// windows and walls sharing the facade's but for the doors.
+	uint32 Want[CSCity::FacadeSlots] = {};
+	TSet<int32> Massings;
+	for (const CSCity::FLot& Lot : Lots)
+	{
+		const CSCity::FFacadeLayout Layout = CSCity::LayoutFacade(Shape, CSCity::LotBuilding(Lot));
+		Want[int32(CSCity::EFacadeSlot::Wall)] += Layout.FacadeCells - Layout.Doors;
+		Want[int32(CSCity::EFacadeSlot::Door)] += Layout.Doors;
+		Want[int32(CSCity::EFacadeSlot::Corner)] += Layout.Corners;
+		Want[int32(CSCity::EFacadeSlot::CornerInner)] += Layout.InnerCorners;
+		Want[int32(CSCity::EFacadeSlot::Parapet)] += Layout.Parapets;
+		Want[int32(CSCity::EFacadeSlot::Roof)] += Layout.Roofs;
+		Massings.Add(int32(Layout.Massing.Shape) * 8 + int32(Layout.Massing.Stack));
+	}
+	AddInfo(FString::Printf(TEXT("kit: %d plots in %d kinds of massing"), Lots.Num(), Massings.Num()));
+	int32 Got[CSCity::FacadeSlots] = {};
+	int32 OutsidePlots = 0;
+	for (UCSGpuInstancedMeshComponent* Component : Again)
+	{
+		TestTrue(TEXT("kit: written on the GPU"), Component->HasInstanceSourceGPU());
+		TestTrue(TEXT("kit: drawn by Nanite"), Component->IsNaniteRenderPath());
+		int32 Slot = 0;
+		while (Slot < CSCity::FacadeSlots && Kit->Module(Slot).Mesh != Component->BaseMesh) Slot++;
+		if (!TestTrue(TEXT("kit: a slot's mesh"), Slot < CSCity::FacadeSlots)) continue;
+		Got[Slot] = Component->DebugReadDrawnInstanceCountSync();
+		// Every module within the plot it stands on.
+		const TArray<FVector3f> Corners = CSRoadTest::InstanceCorners(Component);
+		for (int32 First8 = 0; First8 + 8 <= Corners.Num(); First8 += 8)
+		{
+			FVector2D Middle = FVector2D::ZeroVector;
+			for (int32 K = 0; K < 8; K++) Middle += FVector2D(Corners[First8 + K].X, Corners[First8 + K].Y) / 8.0;
+			const int32 Plot = Lots.IndexOfByPredicate([&Middle](const CSCity::FLot& Lot) { return CSCity::Contains(CSCity::Grow(Lot.Corners, 1.0), Middle); });
+			if (Plot == INDEX_NONE)
+			{
+				OutsidePlots++;
+				continue;
+			}
+			const CSCity::FPolygon Kept = CSCity::Grow(Lots[Plot].Corners, 1.0);
+			for (int32 K = 0; K < 8; K++) OutsidePlots += CSCity::Contains(Kept, FVector2D(Corners[First8 + K].X, Corners[First8 + K].Y)) ? 0 : 1;
+		}
+	}
+	const int32 Cells = Got[int32(CSCity::EFacadeSlot::Wall)] + Got[int32(CSCity::EFacadeSlot::Window)] + Got[int32(CSCity::EFacadeSlot::GroundWall)] + Got[int32(CSCity::EFacadeSlot::GroundWindow)];
+	TestEqual(TEXT("kit: walls and windows"), Cells, int32(Want[int32(CSCity::EFacadeSlot::Wall)]));
+	TestTrue(TEXT("kit: some of each"), Got[int32(CSCity::EFacadeSlot::Wall)] > 0 && Got[int32(CSCity::EFacadeSlot::Window)] > 0);
+	for (const CSCity::EFacadeSlot Slot : { CSCity::EFacadeSlot::Door, CSCity::EFacadeSlot::Corner, CSCity::EFacadeSlot::CornerInner, CSCity::EFacadeSlot::Parapet, CSCity::EFacadeSlot::Roof })
+	{
+		if (Shape.bHas[int32(Slot)]) TestEqual(FString::Printf(TEXT("kit: slot %d"), int32(Slot)), Got[int32(Slot)], int32(Want[int32(Slot)]));
+	}
+	TestEqual(TEXT("kit: modules outside their plots"), OutsidePlots, 0);
+	TestEqual(TEXT("kit: no building meshes"), CSCityTests_BuildingMeshes(Network), 0);
 	Network->BuildingMeshes = { First };
 	Network->WriteBuildingTileForTest(Tile, Lots);
 	Again = CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network);
-	TestTrue(TEXT("meshes again: the module's component gone"), Again.Num() == 1 && Again[0]->BaseMesh == First);
+	TestTrue(TEXT("meshes again: the kit's components gone"), Again.Num() == 1 && Again[0]->BaseMesh == First);
 	TestEqual(TEXT("meshes again: every plot on the one mesh"), CSCityTests_Instances(Network).Num(), Lots.Num());
 	return true;
 }
@@ -984,8 +1235,10 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("built: error"), Network->LastError, FString());
 	TestTrue(TEXT("built: roads"), Network->NumRoads > 0);
 	TestTrue(TEXT("built: batch buildings"), Network->NumBuildings > 0);
-	TestTrue(TEXT("built: the special building a copy per storey"), Special->Blocks && Special->Blocks->GetStaticMesh() == ACSCityBuildingActor::DefaultModule()
-		&& Special->Blocks->GetInstanceCount() == FMath::RoundToInt32(Special->Height / Special->StoreyHeight));
+	CSRoad::LandMeshWrites();
+	int32 SpecialModules = 0;
+	for (const UCSGpuInstancedMeshComponent* Component : Special->Facade) if (Component && Component->HasInstanceSourceGPU()) SpecialModules += Component->DebugReadDrawnInstanceCountSync();
+	TestTrue(TEXT("built: the special building's modules"), SpecialModules > 0);
 	TestEqual(TEXT("built: no building meshes"), CSCityTests_BuildingMeshes(Network), 0);
 	TestEqual(TEXT("built: batch buildings in the special building's plot"), InPlot(), 0);
 	const TMap<FString, uint32> Before = CSCityTests_BuildingSerials(Network);

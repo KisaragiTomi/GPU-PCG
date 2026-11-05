@@ -2,6 +2,7 @@
 
 #include "CSRoadCurves.h"
 #include "CSRoadNet.h"
+#include "HAL/PlatformTime.h"
 
 namespace CSRoad
 {

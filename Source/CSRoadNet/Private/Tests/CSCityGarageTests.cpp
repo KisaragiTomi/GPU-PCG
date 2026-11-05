@@ -59,7 +59,8 @@ FVector CSCityGarageTests_ToUnreal(const FVector3d& V)
 // A garage 33 m north of a 200 m road, its door facing it: a driveway from the door straight to the road's centre line,
 // leaving square and meeting square, which the network joins in a T junction there (and leaves a dead end at the door).
 // Facing away, or reaching 30 m, it joins nothing; a building beside the way blocks it; a door 9 m from the centre line
-// opens onto the road (no driveway); of two roads in front it takes the nearer.
+// opens onto the road (no driveway); of two roads in front it takes the nearer. A small road in front: with the main road
+// out of reach it takes that (a T junction on the small road), with the main road in reach the main road, nearer or not.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityGarageTest, "PCGPlugins.CSRoadNet.City.Garage",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -109,11 +110,34 @@ bool FCSCityGarageTest::RunTest(const FString& Parameters)
 	CSCity::FGarage Away = Garage;
 	Away.Facing = FVector2d(0.0, 1.0);
 	TestFalse(TEXT("facing away: not joined"), CSCity::Driveway(Away, { Main }, Obstacles, Lib.Assets, Driveway, Why));
-	TestEqual(TEXT("facing away: why"), Why, FString(TEXT("no main road within 50 m in front of the garage")));
+	TestEqual(TEXT("facing away: why"), Why, FString(TEXT("no road within 50 m in front of the garage")));
 	CSCity::FGarage Short = Garage;
 	Short.Reach = 30.0;
 	TestFalse(TEXT("reaching 30 m: not joined"), CSCity::Driveway(Short, { Main }, Obstacles, Lib.Assets, Driveway, Why));
-	TestEqual(TEXT("reaching 30 m: why"), Why, FString(TEXT("no main road within 30 m in front of the garage")));
+	TestEqual(TEXT("reaching 30 m: why"), Why, FString(TEXT("no road within 30 m in front of the garage")));
+
+	// A small road 15 m north of the main road, between it and the door: reaching 30 m, the garage takes it.
+	CSRoad::FSplineRoad Lane = CSCityGarageTests_Road(TEXT("Lane"), TEXT("Small Road"), FVector3d(-100.0, 0.0, 15.0), FVector3d(100.0, 0.0, 15.0));
+	Lane.bAlley = true;
+	// Target points into the array: it must outlive the call.
+	const TArray<CSRoad::FSplineRoad> MainAndLane = { Main, Lane };
+	const CSRoad::FSplineRoad* Target = nullptr;
+	if (!TestTrue(TEXT("small road, main out of reach: joined"), CSCity::Driveway(Short, MainAndLane, Obstacles, Lib.Assets, Driveway, Why, &Target))) return false;
+	AddInfo(Why);
+	TestTrue(TEXT("small road: says which, and why"), Why.StartsWith(TEXT("joins Lane (no main road within 30 m)")));
+	TestTrue(TEXT("small road: points to it"), Target && Target->Name == TEXT("Lane"));
+	if (!TestEqual(TEXT("small road: driveway points"), Driveway.Points.Num(), 2)) return false;
+	TestTrue(TEXT("small road: to the foot on its centre line"), Driveway.Points[1].Equals(FVector3d(5.0, 0.0, 15.0), 1e-3));
+	if (!TestTrue(TEXT("small road and driveway build into a network"), CSRoad::BuildSplineNetwork(Lib.Assets, { Lane, Driveway }, Settings, nullptr, Nodes, Roads, Stats, Error))) return false;
+	TestEqual(TEXT("small road network: edges"), Roads.Num(), 3);
+	TestEqual(TEXT("small road network: T junction at the foot"), CSCityGarageTests_NodesNear(Nodes, Roads, FVector2d(5.0, 15.0), 0.5, 3), 1);
+	// A small road running north-south 15 m east of the door, nearer than the main road and in front of the garage: the
+	// main road in reach comes first.
+	CSRoad::FSplineRoad Side = CSCityGarageTests_Road(TEXT("Side"), TEXT("Small Road"), FVector3d(20.0, 0.0, -50.0), FVector3d(20.0, 0.0, 50.0));
+	Side.bAlley = true;
+	const TArray<CSRoad::FSplineRoad> SideAndMain = { Side, Main };
+	TestTrue(TEXT("a nearer small road, main in reach: the main road"), CSCity::Driveway(Garage, SideAndMain, Obstacles, Lib.Assets, Driveway, Why, &Target) && Why.StartsWith(TEXT("joins Main,")));
+	TestTrue(TEXT("a nearer small road, main in reach: points to it"), Target && !Target->bAlley);
 
 	TArray<CSCity::FObstacle> Shed = Obstacles;
 	Shed.Add({ TEXT("Shed"), CSCityGarageTests_Box(FVector2d(8.0, 18.0), FVector2d(2.0, 2.0)) });
@@ -253,8 +277,79 @@ bool FCSCityGarageNetworkTest::RunTest(const FString& Parameters)
 	CSRoadTest::TickBuild(Network);
 	Network->FinishWrites();
 	TestEqual(TEXT("facing away: joined"), Network->NumJoinedGarages, 0);
-	TestEqual(TEXT("facing away: why"), House->GarageStatus, FString(TEXT("no main road within 50 m in front of the garage")));
+	TestEqual(TEXT("facing away: why"), House->GarageStatus, FString(TEXT("no road within 50 m in front of the garage")));
 	TestEqual(TEXT("facing away: roads"), Network->NumRoads, 1);
+	return true;
+}
+
+// A city building 100 m north of a main road, its garage facing a small road 20 m west that runs south onto the main road:
+// with no main road in reach the driveway joins the small road (a T junction on it), and the house says which, and the main
+// road it leads on to. The small road moved north off the main road: the driveway stays, but leads nowhere, and the
+// garage counts as not joined.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityGarageSmallRoadTest, "PCGPlugins.CSRoadNet.City.GarageSmallRoad",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSCityGarageSmallRoadTest::RunTest(const FString& Parameters)
+{
+	CSRoadTest::FLibrary& Lib = CSRoadTest::Library();
+	if (!Lib.bLoaded)
+	{
+		AddWarning(Lib.Error + TEXT(" (skipped)"));
+		return true;
+	}
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("editor world"), World)) return false;
+	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>();
+	if (!TestNotNull(TEXT("network actor"), Network)) return false;
+	Network->bLocalUpdate = true;
+	Network->bBakeNanite = false;
+	Network->MaxTilesPerBatch = 0;
+	Network->SplineSettings.MaxSegmentLength = 0.0f;
+	ACSRoadSplineActor* Main = World->SpawnActor<ACSRoadSplineActor>();
+	ACSRoadSplineActor* Lane = World->SpawnActor<ACSRoadSplineActor>();
+	if (!TestNotNull(TEXT("main road"), Main) || !TestNotNull(TEXT("small road"), Lane)) return false;
+	Main->AttachToActor(Network, FAttachmentTransformRules::KeepRelativeTransform);
+	Main->Spline->Prefab = TEXT("Medium Road");
+	Main->Spline->SetSplinePoints({ FVector(-10000.0, 0.0, 0.0), FVector(10000.0, 0.0, 0.0) }, ESplineCoordinateSpace::Local);
+	// North from the main road's centre line (y < 0 is north).
+	Lane->AttachToActor(Network, FAttachmentTransformRules::KeepRelativeTransform);
+	Lane->Spline->Prefab = TEXT("Small Road");
+	Lane->Spline->Tier = ECSRoadTier::Alley;
+	Lane->Spline->SetSplinePoints({ FVector(0.0, 0.0, 0.0), FVector(0.0, -15000.0, 0.0) }, ESplineCoordinateSpace::Local);
+	// 20 x 14 m, 30 m east of the small road and 100 m north of the main road, the garage in its west side.
+	ACSCityBuildingActor* House = World->SpawnActor<ACSCityBuildingActor>(FVector(3000.0, -10000.0, 0.0), FRotator::ZeroRotator);
+	if (!TestNotNull(TEXT("house"), House)) return false;
+	House->bHasGarage = true;
+	House->GarageLocation = FVector(-1000.0, 0.0, 0.0);
+	House->Rebuild();
+	auto JunctionsAt = [&](const FVector2D& At)
+	{
+		const CSRoad::FSavedNetwork* Built = Network->RoadsForTest();
+		return Built ? CSCityGarageTests_NodesNear(Built->Nodes, Built->Roads, FVector2d(At.X / 100.0, -At.Y / 100.0), 0.5, 3) : -1;
+	};
+
+	Network->Rebuild();
+	Network->FinishWrites();
+	AddInfo(House->GarageStatus);
+	TestEqual(TEXT("built: error"), Network->LastError, FString());
+	TestEqual(TEXT("built: garages"), Network->NumGarages, 1);
+	TestEqual(TEXT("built: joined through the small road"), Network->NumJoinedGarages, 1);
+	const FString LaneName = Lane->GetActorNameOrLabel();
+	TestTrue(TEXT("built: the house says which small road"), House->GarageStatus.StartsWith(FString::Printf(TEXT("joins %s (no main road within 50 m)"), *LaneName)));
+	TestTrue(TEXT("built: and the main road it leads to"), House->GarageStatus.EndsWith(FString::Printf(TEXT("; on to %s"), *Main->GetActorNameOrLabel())));
+	TestEqual(TEXT("built: T junction on the small road at the foot"), JunctionsAt(FVector2D(0.0, -10000.0)), 1);
+	TestEqual(TEXT("built: the small road's junction with the main road"), JunctionsAt(FVector2D(0.0, 0.0)), 1);
+
+	// Off the main road: the small road leads nowhere.
+	Lane->Spline->SetSplinePoints({ FVector(0.0, -6000.0, 0.0), FVector(0.0, -15000.0, 0.0) }, ESplineCoordinateSpace::Local);
+	CSRoadTest::TickBuild(Network);
+	Network->FinishWrites();
+	AddInfo(House->GarageStatus);
+	TestEqual(TEXT("cut off: error"), Network->LastError, FString());
+	TestEqual(TEXT("cut off: not joined"), Network->NumJoinedGarages, 0);
+	TestTrue(TEXT("cut off: the house says so"), House->GarageStatus.StartsWith(FString::Printf(TEXT("joins %s"), *LaneName)) && House->GarageStatus.EndsWith(TEXT("; it leads to no main road")));
+	TestEqual(TEXT("cut off: the driveway stays"), JunctionsAt(FVector2D(0.0, -10000.0)), 1);
+	TestEqual(TEXT("cut off: no junction on the main road"), JunctionsAt(FVector2D(0.0, 0.0)), 0);
 	return true;
 }
 

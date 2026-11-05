@@ -6,8 +6,8 @@
 
 Two by two blocks of 80 m on flat ground, bounded by small roads (tier Alley: alleys east-west, small roads
 north-south), 2 m lanes through the western blocks and three main roads (Medium Road), 13 spline roads in all, in
-64 m tiles. Everything comes from the plugin: the buildings are the network's own prisms, filling the blocks, so the
-level opens the same on any machine. Docs/CS2RoadsGpu.md, "小路与大路小场景", says what to try:
+64 m tiles. Everything comes from the plugin: the buildings are put together from its default facade kit
+(DA_FacadeKit_Simple, MakeFacadeKit.py), filling the blocks, so the level opens the same on any machine. Docs/CS2RoadsGpu.md, "小路与大路小场景", says what to try:
 
 - A Drag me: south of the blocks, clear of every small road: drag it into the grid and back;
 - B Drawn: along the west side, each alley ending on one of its points: T junctions kept as drawn, until B moves;
@@ -18,7 +18,8 @@ level opens the same on any machine. Docs/CS2RoadsGpu.md, "小路与大路小场
   eastern blocks, which C narrows to some 14 m of plots a side, have none.
 - H House with garage: a city building between the last alley and A, its garage facing A: the network joins it to A with
   a driveway (an Alley) and a T junction, which follow the house, the garage (move the diamond) and A; with A dragged
-  away, nothing is in front of the garage and the driveway goes.
+  away, nothing is in front of the garage and the driveway goes. Its garage turned to face the last alley instead (no
+  main road in reach that way), the driveway joins the alley, which leads on to B and C.
 
 Refuses to overwrite the level; delete it first to make it again.
 """

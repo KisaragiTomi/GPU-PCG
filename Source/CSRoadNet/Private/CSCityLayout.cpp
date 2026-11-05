@@ -844,9 +844,10 @@ TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine
 			const FVector2D Normal(-Tangent.Y, Tangent.X);
 			for (const double Side : { 1.0, -1.0 })
 			{
+				if ((Anchor.Sides & (Side > 0.0 ? 1 : 2)) == 0) continue;
 				FCandidate Candidate;
 				FLot& Lot = Candidate.Lot;
-				Lot.Id = CSCityLayout_Mix(Anchor.Id ^ CSCityLayout_Mix(uint64(Slot) * 2 + (Side > 0.0 ? 1 : 0)));
+				Lot.Id = LotId(Anchor.Id, Slot, Side > 0.0);
 				const double Depth = FMath::Lerp(Settings.MinDepth, Settings.MaxDepth, CSCityLayout_Unit(Lot.Id ^ Seed ^ 1));
 				Candidate.Front = FVector2D(Position) + Normal * (Side * Inner);
 				Candidate.Along = Tangent * Side;
@@ -927,6 +928,11 @@ TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine
 	return Out;
 }
 
+uint64 LotId(uint64 AnchorId, int32 Slot, bool bRight)
+{
+	return CSCityLayout_Mix(AnchorId ^ CSCityLayout_Mix(uint64(Slot) * 2 + (bRight ? 1 : 0)));
+}
+
 double LotStrip(const FLotSettings& Settings)
 {
 	// With bFill a slot is under one and a half Frontage.
@@ -997,30 +1003,6 @@ FBlock HullBlock(const FPolygon& Footprint, double Base, double Height)
 		Best.Depth = Size.Y;
 	}
 	return Best;
-}
-
-FTransform BlockPiece(const FBlock& Block, const FBox& Bounds)
-{
-	const FVector Size = Bounds.GetSize();
-	const FVector Scale(Block.Width / FMath::Max(Size.X, UE_KINDA_SMALL_NUMBER), Block.Depth / FMath::Max(Size.Y, UE_KINDA_SMALL_NUMBER), Block.Height / FMath::Max(Size.Z, UE_KINDA_SMALL_NUMBER));
-	// +Y, at 90 degrees, turned to the front.
-	const FRotator Rotation(0.0, FMath::RadiansToDegrees(FMath::Atan2(Block.Front.Y, Block.Front.X)) - 90.0, 0.0);
-	// The middle of the module's bottom on the block's.
-	const FVector Bottom(Bounds.GetCenter().X, Bounds.GetCenter().Y, Bounds.Min.Z);
-	return FTransform(Rotation, Block.Base - Rotation.RotateVector(Bottom * Scale), Scale);
-}
-
-void AssembleBlock(const FBlock& Block, const FBox& Bounds, double StoreyHeight, TArray<FTransform>& Out)
-{
-	if (Block.Width <= 0.0 || Block.Depth <= 0.0 || Block.Height <= 0.0 || !Bounds.IsValid) return;
-	const int32 Storeys = FMath::Max(1, FMath::RoundToInt32(Block.Height / FMath::Max(StoreyHeight, 1.0)));
-	FBlock Storey = Block;
-	Storey.Height = Block.Height / Storeys;
-	for (int32 S = 0; S < Storeys; S++)
-	{
-		Storey.Base.Z = Block.Base.Z + Storey.Height * S;
-		Out.Add(BlockPiece(Storey, Bounds));
-	}
 }
 
 int32 LotMesh(const FLot& Lot, int32 Seed, int32 Count)

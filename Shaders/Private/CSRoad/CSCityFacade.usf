@@ -1,0 +1,283 @@
+// Facade modules of a set of buildings (CSCityFacade.h): a thread per module. The CPU walks each building's massing into
+// runs (FFacadeRun): facade cells along a side over a range of storeys, a corner column (outer or inner), parapet cells
+// along a side, a rectangle of roof tiles. Each thread finds its run, its cell and the slot that goes there, fits that
+// slot's module box into the cell and appends the instance to the slot's GPU instance source (FCSGpuInstanceSourceGPU's
+// row layout). Nine slots' rows and counters are more UAVs than a shader may have (16), so the pass runs twice, for
+// slots [FacadeSlotFirst, FacadeSlotFirst + FacadeSlotCount) each time; a module of another slot is left to the other run.
+//
+// Frames: a building's +Y is its front (FBlock::Front) and +X its front's along direction, from the middle of its box;
+// side k's frame is the building's turned so that its +Y points out of side k (k = 0 front, 1 right, 2 back, 3 left)
+// and its +X runs along it. A run's Along and Out are in its side's frame; a roof's are the building's X and Y.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/PCGPlugins/Shaders/Private/CSGpuSharedLayout.ush"
+
+StructuredBuffer<float4> FacadeBuildingsF;  // 2 per building: (base xyz relative to the origin, 0), (front xy, 0, 0)
+StructuredBuffer<uint> FacadeBuildingSeeds; // 1 per building
+StructuredBuffer<float4> FacadeRunsF;       // 1 per run: (along, out, cell length, roof cell y)
+StructuredBuffer<uint4> FacadeRunsU;        // 2 per run: (first thread, building, kind | side << 4 | flags << 8, count | rows << 16),
+                                            //            (first storey | end storey << 16, first column, door cell + 1, threads)
+uint FacadeNumRuns;
+uint FacadeNumThreads;
+float4 FacadeSlotMin[9];                    // the slot's module box once turned: min, .w quarter turns
+float4 FacadeSlotSize[9];                   // its size, .w 1 when the slot has a mesh
+uint FacadeSlotFirst;                       // this run's slots: FacadeRows0..4 are slots FacadeSlotFirst + 0..4
+uint FacadeSlotCount;
+uint4 FacadeCapacityLo;                     // the run's slots 0..3
+uint FacadeCapacityHi;                      // its slot 4
+float FacadeStorey;
+float FacadeGround;
+float FacadeCorner;
+float FacadeParapet;
+float FacadeWindowChance;
+float FacadeGroundWindowChance;
+uint FacadeColumnGroup;
+
+RWBuffer<float4> FacadeRows0;
+RWBuffer<float4> FacadeRows1;
+RWBuffer<float4> FacadeRows2;
+RWBuffer<float4> FacadeRows3;
+RWBuffer<float4> FacadeRows4;
+RWBuffer<uint> FacadeCounter0;
+RWBuffer<uint> FacadeCounter1;
+RWBuffer<uint> FacadeCounter2;
+RWBuffer<uint> FacadeCounter3;
+RWBuffer<uint> FacadeCounter4;
+
+#define FACADE_WALL 0u
+#define FACADE_WINDOW 1u
+#define FACADE_DOOR 2u
+#define FACADE_CORNER 3u
+#define FACADE_PARAPET 4u
+#define FACADE_ROOF 5u
+#define FACADE_CORNER_INNER 6u
+#define FACADE_GROUND_WALL 7u
+#define FACADE_GROUND_WINDOW 8u
+
+#define RUN_FACADE 0u
+#define RUN_CORNER 1u
+#define RUN_CORNER_INNER 2u
+#define RUN_PARAPET 3u
+#define RUN_ROOF 4u
+
+#define RUN_TRIM_START 1u
+#define RUN_TRIM_END 2u
+#define RUN_PARAPET_PIECE 4u
+#define RUN_COLUMN_DOWN 8u
+
+// Side k's frame turned into the building's.
+static const float FacadeSideCos[4] = { 1.0, 0.0, -1.0, 0.0 };
+static const float FacadeSideSin[4] = { 0.0, -1.0, 0.0, 1.0 };
+
+uint FacadeHash(uint X)
+{
+	X ^= X >> 16;
+	X *= 0x7feb352du;
+	X ^= X >> 15;
+	X *= 0x846ca68bu;
+	X ^= X >> 16;
+	return X;
+}
+
+float FacadeUnit(uint X)
+{
+	return float(FacadeHash(X) >> 8) * (1.0 / 16777216.0);
+}
+
+bool FacadeHas(uint Slot)
+{
+	return FacadeSlotSize[Slot].w > 0.5;
+}
+
+// The bottom of storey S above the building's base, and its height.
+float FacadeStoreyBase(uint S)
+{
+	return S == 0u ? 0.0 : FacadeGround + float(S - 1u) * FacadeStorey;
+}
+
+float FacadeStoreyHeight(uint S)
+{
+	return S == 0u ? FacadeGround : FacadeStorey;
+}
+
+// A module-local vector turned by the slot's quarter turns, counter-clockwise from above.
+float3 FacadeTurn(float3 V, uint Turns)
+{
+	if (Turns == 1u) return float3(-V.y, V.x, V.z);
+	if (Turns == 2u) return float3(-V.x, -V.y, V.z);
+	if (Turns == 3u) return float3(V.y, -V.x, V.z);
+	return V;
+}
+
+#define FACADE_APPEND(N, Capacity) \
+	{ \
+		uint Index; \
+		InterlockedAdd(FacadeCounter##N[0], 1u, Index); \
+		if (Index < Capacity) \
+		{ \
+			const uint At = Index * CS_GPU_INSTANCED_ROW_FLOAT4S; \
+			FacadeRows##N[At + 0] = Row0; \
+			FacadeRows##N[At + 1] = Row1; \
+			FacadeRows##N[At + 2] = Row2; \
+			FacadeRows##N[At + 3] = Row3; \
+			FacadeRows##N[At + 4] = Row4; \
+		} \
+	}
+
+// Whether this run writes the slot.
+bool FacadeOwns(uint Slot)
+{
+	return Slot >= FacadeSlotFirst && Slot - FacadeSlotFirst < FacadeSlotCount;
+}
+
+void FacadeAppend(uint Slot, float4 Row0, float4 Row1, float4 Row2, float4 Row3, float4 Row4)
+{
+	const uint Local = Slot - FacadeSlotFirst;
+	if (Local == 0u) FACADE_APPEND(0, FacadeCapacityLo.x)
+	else if (Local == 1u) FACADE_APPEND(1, FacadeCapacityLo.y)
+	else if (Local == 2u) FACADE_APPEND(2, FacadeCapacityLo.z)
+	else if (Local == 3u) FACADE_APPEND(3, FacadeCapacityLo.w)
+	else FACADE_APPEND(4, FacadeCapacityHi)
+}
+
+// The slot's module stretched by Scale (side frame) with its anchor (Anchor's fraction of its box) on Point (side
+// frame), the side frame turned by (SideCos, SideSin) into the building's, the building's placed at Base with its +Y
+// along Front.
+void FacadeEmit(uint Slot, float3 Point, float3 Scale, float3 Anchor, float SideCos, float SideSin, float3 Base, float2 Front, float Random)
+{
+	if (!FacadeOwns(Slot)) return;
+	const float3 Min = FacadeSlotMin[Slot].xyz;
+	const float3 Size = max(FacadeSlotSize[Slot].xyz, 1e-3);
+	const uint Turns = uint(FacadeSlotMin[Slot].w + 0.5);
+	const float3 Translation = Point - Scale * (Min + Anchor * Size);
+	// Side frame to the building's, then the building's (+X = (Front.y, -Front.x), +Y = Front) to the component's.
+	const float2 BuildingX = float2(Front.y, -Front.x);
+	const float2 BuildingY = Front;
+	float3 Axis[3];
+	for (uint I = 0; I < 3u; I++)
+	{
+		const float3 Unit = float3(I == 0u ? 1.0 : 0.0, I == 1u ? 1.0 : 0.0, I == 2u ? 1.0 : 0.0);
+		const float3 Side = Scale * FacadeTurn(Unit, Turns);
+		const float2 InBuilding = float2(SideCos * Side.x - SideSin * Side.y, SideSin * Side.x + SideCos * Side.y);
+		Axis[I] = float3(BuildingX * InBuilding.x + BuildingY * InBuilding.y, Side.z);
+	}
+	const float2 T = float2(SideCos * Translation.x - SideSin * Translation.y, SideSin * Translation.x + SideCos * Translation.y);
+	const float3 Origin = Base + float3(BuildingX * T.x + BuildingY * T.y, Translation.z);
+	// The culling sphere: the module box's middle, its half diagonal by the largest stretch.
+	const float3 Middle = Min + 0.5 * Size;
+	const float3 SideMiddle = Scale * Middle + Translation;
+	const float2 M = float2(SideCos * SideMiddle.x - SideSin * SideMiddle.y, SideSin * SideMiddle.x + SideCos * SideMiddle.y);
+	const float3 Centre = Base + float3(BuildingX * M.x + BuildingY * M.y, SideMiddle.z);
+	const float Radius = 0.5 * length(Size) * max(Scale.x, max(Scale.y, Scale.z));
+	FacadeAppend(Slot, float4(Axis[0], 0.0), float4(Axis[1], 0.0), float4(Axis[2], 0.0), float4(Origin, Random), float4(Centre, Radius));
+}
+
+// A cell along a run: where it starts and how long it is, its ends given to the outer corners' pieces.
+void FacadeCellSpan(float4 F, uint Cell, uint Count, uint Flags, out float Along, out float Length)
+{
+	Along = F.x + float(Cell) * F.z;
+	Length = F.z;
+	if (Cell == 0u && (Flags & RUN_TRIM_START) != 0u)
+	{
+		Along += FacadeCorner;
+		Length -= FacadeCorner;
+	}
+	if (Cell + 1u == Count && (Flags & RUN_TRIM_END) != 0u) Length -= FacadeCorner;
+}
+
+[numthreads(64, 1, 1)]
+void FacadeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint Thread = DispatchThreadId.x;
+	if (Thread >= FacadeNumThreads || FacadeNumRuns == 0u) return;
+
+	// The run: the last whose first thread is at or before this one.
+	uint Lo = 0u;
+	uint Hi = FacadeNumRuns - 1u;
+	while (Lo < Hi)
+	{
+		const uint Mid = (Lo + Hi + 1u) >> 1;
+		if (FacadeRunsU[Mid * 2u].x <= Thread) Lo = Mid;
+		else Hi = Mid - 1u;
+	}
+	const float4 F = FacadeRunsF[Lo];
+	const uint4 U0 = FacadeRunsU[Lo * 2u];
+	const uint4 U1 = FacadeRunsU[Lo * 2u + 1u];
+	const uint Building = U0.y;
+	const float3 Base = FacadeBuildingsF[Building * 2u].xyz;
+	const float2 Front = FacadeBuildingsF[Building * 2u + 1u].xy;
+	const uint Seed = FacadeBuildingSeeds[Building];
+	const uint Kind = U0.z & 15u;
+	const uint Side = (U0.z >> 4) & 3u;
+	const uint Flags = U0.z >> 8;
+	const uint Count = max(U0.w & 0xFFFFu, 1u);
+	const uint FirstStorey = U1.x & 0xFFFFu;
+	const uint EndStorey = U1.x >> 16;
+	const uint Column = U1.y;
+	const int DoorCell = int(U1.z) - 1;
+	const uint Local = Thread - U0.x;
+	// Each module's own random, from the building, its run's place and its index in the run (not from the thread, which
+	// moves as other buildings come and go).
+	const float Random = FacadeUnit(Seed ^ FacadeHash(Kind * 0x1000193u + Side * 0x10003u + Column * 0x101u + FirstStorey * 0x3Bu + Local));
+	const float SideCos = FacadeSideCos[Side];
+	const float SideSin = FacadeSideSin[Side];
+
+	if (Kind == RUN_FACADE)
+	{
+		const uint Storey = FirstStorey + Local / Count;
+		const uint Cell = Local % Count;
+		float Along;
+		float Length;
+		FacadeCellSpan(F, Cell, Count, Flags, Along, Length);
+		const uint Col = (Flags & RUN_COLUMN_DOWN) != 0u ? Column - Cell : Column + Cell;
+		// A column is windows or walls all the way up; columns are drawn a group at a time.
+		const bool bWindow = FacadeUnit(Seed ^ FacadeHash(Side * 0x10000u + Col / max(FacadeColumnGroup, 1u) + 0x51u)) < FacadeWindowChance;
+		const bool bGround = Storey == 0u;
+		uint Slot;
+		if (bGround && int(Cell) == DoorCell && FacadeHas(FACADE_DOOR)) Slot = FACADE_DOOR;
+		else if (bGround && (FacadeHas(FACADE_GROUND_WALL) || FacadeHas(FACADE_GROUND_WINDOW)))
+		{
+			const bool bShop = FacadeUnit(Seed ^ FacadeHash(Side * 0x10000u + Col + 0x6Fu)) < FacadeGroundWindowChance;
+			Slot = (bShop && FacadeHas(FACADE_GROUND_WINDOW)) || !FacadeHas(FACADE_GROUND_WALL) ? FACADE_GROUND_WINDOW : FACADE_GROUND_WALL;
+		}
+		else
+		{
+			Slot = (bWindow && FacadeHas(FACADE_WINDOW)) || !FacadeHas(FACADE_WALL) ? FACADE_WINDOW : FACADE_WALL;
+			if (!FacadeHas(Slot)) return;
+		}
+		const float3 Size = max(FacadeSlotSize[Slot].xyz, 1e-3);
+		const float3 Scale = float3(Length / Size.x, 1.0, FacadeStoreyHeight(Storey) / Size.z);
+		FacadeEmit(Slot, float3(Along, F.y, FacadeStoreyBase(Storey)), Scale, float3(0.0, 1.0, 0.0), SideCos, SideSin, Base, Front, Random);
+		return;
+	}
+
+	if (Kind == RUN_CORNER || Kind == RUN_CORNER_INNER)
+	{
+		// A storey at a time; past the last, the parapet's piece.
+		const uint Storey = FirstStorey + Local;
+		const float Height = Storey >= EndStorey ? FacadeParapet : FacadeStoreyHeight(Storey);
+		const uint Slot = Kind == RUN_CORNER ? FACADE_CORNER : FACADE_CORNER_INNER;
+		const float3 Size = max(FacadeSlotSize[Slot].xyz, 1e-3);
+		// An outer piece inside both walls (its box's start on the corner, its outside on the outline); an inner one in
+		// the open square outside them.
+		const float3 Anchor = Kind == RUN_CORNER ? float3(0.0, 1.0, 0.0) : float3(0.0, 0.0, 0.0);
+		FacadeEmit(Slot, float3(F.x, F.y, FacadeStoreyBase(Storey)), float3(1.0, 1.0, Height / Size.z), Anchor, SideCos, SideSin, Base, Front, Random);
+		return;
+	}
+
+	if (Kind == RUN_PARAPET)
+	{
+		float Along;
+		float Length;
+		FacadeCellSpan(F, Local, Count, Flags, Along, Length);
+		const float3 Size = max(FacadeSlotSize[FACADE_PARAPET].xyz, 1e-3);
+		FacadeEmit(FACADE_PARAPET, float3(Along, F.y, FacadeStoreyBase(EndStorey)), float3(Length / Size.x, 1.0, 1.0), float3(0.0, 1.0, 0.0), SideCos, SideSin, Base, Front, Random);
+		return;
+	}
+
+	// Roof tiles: Count along X, rows along Y, from (F.x, F.y), the tops at the tier's top.
+	const uint X = Local % Count;
+	const uint Y = Local / Count;
+	const float3 Size = max(FacadeSlotSize[FACADE_ROOF].xyz, 1e-3);
+	FacadeEmit(FACADE_ROOF, float3(F.x + float(X) * F.z, F.y + float(Y) * F.w, FacadeStoreyBase(EndStorey)), float3(F.z / Size.x, F.w / Size.y, 1.0), float3(0.0, 0.0, 1.0), 1.0, 0.0, Base, Front, Random);
+}

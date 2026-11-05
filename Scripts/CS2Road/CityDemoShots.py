@@ -50,7 +50,7 @@ def move_avenue(dy):
 
 def move_tower(dx):
     tower.set_actor_location(tower.get_actor_location() + unreal.Vector(dx, 0.0, 0.0), False, False)
-    # Rebuilds the prism and tells the network, as the editor's move does.
+    # Rebuilds the building's blocks and tells the network, as the editor's move does.
     tower.set_editor_property("height", tower.get_editor_property("height"), notify_mode=ALWAYS)
 
 

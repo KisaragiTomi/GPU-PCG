@@ -684,6 +684,12 @@ public:
 	bool DebugReadInstanceRandomsSync(TArray<float>& OutRandoms) const;
 
 	/**
+	 * 回读活着的 packed 实例行（5 float4/实例，布局见 FCSGpuInstanceSourceGPU）：让无头断言核对 GPU 生产者写出的变换
+	 * （城市立面套件的模块是否落在地块里）。**阻塞**，与上面几条同一道警戒线；false = 读不到（与"真的是 0 个实例"分开）。
+	 */
+	bool DebugReadInstanceRowsSync(TArray<FVector4f>& OutRows) const { return ReadLiveInstanceRowsSync(OutRows); }
+
+	/**
 	 * 回读**上一次剔除**压出来的逐 LOD 可见实例数（`LodCounters` 流：`InstanceCullCS` 的压缩游标）。
 	 * **阻塞**，与上面几条同一道警戒线 —— 只给诊断、测试与性能基线（InstanceCullingOptimization.md §4.1）用。
 	 *

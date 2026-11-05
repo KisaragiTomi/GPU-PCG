@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="750" viewBox="0 0 680 750" font-family="sans-serif">
+<title>为什么重新编号会改变路口结果</title>
+<rect width="680" height="750" fill="#FFFFFF"/>
+<text x="40" y="30" font-size="14" font-weight="500" fill="#2C2C2A">1. 平局按边序：同一个路口，换编号后赢家变了</text>
+<rect x="40" y="46" width="290" height="170" rx="12" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="185" y="68" font-size="14" font-weight="500" fill="#2C2C2A" text-anchor="middle">整网编号</text>
+<line x1="185" y1="150" x2="85" y2="150" stroke="#D85A30" stroke-width="6" stroke-linecap="round"/>
+<line x1="185" y1="150" x2="285" y2="150" stroke="#888780" stroke-width="6" stroke-linecap="round"/>
+<line x1="185" y1="150" x2="185" y2="95" stroke="#888780" stroke-width="4" stroke-linecap="round"/>
+<circle cx="185" cy="150" r="7" fill="#444441"/>
+<text x="90" y="135" font-size="12" fill="#5F5E5A">边 #7 (A)</text>
+<text x="230" y="135" font-size="12" fill="#5F5E5A">边 #12 (B)</text>
+<text x="185" y="185" font-size="12" fill="#5F5E5A" text-anchor="middle">A、B 优先级相同 → 取编号小的</text>
+<text x="185" y="203" font-size="12" fill="#5F5E5A" text-anchor="middle">A(#7) 赢，路口形状按 A 生成</text>
+<rect x="350" y="46" width="290" height="170" rx="12" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="495" y="68" font-size="14" font-weight="500" fill="#2C2C2A" text-anchor="middle">子图重新编号</text>
+<line x1="495" y1="150" x2="395" y2="150" stroke="#888780" stroke-width="6" stroke-linecap="round"/>
+<line x1="495" y1="150" x2="595" y2="150" stroke="#D85A30" stroke-width="6" stroke-linecap="round"/>
+<line x1="495" y1="150" x2="495" y2="95" stroke="#888780" stroke-width="4" stroke-linecap="round"/>
+<circle cx="495" cy="150" r="7" fill="#444441"/>
+<text x="400" y="135" font-size="12" fill="#5F5E5A">边 #1 (A)</text>
+<text x="540" y="135" font-size="12" fill="#5F5E5A">边 #0 (B)</text>
+<text x="495" y="185" font-size="12" fill="#5F5E5A" text-anchor="middle">同样平局 → 取编号小的</text>
+<text x="495" y="203" font-size="12" fill="#5F5E5A" text-anchor="middle">B(#0) 赢，几何差出几米</text>
+<text x="40" y="250" font-size="14" font-weight="500" fill="#2C2C2A">2. 节点的边按连接顺序先到先得</text>
+<rect x="40" y="266" width="290" height="150" rx="12" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="185" y="288" font-size="14" font-weight="500" fill="#2C2C2A" text-anchor="middle">整网：连接表 [A, B, C]</text>
+<rect x="70" y="306" width="70" height="34" rx="6" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5"/>
+<text x="105" y="328" font-size="14" font-weight="500" fill="#712B13" text-anchor="middle">A</text>
+<rect x="150" y="306" width="70" height="34" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="185" y="328" font-size="14" fill="#444441" text-anchor="middle">B</text>
+<rect x="230" y="306" width="70" height="34" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="265" y="328" font-size="14" fill="#444441" text-anchor="middle">C</text>
+<text x="185" y="370" font-size="12" fill="#5F5E5A" text-anchor="middle">A 先占接缝 / 先写结果</text>
+<text x="185" y="390" font-size="12" fill="#5F5E5A" text-anchor="middle">B、C 只能拿剩下的</text>
+<rect x="350" y="266" width="290" height="150" rx="12" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="495" y="288" font-size="14" font-weight="500" fill="#2C2C2A" text-anchor="middle">子图：连接表 [B, C, A]</text>
+<rect x="380" y="306" width="70" height="34" rx="6" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5"/>
+<text x="415" y="328" font-size="14" font-weight="500" fill="#712B13" text-anchor="middle">B</text>
+<rect x="460" y="306" width="70" height="34" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="495" y="328" font-size="14" fill="#444441" text-anchor="middle">C</text>
+<rect x="540" y="306" width="70" height="34" rx="6" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="575" y="328" font-size="14" fill="#444441" text-anchor="middle">A</text>
+<text x="495" y="370" font-size="12" fill="#5F5E5A" text-anchor="middle">B 先占 → 同一路口</text>
+<text x="495" y="390" font-size="12" fill="#5F5E5A" text-anchor="middle">出来的接缝与整网不同</text>
+<text x="40" y="450" font-size="14" font-weight="500" fill="#2C2C2A">3. 最终网格（示意）：每条路 = 路段网格 + 自己那块节点网格</text>
+<rect x="40" y="466" width="290" height="230" rx="12" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="185" y="488" font-size="14" font-weight="500" fill="#2C2C2A" text-anchor="middle">直行对 A–B</text>
+<polygon points="201.0,551.0 201.0,505.0 169.0,505.0 169.0,551.0" fill="#FAECE7" stroke="#993C1D" stroke-width="1"/>
+<polygon points="201.0,551.0 180.0,589.0 169.0,551.0" fill="#FAECE7" stroke="#993C1D" stroke-width="1" stroke-dasharray="3 2"/>
+<text x="185" y="495" dx="26" dy="14" font-size="12" fill="#993C1D" text-anchor="middle">A</text>
+<polygon points="147.6,588.1 107.7,611.1 123.7,638.9 163.6,615.9" fill="#E6F1FB" stroke="#185FA5" stroke-width="1"/>
+<polygon points="147.6,588.1 180.0,589.0 163.6,615.9" fill="#E6F1FB" stroke="#185FA5" stroke-width="1" stroke-dasharray="3 2"/>
+<text x="104" y="636" font-size="12" fill="#185FA5" text-anchor="middle">B</text>
+<polygon points="206.4,615.9 246.3,638.9 262.3,611.1 222.4,588.1" fill="#EAF3DE" stroke="#3B6D11" stroke-width="1"/>
+<polygon points="206.4,615.9 180.0,589.0 222.4,588.1" fill="#EAF3DE" stroke="#3B6D11" stroke-width="1" stroke-dasharray="3 2"/>
+<text x="266" y="636" font-size="12" fill="#3B6D11" text-anchor="middle">C</text>
+<circle cx="180.0" cy="589.0" r="3" fill="#2C2C2A"/>
+<path d="M185.0 511.0 Q180.0 589.0 120.9 622.0" fill="none" stroke="#2C2C2A" stroke-width="1" stroke-dasharray="5 3"/>
+<text x="185" y="668" font-size="12" fill="#5F5E5A" text-anchor="middle">三块节点网格在中点 ● 汇合</text>
+<text x="185" y="684" font-size="12" fill="#5F5E5A" text-anchor="middle">虚线 = A→B 车道连接线</text>
+<rect x="350" y="466" width="290" height="230" rx="12" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="495" y="488" font-size="14" font-weight="500" fill="#2C2C2A" text-anchor="middle">直行对 A–C</text>
+<polygon points="511.0,551.0 511.0,505.0 479.0,505.0 479.0,551.0" fill="#FAECE7" stroke="#993C1D" stroke-width="1"/>
+<polygon points="511.0,551.0 500.0,589.0 479.0,551.0" fill="#FAECE7" stroke="#993C1D" stroke-width="1" stroke-dasharray="3 2"/>
+<text x="495" y="495" dx="26" dy="14" font-size="12" fill="#993C1D" text-anchor="middle">A</text>
+<polygon points="457.6,588.1 417.7,611.1 433.7,638.9 473.6,615.9" fill="#E6F1FB" stroke="#185FA5" stroke-width="1"/>
+<polygon points="457.6,588.1 500.0,589.0 473.6,615.9" fill="#E6F1FB" stroke="#185FA5" stroke-width="1" stroke-dasharray="3 2"/>
+<text x="414" y="636" font-size="12" fill="#185FA5" text-anchor="middle">B</text>
+<polygon points="516.4,615.9 556.3,638.9 572.3,611.1 532.4,588.1" fill="#EAF3DE" stroke="#3B6D11" stroke-width="1"/>
+<polygon points="516.4,615.9 500.0,589.0 532.4,588.1" fill="#EAF3DE" stroke="#3B6D11" stroke-width="1" stroke-dasharray="3 2"/>
+<text x="576" y="636" font-size="12" fill="#3B6D11" text-anchor="middle">C</text>
+<circle cx="500.0" cy="589.0" r="3" fill="#2C2C2A"/>
+<path d="M495.0 511.0 Q500.0 589.0 559.1 622.0" fill="none" stroke="#2C2C2A" stroke-width="1" stroke-dasharray="5 3"/>
+<text x="495" y="668" font-size="12" fill="#5F5E5A" text-anchor="middle">中点挪动 → 三块的分界跟着变</text>
+<text x="495" y="684" font-size="12" fill="#5F5E5A" text-anchor="middle">连接线改走 A→C，路段不变</text>
+<text x="340" y="725" font-size="12" fill="#5F5E5A" text-anchor="middle">⚠ 引擎实测（10-28）：对称 Y 的 6 种边序出图逐像素一致，上面这种差异未复现</text>
+</svg>

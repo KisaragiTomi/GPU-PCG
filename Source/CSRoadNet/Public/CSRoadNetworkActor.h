@@ -14,6 +14,7 @@
 #include "GameFramework/Actor.h"
 #include "CSRoadNetworkActor.generated.h"
 
+class ACSCityBuildingActor;
 class ACSRoadNetworkContent;
 class UCSRoadTerrainRenderer;
 class ULevel;
@@ -54,7 +55,9 @@ namespace CSCity
 {
 struct FLot;
 struct FLotState;
+class FFacadeGpu;
 }
+class UCSCityFacadeKit;
 
 USTRUCT()
 struct FCSRoadSplineSettings
@@ -137,9 +140,15 @@ struct FCSCityBuildingTile
 {
 	GENERATED_BODY()
 
-	/** One component for each mesh standing in the tile. */
+	/** With BuildingMeshes: one component for each mesh standing in the tile. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UCSGpuInstancedMeshComponent>> Instances;
+
+	/** Without: the facade kit's modules, a component per slot (null where the kit has none), written on the GPU. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UCSGpuInstancedMeshComponent>> Facade;
+
+	TSharedPtr<CSCity::FFacadeGpu> FacadeGpu;
 
 	// What its buildings came out as: equal hashes, same buildings.
 	uint64 Hash = 0;
@@ -328,7 +337,7 @@ public:
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 RoadsGraphed = 0;
 
-	/** Fill the plots along the roads with buildings (copies of BuildingModule, or BuildingMeshes), clear of the roads, of each other and
+	/** Fill the plots along the roads with buildings (put together from BuildingKit, or BuildingMeshes), clear of the roads, of each other and
 	 *  of the plots ACSCityBuildingActors reserve. Only roads CS2 zones along have plots (not highways or bridges);
 	 *  on the snapshot's terrain the buildings stand on the ground, and none front a road 3 m above or below it. A
 	 *  plot belongs to the spline it faces (its segment, side and place along it), so editing one road leaves the
@@ -340,21 +349,16 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Buildings", meta = (EditCondition = "bBatchBuildings"))
 	FCSCityLotSettings Lots;
 
-	/** What the buildings are put together from: copies of it, each stretched to fill its part of the building
-	 *  (CSCity::AssembleBlock: for now one a storey, on the plot's Width by Depth rectangle), its +Y side towards the road.
-	 *  Drawn as GPU instances (UCSGpuInstancedMeshComponent, per tile and mesh): with Nanite on, as it should be, they go
-	 *  into GPU-Scene and the buildings make no mesh at all; without, each tile's component uploads a copy of it and waits
-	 *  for the render thread to. Empty: ACSCityBuildingActor::DefaultModule. */
+	/** What the buildings are put together from: on each plot's Width by Depth rectangle, its walls, windows, door, corners,
+	 *  parapet and roof tiles in bays and whole storeys (CSCityFacade.h), the front towards the road, the windows drawn from
+	 *  the plot's id. A compute pass writes them as GPU instances (UCSGpuInstancedMeshComponent, per tile and slot): the
+	 *  buildings make no mesh of their own. Empty: UCSCityFacadeKit::Default. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Buildings", meta = (EditCondition = "bBatchBuildings"))
-	TObjectPtr<UStaticMesh> BuildingModule;
+	TObjectPtr<UCSCityFacadeKit> BuildingKit;
 
-	/** The storeys BuildingModule's copies stack in come nearest this height. */
-	UPROPERTY(EditAnywhere, Category = "CS2 Road|Buildings", meta = (EditCondition = "bBatchBuildings", ClampMin = "0.5", Units = "m"))
-	float StoreyHeight = 3.0f;
-
-	/** Whole buildings in place of BuildingModule's copies: on each plot one of these, drawn from its id, as a GPU instance.
+	/** Whole buildings in place of BuildingKit's: on each plot one of these, drawn from its id, as a GPU instance.
 	 *  It faces the plot's road, with its front on the plot's near edge, shrunk as a whole until it fits and never grown,
-	 *  so the plot's height does not apply. Empty: BuildingModule. */
+	 *  so the plot's height does not apply. Empty: BuildingKit. */
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Buildings", meta = (EditCondition = "bBatchBuildings"))
 	TArray<TObjectPtr<UStaticMesh>> BuildingMeshes;
 
@@ -494,12 +498,19 @@ public:
 	int32 NumSplines = 0;
 
 	/** The city buildings' garages the last build found (ACSCityBuildingActor::bHasGarage), and those joined to a main road,
-	 *  by a driveway or opening onto it; each building's GarageStatus says why one is not. */
+	 *  by a driveway or opening onto it, straight or through small roads; each building's GarageStatus says why one is not. */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumGarages = 0;
 
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumJoinedGarages = 0;
+
+	/** The city streets (ACSCityStreetActor) the last build laid out with its roads, and those whose buildings changed. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 NumStreets = 0;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 StreetsRebuilt = 0;
 
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumVertices = 0;
@@ -704,9 +715,21 @@ private:
 	// changed since the last time (SplineCache) is taken as read then.
 	TArray<CSRoad::FSplineRoad> GatherSplines();
 	TUniquePtr<FCSRoadNetworkActor_SplineCache> SplineCache;
-	// The city buildings' garages joined to the main roads among Splines: a driveway spline for each that needs one,
-	// after the drawn ones (CSCityGarage). Sets NumGarages, NumJoinedGarages and the buildings' GarageStatus.
+	// The city buildings' garages joined to the main roads among Splines (or, none in reach, to small roads): a driveway
+	// spline for each that needs one, after the drawn ones (CSCityGarage). Sets NumGarages, NumJoinedGarages and the
+	// buildings' GarageStatus; those on small roads count once CheckGarageReach finds the way on to a main road.
 	void AddGarageRoads(TArray<CSRoad::FSplineRoad>& Splines, CSRoad::FAssets& Assets);
+	// A garage joined to a small road, waiting for the network: its building, and the spline its way starts on (the
+	// driveway's, or the small road's when it opens onto it).
+	struct FGarageOnSmallRoad
+	{
+		TWeakObjectPtr<ACSCityBuildingActor> Building;
+		uint64 Start = 0;
+	};
+	TArray<FGarageOnSmallRoad> GaragesOnSmallRoads;
+	// For each of those, whether the network built from Splines leads from it to a main road; counts it joined and says
+	// which road in its GarageStatus, or that none.
+	void CheckGarageReach(const TArray<CSRoad::FSplineRoad>& Splines, const TArray<CSRoad::FRoadSpec>& Roads);
 	// Rebuild's work. bWait: every GPU round trip waited for. Else (Tick) a build waits for the GPU a tick
 	// at a time (TileJob, WholeJob) and writes its meshes without waiting for the render thread.
 	void RunBuild(bool bWait);
@@ -773,11 +796,15 @@ private:
 	// segments of Splines. Only the tiles within reach of an input that changed are laid out again; the
 	// plots there come out as a full layout's would.
 	void BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>& Splines, const TArray<CSRoad::FRoadSpec>& Roads, CSRoad::FAssets& Assets, const CSRoad::FSavedTerrain* Terrain);
+	// The city streets that are this network's, in name order, each laid out with the roads as built (Roads, the
+	// network's space) near it and the width of the road it follows; before the batch buildings, which keep out of them.
+	void UpdateStreets(const TArray<CSRoad::FSplineRoad>& Splines, const TArray<CSRoad::FRoadSpec>& Roads, CSRoad::FAssets& Assets);
 	void ClearBuildingTiles();
 	// BuildingMeshes that are set.
 	TArray<UStaticMesh*> ResolveBuildingMeshes() const;
-	// BuildingModule, else the default one.
-	UStaticMesh* ResolveBuildingModule() const;
-	// The tile's components as TileLots stand: instances of Meshes, one a plot, or without any, Module's copies.
-	void WriteBuildingTile(const FIntPoint& Key, FCSCityBuildingTile& Tile, const TArray<const CSCity::FLot*>& TileLots, UStaticMesh* Module, const TArray<UStaticMesh*>& Meshes);
+	// BuildingKit, else the default one.
+	UCSCityFacadeKit* ResolveBuildingKit() const;
+	// The tile's components as TileLots stand: instances of Meshes, one a plot, or without any, Kit's modules (on their
+	// way: drawn once the GPU write has landed).
+	void WriteBuildingTile(const FIntPoint& Key, FCSCityBuildingTile& Tile, const TArray<const CSCity::FLot*>& TileLots, UCSCityFacadeKit* Kit, const TArray<UStaticMesh*>& Meshes);
 };

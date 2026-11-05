@@ -36,7 +36,11 @@ EMeshWrite WriteMeshAsync(UCSMeshRenderComponent& Component, TObjectPtr<UCSMesh>
 // written and passed over (neither drawn nor the latest), is handed back too. Null Component: Landed handed back.
 void ShowLatest(UCSMeshRenderComponent* Component, UCSMesh* Latest, UCSMesh* Landed);
 
-// Writes queued and not yet landed, every mesh (OnLanded run).
+// Land runs once the render thread has run every command enqueued so far, on the game thread outside the end-of-frame
+// update: for work written on the render thread whose result the game thread takes up. Counted with the mesh writes.
+void AfterRenderThread(UWorld* World, TFunction<void()> Land);
+
+// Writes queued and not yet landed, every mesh (OnLanded run), and AfterRenderThread's.
 int32 MeshWritesInFlight();
 // Waits until they have landed (tests, and builds that wait).
 void LandMeshWrites();

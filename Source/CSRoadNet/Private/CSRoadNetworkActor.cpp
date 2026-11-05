@@ -3,8 +3,11 @@
 #include "AssetRegistry/AssetData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "CSCityBuildingActor.h"
+#include "CSCityFacade.h"
+#include "CSCityFacadeKit.h"
 #include "CSCityGarage.h"
 #include "CSCityLayout.h"
+#include "CSCityStreetActor.h"
 #include "CSGpuInstancedMeshComponent.h"
 #include "CSGpuMemoryBudget.h"
 #include "CSGpuMeshTypes.h"
@@ -75,9 +78,11 @@ int64 CSRoadNetworkActor_GpuMeshBytes(uint32 Vertices, uint32 Indices)
 	return CSRoadNetworkActor_StreamBytes(Vertices, Indices) + int64(Indices / 3) * 31;
 }
 
-void CSRoadNetworkActor_DestroyBuildings(const FCSCityBuildingTile& Tile)
+void CSRoadNetworkActor_DestroyBuildings(FCSCityBuildingTile& Tile)
 {
 	for (UCSGpuInstancedMeshComponent* Instanced : Tile.Instances) if (Instanced) Instanced->DestroyComponent();
+	Tile.Instances.Reset();
+	CSCity::ReleaseFacade(Tile.Facade, Tile.FacadeGpu);
 }
 
 // Where the refinement warning points: the node whose mesh left the most leaves unconverged (world cm).
@@ -146,6 +151,36 @@ TSharedPtr<const CSRoad::FSavedNetwork> CSRoadNetworkActor_Network(const FString
 // The network's space (Unity metres, y up) to the actor's (cm, z up) and back; both exact.
 FVector CSRoadNetworkActor_ToUnreal(const FVector3d& V) { return FVector(V.X, -V.Z, V.Y) * 100.0; }
 FVector3d CSRoadNetworkActor_ToUnity(const FVector& V) { return FVector3d(V.X, V.Z, -V.Y) / 100.0; }
+
+// A cubic Bezier of the network's space as world points about 2 m apart.
+void CSRoadNetworkActor_Sample(const FTransform& NetworkToWorld, const FVector3d (&Curve)[4], TArray<FVector>& Out)
+{
+	const FVector3d& A = Curve[0];
+	const FVector3d& B = Curve[1];
+	const FVector3d& C = Curve[2];
+	const FVector3d& D = Curve[3];
+	const int32 Steps = FMath::Clamp(FMath::CeilToInt32((FVector3d::Distance(A, B) + FVector3d::Distance(B, C) + FVector3d::Distance(C, D)) / 2.0), 1, 256);
+	for (int32 S = 0; S <= Steps; S++)
+	{
+		const double T = double(S) / Steps;
+		const double U = 1.0 - T;
+		Out.Add(NetworkToWorld.TransformPosition(CSRoadNetworkActor_ToUnreal(A * (U * U * U) + B * (3.0 * U * U * T) + C * (3.0 * U * T * T) + D * (T * T * T))));
+	}
+}
+
+// Whether a road has plots along it: CS2 zones along it (with zone blocks: not highways, not bridges), or it is a custom
+// road asking for plots.
+bool CSRoadNetworkActor_Zoned(CSRoad::FAssets& Assets, const FString& Prefab)
+{
+	return Assets.HasRoad(Prefab) && ((Assets.Road(Prefab).m_Flags & CSRoad::RoadFlags_EnableZoning) != 0 || Assets.Plots(Prefab));
+}
+
+// A custom road's own setback (Data/CustomRoads.json "plots"), else Default (cm).
+double CSRoadNetworkActor_PlotSetback(CSRoad::FAssets& Assets, const FString& Prefab, double Default)
+{
+	const CSRoad::FAssets::FPlots* Custom = Assets.Plots(Prefab);
+	return Custom && Custom->Setback >= 0.0 ? Custom->Setback * 100.0 : Default;
+}
 
 CSRoad::CompositionFlags CSRoadNetworkActor_Flags(const FIntVector& V) { return CSRoad::MakeFlags(static_cast<uint32>(V.X), static_cast<uint32>(V.Y), static_cast<uint32>(V.Z)); }
 FIntVector CSRoadNetworkActor_Flags(const CSRoad::CompositionFlags& F) { return FIntVector(static_cast<int32>(F.m_General), static_cast<int32>(F.m_Left), static_cast<int32>(F.m_Right)); }
@@ -745,7 +780,8 @@ TArray<CSRoad::FSplineRoad> ACSRoadNetworkActor::GatherSplines()
 		Seen.Add(Actor, &bSeen);
 		if (bSeen) continue;
 		Actor->ForEachAttachedActors([&Below](AActor* Child) { Below.Add(Child); return true; });
-		if (Actor->IsA<ACSRoadSplineActor>()) continue;
+		// A city building's outline and a city street's centre line are no roads.
+		if (Actor->IsA<ACSRoadSplineActor>() || Actor->IsA<ACSCityBuildingActor>() || Actor->IsA<ACSCityStreetActor>()) continue;
 		TArray<USplineComponent*> Own;
 		Actor->GetComponents<USplineComponent>(Own);
 		Components.Append(Own);
@@ -828,6 +864,7 @@ void ACSRoadNetworkActor::AddGarageRoads(TArray<CSRoad::FSplineRoad>& Splines, C
 {
 	NumGarages = 0;
 	NumJoinedGarages = 0;
+	GaragesOnSmallRoads.Reset();
 	UWorld* World = GetWorld();
 	if (!World) return;
 	const FTransform NetworkToWorld = GetActorTransform();
@@ -869,11 +906,63 @@ void ACSRoadNetworkActor::AddGarageRoads(TArray<CSRoad::FSplineRoad>& Splines, C
 		Garage.Clearance = SplineSettings.AlleyClearance;
 		Garage.Own = B;
 		CSRoad::FSplineRoad Driveway;
-		if (!CSCity::Driveway(Garage, Splines, Obstacles, Assets, Driveway, Building->GarageStatus)) continue;
-		NumJoinedGarages++;
+		const CSRoad::FSplineRoad* Target = nullptr;
+		if (!CSCity::Driveway(Garage, Splines, Obstacles, Assets, Driveway, Building->GarageStatus, &Target)) continue;
+		// On a small road it counts once the network shows the way on to a main road (CheckGarageReach).
+		if (Target->bAlley) GaragesOnSmallRoads.Add({ Building, Driveway.Points.Num() > 0 ? Garage.Id : Target->Id });
+		else NumJoinedGarages++;
 		if (Driveway.Points.Num() > 0) Driveways.Add(MoveTemp(Driveway));
 	}
 	Splines.Append(MoveTemp(Driveways));
+}
+
+void ACSRoadNetworkActor::CheckGarageReach(const TArray<CSRoad::FSplineRoad>& Splines, const TArray<CSRoad::FRoadSpec>& Roads)
+{
+	if (GaragesOnSmallRoads.IsEmpty()) return;
+	TMap<uint64, const CSRoad::FSplineRoad*> ById;
+	for (const CSRoad::FSplineRoad& Spline : Splines) ById.Add(Spline.Id, &Spline);
+	// The edges at each node.
+	TMultiMap<int32, int32> AtNode;
+	for (int32 R = 0; R < Roads.Num(); R++)
+	{
+		AtNode.Add(Roads[R].SourceStart, R);
+		AtNode.Add(Roads[R].SourceEnd, R);
+	}
+	for (const FGarageOnSmallRoad& Garage : GaragesOnSmallRoads)
+	{
+		ACSCityBuildingActor* Building = Garage.Building.Get();
+		if (!Building) continue;
+		// Breadth first from the edges of the spline the way starts on, to the nearest edge of a main road.
+		TArray<int32> Queue;
+		for (int32 R = 0; R < Roads.Num(); R++) if (Roads[R].Spline == Garage.Start) Queue.Add(R);
+		TSet<int32> Seen(Queue);
+		const CSRoad::FSplineRoad* Reached = nullptr;
+		for (int32 Q = 0; Q < Queue.Num(); Q++)
+		{
+			const CSRoad::FRoadSpec& Road = Roads[Queue[Q]];
+			const CSRoad::FSplineRoad* const* Spline = ById.Find(Road.Spline);
+			if (Spline && !(*Spline)->bAlley)
+			{
+				Reached = *Spline;
+				break;
+			}
+			for (const int32 Node : { Road.SourceStart, Road.SourceEnd })
+			{
+				for (auto It = AtNode.CreateConstKeyIterator(Node); It; ++It)
+				{
+					bool bSeen = false;
+					Seen.Add(It.Value(), &bSeen);
+					if (!bSeen) Queue.Add(It.Value());
+				}
+			}
+		}
+		if (Reached)
+		{
+			NumJoinedGarages++;
+			Building->GarageStatus += FString::Printf(TEXT("; on to %s"), *Reached->Name);
+		}
+		else Building->GarageStatus += TEXT("; it leads to no main road");
+	}
 }
 
 bool ACSRoadNetworkActor::ConvertToSplines()
@@ -1214,6 +1303,7 @@ bool ACSRoadNetworkActor::BuildRoads(bool bWait, FString& OutError)
 		CSRoad::FSplineNetworkCache& Cache = SplineCache->Network;
 		if (!bIncrementalSplines) Cache.Reset();
 		if (!CSRoad::BuildSplineNetwork(Library->Assets, *Gathered, Settings, Terrain, Built->Nodes, Built->Roads, Stats, OutError, bIncrementalSplines ? &Cache : nullptr, bVerifyIncremental)) return false;
+		CheckGarageReach(*Gathered, Built->Roads);
 		Built->bLeftHandTraffic = bLeftHandTraffic;
 		// Converting only around the splines that changed, the counts are of the splines converted.
 		FString Around;
@@ -1233,9 +1323,12 @@ bool ACSRoadNetworkActor::BuildRoads(bool bWait, FString& OutError)
 	const bool bLeftHand = Network->bLeftHandTraffic;
 	const double NetworkMs = Lap();
 	// The buildings need only the roads' curves: they stand even if the road meshes fail below. They
-	// log their own time.
+	// log their own time. The streets first: the batch buildings keep out of them.
+	UpdateStreets(*Splines, Specs, Library->Assets);
 	if (bBatchBuildings) BuildBatchBuildings(*Splines, Specs, Library->Assets, Terrain);
 	else ClearBuildingTiles();
+	// A build that waits has its buildings drawn when it returns (their modules are written on the GPU).
+	if (bWait && (bBatchBuildings || StreetsRebuilt > 0)) LandWrites();
 	(void)Lap();
 	const bool bMarkings = bBuildMarkings;
 	// One material slot per atlas (decal surface); MeshTriangleMaterials indexes these.
@@ -2303,9 +2396,10 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	Settings.bFill = Lots.bFillBlocks;
 	Settings.FillDepth = double(Lots.FillDepth) * 100.0;
 	Settings.Seed = Lots.Seed;
-	UStaticMesh* Module = ResolveBuildingModule();
+	UCSCityFacadeKit* Kit = ResolveBuildingKit();
 	const TArray<UStaticMesh*> Meshes = ResolveBuildingMeshes();
-	if (!Module && Meshes.Num() == 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: no building module (and the default one is missing): the plots stay empty"), *GetName());
+	if (!Kit && Meshes.Num() == 0) UE_LOG(LogCSRoadNet, Warning, TEXT("%s: no building kit (and the default one is missing): the plots stay empty"), *GetName());
+	const uint64 KitHash = Kit ? CSCity::KitHash(*Kit) : 0;
 	if (!LotState) LotState = MakeUnique<CSCity::FLotState>();
 	CSCity::FLotState& State = *LotState;
 
@@ -2316,8 +2410,7 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	for (const double Value : { Settings.Frontage, Settings.Gap, Settings.Setback, Settings.MinDepth, Settings.MaxDepth, Settings.MinHeight, Settings.MaxHeight, Settings.FillDepth, TileCm }) Sign(Value);
 	Sign(Settings.bFill);
 	Sign(Settings.Seed);
-	Sign(Module);
-	Sign(StoreyHeight);
+	Sign(KitHash);
 	for (const UStaticMesh* House : Meshes) Sign(House);
 	Sign(BuildingMeshFrontYaw);
 	const FMatrix Placement = NetworkToWorld.ToMatrixWithScale();
@@ -2329,11 +2422,7 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 
 	auto HalfWidth = [&Assets](const FString& Prefab) { return double(Assets.Geometry(Prefab).m_DefaultWidth) * 50.0; };
 	// A custom road's own setback and frontage (Data/CustomRoads.json "plots"), else the network's.
-	auto SetbackOf = [&Assets, &Settings](const FString& Prefab)
-	{
-		const CSRoad::FAssets::FPlots* Custom = Assets.Plots(Prefab);
-		return Custom && Custom->Setback >= 0.0 ? Custom->Setback * 100.0 : Settings.Setback;
-	};
+	auto SetbackOf = [&Assets, &Settings](const FString& Prefab) { return CSRoadNetworkActor_PlotSetback(Assets, Prefab, Settings.Setback); };
 	auto FrontageOf = [&Assets](const FString& Prefab)
 	{
 		const CSRoad::FAssets::FPlots* Custom = Assets.Plots(Prefab);
@@ -2420,7 +2509,7 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	auto Zoned = [&Assets, &Zoning](const FString& Prefab)
 	{
 		if (const bool* Known = Zoning.Find(Prefab)) return *Known;
-		return Zoning.Add(Prefab, Assets.HasRoad(Prefab) && ((Assets.Road(Prefab).m_Flags & CSRoad::RoadFlags_EnableZoning) != 0 || Assets.Plots(Prefab)));
+		return Zoning.Add(Prefab, CSRoadNetworkActor_Zoned(Assets, Prefab));
 	};
 	TSet<uint64> NoPlots;
 	for (const CSRoad::FSplineRoad& Spline : Splines) if (!Spline.bPlots) NoPlots.Add(Spline.Id);
@@ -2446,23 +2535,24 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 			AddCurve(EInput::Anchor, Combine(Spline.Id, uint64(I)), Spline.Id, Spline.Prefab, true, A, bLinear ? FMath::Lerp(A, D, 1.0 / 3.0) : A + Spline.Leave[I] / 3.0, bLinear ? FMath::Lerp(A, D, 2.0 / 3.0) : D - Spline.Arrive[J] / 3.0, D);
 		}
 	}
+	// The plots the city buildings reserve, and the ground the city streets keep.
+	auto AddReserved = [&](CSCity::FPolygon Plot)
+	{
+		if (Plot.Num() < 3) return;
+		FInput& Input = Inputs.AddDefaulted_GetRef();
+		Input.Kind = EInput::Reserved;
+		Input.Plot = Plots.Num();
+		FXxHash64Builder Hash;
+		Hash.Update(&Input.Kind, sizeof(Input.Kind));
+		Hash.Update(Plot.GetData(), Plot.Num() * sizeof(FVector2D));
+		Input.Key = Hash.Finalize().Hash;
+		Input.Tiles = TilesOf(FBox2D(Plot), CSCity::ReservedReach(Settings));
+		Plots.Add(MoveTemp(Plot));
+	};
 	if (UWorld* World = GetWorld())
 	{
-		for (ACSCityBuildingActor* Building : TActorRange<ACSCityBuildingActor>(World))
-		{
-			if (NetworkOf(Building) != this) continue;
-			CSCity::FPolygon Plot = Building->Reservation();
-			if (Plot.Num() < 3) continue;
-			FInput& Input = Inputs.AddDefaulted_GetRef();
-			Input.Kind = EInput::Reserved;
-			Input.Plot = Plots.Num();
-			FXxHash64Builder Hash;
-			Hash.Update(&Input.Kind, sizeof(Input.Kind));
-			Hash.Update(Plot.GetData(), Plot.Num() * sizeof(FVector2D));
-			Input.Key = Hash.Finalize().Hash;
-			Input.Tiles = TilesOf(FBox2D(Plot), CSCity::ReservedReach(Settings));
-			Plots.Add(MoveTemp(Plot));
-		}
+		for (ACSCityBuildingActor* Building : TActorRange<ACSCityBuildingActor>(World)) if (NetworkOf(Building) == this) AddReserved(Building->Reservation());
+		for (ACSCityStreetActor* Street : TActorRange<ACSCityStreetActor>(World)) if (NetworkOf(Street) == this) for (const CSCity::FPolygon& Kept : Street->Reservations()) AddReserved(Kept);
 	}
 
 	// Dirty: the tiles an input that came or went can change (fresh), and those left by the last
@@ -2510,21 +2600,6 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 
 	// Laid out from the inputs within reach of a dirty tile (every input after a change of settings):
 	// the plots centred in a dirty tile come out as a full layout's would.
-	auto Sample = [&NetworkToWorld](const FVector3d (&Curve)[4], TArray<FVector>& Out)
-	{
-		const FVector3d& A = Curve[0];
-		const FVector3d& B = Curve[1];
-		const FVector3d& C = Curve[2];
-		const FVector3d& D = Curve[3];
-		// A cubic Bezier of the network's space as world points about 2 m apart.
-		const int32 Steps = FMath::Clamp(FMath::CeilToInt32((FVector3d::Distance(A, B) + FVector3d::Distance(B, C) + FVector3d::Distance(C, D)) / 2.0), 1, 256);
-		for (int32 S = 0; S <= Steps; S++)
-		{
-			const double T = double(S) / Steps;
-			const double U = 1.0 - T;
-			Out.Add(NetworkToWorld.TransformPosition(CSRoadNetworkActor_ToUnreal(A * (U * U * U) + B * (3.0 * U * U * T) + C * (3.0 * U * T * T) + D * (T * T * T))));
-		}
-	};
 	TArray<CSCity::FRoadLine> Anchors;
 	TArray<CSCity::FRoadLine> Lines;
 	TArray<CSCity::FPolygon> Reserved;
@@ -2543,7 +2618,7 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		Line.Setback = Input.Setback;
 		Line.Frontage = Input.Frontage;
 		Line.bZoned = Input.bZoned;
-		Sample(Input.Curve, Line.Points);
+		CSRoadNetworkActor_Sample(NetworkToWorld, Input.Curve, Line.Points);
 	}
 	// On the snapshot's terrain a plot stands on the ground, half a metre into it below its lowest corner,
 	// and none fronts a road more than 3 m above or below the ground there (a bridge, a ramp, a cutting).
@@ -2609,8 +2684,7 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		}
 		TileLots->Sort([](const CSCity::FLot& A, const CSCity::FLot& B) { return A.Id < B.Id; });
 		FXxHash64Builder Hash;
-		Hash.Update(&Module, sizeof(Module));
-		Hash.Update(&StoreyHeight, sizeof(StoreyHeight));
+		Hash.Update(&KitHash, sizeof(KitHash));
 		for (const UStaticMesh* House : Meshes) Hash.Update(&House, sizeof(House));
 		Hash.Update(&BuildingMeshFrontYaw, sizeof(BuildingMeshFrontYaw));
 		for (const CSCity::FLot* Lot : *TileLots)
@@ -2622,7 +2696,7 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		}
 		const uint64 Value = Hash.Finalize().Hash;
 		const FCSCityBuildingTile* Known = BuildingTiles.Find(Key);
-		if (Known && Known->Hash == Value && Known->Instances.Num() > 0) continue;
+		if (Known && Known->Hash == Value && (Known->Instances.Num() > 0 || Known->Facade.Num() > 0)) continue;
 		if (MaxTilesPerBatch > 0 && Written >= MaxTilesPerBatch)
 		{
 			State.Pending.Add(Key);
@@ -2636,7 +2710,7 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 			continue;
 		}
 		FCSCityBuildingTile& Tile = BuildingTiles.FindOrAdd(Key);
-		WriteBuildingTile(Key, Tile, *TileLots, Module, Meshes);
+		WriteBuildingTile(Key, Tile, *TileLots, Kit, Meshes);
 		Tile.Hash = Value;
 		Tile.Buildings = TileLots->Num();
 		Written++;
@@ -2663,26 +2737,42 @@ TArray<UStaticMesh*> ACSRoadNetworkActor::ResolveBuildingMeshes() const
 	return Meshes;
 }
 
-UStaticMesh* ACSRoadNetworkActor::ResolveBuildingModule() const
+UCSCityFacadeKit* ACSRoadNetworkActor::ResolveBuildingKit() const
 {
-	return BuildingModule ? BuildingModule.Get() : ACSCityBuildingActor::DefaultModule();
+	return BuildingKit ? BuildingKit.Get() : UCSCityFacadeKit::Default();
 }
 
-void ACSRoadNetworkActor::WriteBuildingTile(const FIntPoint& Key, FCSCityBuildingTile& Tile, const TArray<const CSCity::FLot*>& TileLots, UStaticMesh* Module, const TArray<UStaticMesh*>& Meshes)
+void ACSRoadNetworkActor::WriteBuildingTile(const FIntPoint& Key, FCSCityBuildingTile& Tile, const TArray<const CSCity::FLot*>& TileLots, UCSCityFacadeKit* Kit, const TArray<UStaticMesh*>& Meshes)
 {
-	// What stands on the plots: a whole mesh each, else the module's copies.
-	const TArray<UStaticMesh*> Used = Meshes.Num() > 0 ? Meshes : Module ? TArray<UStaticMesh*>{ Module } : TArray<UStaticMesh*>();
+	const FString Name = FString::Printf(TEXT("BuildingTile_%d_%d"), Key.X, Key.Y);
+	if (Meshes.Num() == 0)
+	{
+		// The kit's modules, written on the GPU relative to the tile's middle.
+		for (UCSGpuInstancedMeshComponent* Existing : Tile.Instances) if (Existing) Existing->DestroyComponent();
+		Tile.Instances.Reset();
+		if (!Kit)
+		{
+			CSCity::ReleaseFacade(Tile.Facade, Tile.FacadeGpu);
+			return;
+		}
+		TArray<CSCity::FFacadeBuilding> Buildings;
+		Buildings.Reserve(TileLots.Num());
+		for (const CSCity::FLot* Lot : TileLots) Buildings.Add(CSCity::LotBuilding(*Lot));
+		const double TileCm = double(TileSize) * 100.0;
+		const FVector Origin = GetActorTransform().TransformPosition(FVector((Key.X + 0.5) * TileCm, -(Key.Y + 0.5) * TileCm, 0.0));
+		CSCity::WriteFacade(*Content, Content->GetRootComponent(), Name, Origin, *Kit, Buildings, Tile.Facade, Tile.FacadeGpu);
+		return;
+	}
+	// Whole meshes, one a plot.
+	CSCity::ReleaseFacade(Tile.Facade, Tile.FacadeGpu);
 	TArray<TArray<FTransform>> ByMesh;
-	ByMesh.SetNum(Used.Num());
+	ByMesh.SetNum(Meshes.Num());
 	for (const CSCity::FLot* Lot : TileLots)
 	{
-		if (Meshes.Num() > 0)
-		{
-			const int32 Index = CSCity::LotMesh(*Lot, Lots.Seed, Meshes.Num());
-			ByMesh[Index].Add(CSCity::LotInstance(*Lot, Meshes[Index]->GetBoundingBox(), BuildingMeshFrontYaw));
-		}
-		else if (Module) CSCity::AssembleBlock(CSCity::LotBlock(*Lot), Module->GetBoundingBox(), double(StoreyHeight) * 100.0, ByMesh[0]);
+		const int32 Index = CSCity::LotMesh(*Lot, Lots.Seed, Meshes.Num());
+		ByMesh[Index].Add(CSCity::LotInstance(*Lot, Meshes[Index]->GetBoundingBox(), BuildingMeshFrontYaw));
 	}
+	const TArray<UStaticMesh*>& Used = Meshes;
 	TArray<TObjectPtr<UCSGpuInstancedMeshComponent>> Kept;
 	for (int32 M = 0; M < Used.Num(); M++)
 	{
@@ -2692,8 +2782,7 @@ void ACSRoadNetworkActor::WriteBuildingTile(const FIntPoint& Key, FCSCityBuildin
 		if (!Component)
 		{
 			// As the road tiles: made at build time, never saved or copied, world space with an absolute transform.
-			const FName Name = MakeUniqueObjectName(Content, UCSGpuInstancedMeshComponent::StaticClass(), *FString::Printf(TEXT("BuildingTile_%d_%d"), Key.X, Key.Y));
-			Component = NewObject<UCSGpuInstancedMeshComponent>(Content, Name, RF_Transient | RF_DuplicateTransient);
+			Component = NewObject<UCSGpuInstancedMeshComponent>(Content, MakeUniqueObjectName(Content, UCSGpuInstancedMeshComponent::StaticClass(), FName(*Name)), RF_Transient | RF_DuplicateTransient);
 			Component->SetupAttachment(Content->GetRootComponent());
 			Component->SetUsingAbsoluteLocation(true);
 			Component->SetUsingAbsoluteRotation(true);
@@ -2714,8 +2803,89 @@ void ACSRoadNetworkActor::WriteBuildingTileForTest(const FIntPoint& Key, const T
 	TArray<const CSCity::FLot*> Pointers;
 	for (const CSCity::FLot& Lot : TileLots) Pointers.Add(&Lot);
 	FCSCityBuildingTile& Tile = BuildingTiles.FindOrAdd(Key);
-	WriteBuildingTile(Key, Tile, Pointers, ResolveBuildingModule(), ResolveBuildingMeshes());
+	WriteBuildingTile(Key, Tile, Pointers, ResolveBuildingKit(), ResolveBuildingMeshes());
 	Tile.Buildings = Pointers.Num();
+}
+
+void ACSRoadNetworkActor::UpdateStreets(const TArray<CSRoad::FSplineRoad>& Splines, const TArray<CSRoad::FRoadSpec>& Roads, CSRoad::FAssets& Assets)
+{
+	NumStreets = 0;
+	StreetsRebuilt = 0;
+	UWorld* World = GetWorld();
+	if (!World) return;
+	TArray<ACSCityStreetActor*> Streets;
+	for (ACSCityStreetActor* Street : TActorRange<ACSCityStreetActor>(World)) if (NetworkOf(Street) == this) Streets.Add(Street);
+	if (Streets.Num() == 0) return;
+	const double StartTime = FPlatformTime::Seconds();
+	// Those after another (by name) give way to its plots.
+	Streets.Sort([](const ACSCityStreetActor& A, const ACSCityStreetActor& B) { return A.GetPathName() < B.GetPathName(); });
+	const FTransform NetworkToWorld = GetActorTransform();
+	const double DefaultSetback = double(Lots.Setback) * 100.0;
+	TSet<uint64> NoPlots;
+	for (const CSRoad::FSplineRoad& Spline : Splines) if (!Spline.bPlots) NoPlots.Add(Spline.Id);
+	TMap<FString, bool> Zoning;
+
+	// Each road's curve with its half width and setback, and the box (world space) about its control points, which it
+	// lies within.
+	struct FCurve
+	{
+		FVector3d Points[4];
+		FBox2D Box;
+		double HalfWidth = 0.0;
+		double Setback = 0.0;
+		uint64 Group = 0;
+		bool bZoned = true;
+	};
+	TArray<FCurve> Curves;
+	Curves.Reserve(Roads.Num());
+	double Widest = 0.0;
+	for (const CSRoad::FRoadSpec& Road : Roads)
+	{
+		FCurve& Curve = Curves.AddDefaulted_GetRef();
+		const CSRoad::float3* Controls[4] = { &Road.Curve.a, &Road.Curve.b, &Road.Curve.c, &Road.Curve.d };
+		Curve.Box = FBox2D(ForceInit);
+		for (int32 K = 0; K < 4; K++)
+		{
+			Curve.Points[K] = FVector3d(Controls[K]->x, Controls[K]->y, Controls[K]->z);
+			Curve.Box += FVector2D(NetworkToWorld.TransformPosition(CSRoadNetworkActor_ToUnreal(Curve.Points[K])));
+		}
+		Curve.HalfWidth = Assets.HasRoad(Road.Prefab) ? double(Assets.Geometry(Road.Prefab).m_DefaultWidth) * 50.0 : 0.0;
+		Curve.Setback = CSRoadNetworkActor_PlotSetback(Assets, Road.Prefab, DefaultSetback);
+		Curve.Group = Road.Spline;
+		if (!Zoning.Contains(Road.Prefab)) Zoning.Add(Road.Prefab, CSRoadNetworkActor_Zoned(Assets, Road.Prefab));
+		Curve.bZoned = !NoPlots.Contains(Road.Spline) && Zoning[Road.Prefab];
+		Widest = FMath::Max(Widest, Curve.HalfWidth + Curve.Setback);
+	}
+
+	for (ACSCityStreetActor* Street : Streets)
+	{
+		FBox2D Box(ForceInit);
+		for (const FVector& Point : Street->CentreLine()) Box += FVector2D(Point);
+		const ACSRoadSplineActor* Followed = Street->FollowedRoad();
+		const FString Prefab = Followed ? Followed->Spline->Prefab : FString();
+		const double FollowedWidth = Followed && Assets.HasRoad(Prefab) ? double(Assets.Geometry(Prefab).m_DefaultWidth) * 100.0 : 0.0;
+		// A road bears on the plots within its half width and setback of them; they lie within the street's half width,
+		// setback, deepest plot and a Gap of its centre line, and half a slot past its ends (a metre spare).
+		const double Reach = FMath::Max(FollowedWidth * 0.5, double(Street->StreetWidth) * 50.0) + double(Street->Setback + FMath::Max(Street->MinDepth, Street->MaxDepth) + Street->Gap + Street->Frontage) * 100.0 + Widest + 100.0;
+		TArray<CSCity::FRoadLine> Lines;
+		if (Box.bIsValid)
+		{
+			const FBox2D Near = Box.ExpandBy(Reach);
+			for (const FCurve& Curve : Curves)
+			{
+				if (!Curve.Box.bIsValid || !Curve.Box.Intersect(Near)) continue;
+				CSCity::FRoadLine& Line = Lines.AddDefaulted_GetRef();
+				Line.Group = Curve.Group;
+				Line.HalfWidth = Curve.HalfWidth;
+				Line.Setback = Curve.Setback;
+				Line.bZoned = Curve.bZoned;
+				CSRoadNetworkActor_Sample(NetworkToWorld, Curve.Points, Line.Points);
+			}
+		}
+		if (Street->UpdateFromNetwork(Lines, FollowedWidth)) StreetsRebuilt++;
+	}
+	NumStreets = Streets.Num();
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d city streets laid out with the roads, %d rebuilt; %.1f ms"), *GetName(), NumStreets, StreetsRebuilt, (FPlatformTime::Seconds() - StartTime) * 1000.0);
 }
 
 void ACSRoadNetworkActor::ClearBuildingTiles()
