@@ -1,0 +1,65 @@
+{
+  "scope": "Original NightCity_WP assembled facade neighbourhood; NOT a verified single-building segmentation.",
+  "source_geometry_date": "2026-11-06",
+  "mesh_count": 19,
+  "instance_count": 51,
+  "architecture_instances": 43,
+  "aircon_bodies": 4,
+  "separate_mounts": 4,
+  "same_model_row_spacing_cm": [
+    96.24008780129157,
+    95.72999999999956
+  ],
+  "cached_vs_current_source_bounds_max_error_cm": 0.0,
+  "inferred_pairs": [
+    {
+      "body": "SM_5A0D3C272B46876B/0/56",
+      "mount": "SM_AF22004CD50D1C7A/0/44",
+      "pivot_distance_cm": 22.963939122035203,
+      "body_pivot_in_mount_local_cm": [
+        -22.96393591128219,
+        -0.0014367322600782996,
+        2.5049728788430416e-10
+      ],
+      "rotation_match": true,
+      "status": "spatially inferred pair, no original authoring relationship data"
+    },
+    {
+      "body": "SM_003AB0AD89462FF2/1/72",
+      "mount": "SM_821A5A78007995E0/0/103",
+      "pivot_distance_cm": 9.275521548668063,
+      "body_pivot_in_mount_local_cm": [
+        -9.275519525716492,
+        -0.003715670891690149,
+        6.493798792570685e-10
+      ],
+      "rotation_match": true,
+      "status": "spatially inferred pair, no original authoring relationship data"
+    },
+    {
+      "body": "SM_003AB0AD89462FF2/1/76",
+      "mount": "SM_821A5A78007995E0/0/108",
+      "pivot_distance_cm": 9.265878263833043,
+      "body_pivot_in_mount_local_cm": [
+        -9.265874616440238,
+        0.00662723484316479,
+        -1.1590308933224494e-09
+      ],
+      "rotation_match": true,
+      "status": "spatially inferred pair, no original authoring relationship data"
+    },
+    {
+      "body": "SM_003AB0AD89462FF2/1/77",
+      "mount": "SM_821A5A78007995E0/0/107",
+      "pivot_distance_cm": 9.265878263833043,
+      "body_pivot_in_mount_local_cm": [
+        -9.265874616440238,
+        0.00662723484316479,
+        -1.1590308933224494e-09
+      ],
+      "rotation_match": true,
+      "status": "spatially inferred pair, no original authoring relationship data"
+    }
+  ],
+  "exterior_classification": "not implemented for this example; no placement permission mesh emitted"
+}

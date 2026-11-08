@@ -2,6 +2,8 @@
 
 日期：2026-11-05。状态：资产已生成、源 Mesh 默认关联已保存、独立进程重载验证通过。
 
+2026-11-06 修正：用户要求从原场景拼装好的建筑分析，并避免在内面生成区域。本批只保留为模块几何实验，现有 `Ready` 不代表建筑外表面已确认，不能直接用于最终附属物放置。本轮未重写这些资产；新的分析入口、样本和内面排除条件见 [从成品建筑提取外部安装区域](NightCity_AssembledBuilding_Placement.md)。
+
 本批处理了 24 个建筑模块：18 个 Charter Hill 墙体、带窗墙和转角变体，以及 6 个 Corporate Plaza 面板。生成了 24 份 `UCSCityPlacementProfile`，其中 22 份含有效几何候选区域、2 份为 `PendingReview`；合计 71 个区域、352 个三角形。每个源 `UStaticMesh` 通过 `UCSCityPlacementBinding : UAssetUserData` 引用默认 Profile，区域在源 Mesh 局部空间中保存，单位为 cm。
 
 这批数据解决“模型上哪里存在几何安装机会”。区域类别暂为 `WallMountedCandidate`；尚未接入空调、招牌的具体放置器、跨楼互斥或 Tiny Glade 连接求解器。

@@ -2,6 +2,8 @@
 
 日期：2026-11-05。状态：Profile、AssetUserData 默认关联和首批 24 个源模型资产已落地，详见 [第一批可放置区域](NightCity_Placement_Batch01.md)。Kit 覆盖、重导入自动失效、GPU 区域输出与附属物求解仍属设计。前置：[附属物放置方案评估](NightCity_Attachment_Placement_Evaluation.md)。
 
+2026-11-06 方向修正：最终可放置区域应由已拼装建筑的内外分类和连续立面分析产生，并归属建筑实例/立面结果；源 Mesh Profile 仅作为先验或缓存，不能授予所有实例相同的安装许可。当前单源资产机制保留，新的建筑结果层尚未实现，详见 [成品建筑外部安装区域](NightCity_AssembledBuilding_Placement.md)。下文为原单源资产设计及其实现背景。
+
 ## 1. 推荐关系
 
 把可放置区域定义为**源 Mesh 局部空间中的辅助表面网格**。它具有自己的顶点、三角形和区域语义，与源 Mesh 共享实例变换，不要求共享顶点、拓扑或 LOD。

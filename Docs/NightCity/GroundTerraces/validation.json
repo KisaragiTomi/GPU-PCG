@@ -1,0 +1,269 @@
+{
+  "level": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/L_GroundTerraces_28m",
+  "checks": [
+    {
+      "name": "persisted_instance_groups",
+      "passed": true,
+      "detail": {
+        "groups": 163,
+        "instances": 8746
+      }
+    },
+    {
+      "name": "stairs_unit_scale",
+      "passed": true,
+      "detail": {
+        "instances": 70
+      }
+    },
+    {
+      "name": "height_quantization",
+      "passed": true,
+      "detail": [
+        -400,
+        0,
+        1200,
+        1600,
+        2400,
+        2600
+      ]
+    },
+    {
+      "name": "collision_LowPlaza",
+      "passed": true,
+      "detail": {
+        "expected_z": 0,
+        "actual_z": -2e-06,
+        "hit": ""
+      }
+    },
+    {
+      "name": "collision_Park",
+      "passed": true,
+      "detail": {
+        "expected_z": 1200,
+        "actual_z": 1201.2,
+        "hit": ""
+      }
+    },
+    {
+      "name": "collision_Upper",
+      "passed": true,
+      "detail": {
+        "expected_z": 2400,
+        "actual_z": 2401.0,
+        "hit": ""
+      }
+    },
+    {
+      "name": "collision_RaisedGarden",
+      "passed": true,
+      "detail": {
+        "expected_z": 1600,
+        "actual_z": 1601.0,
+        "hit": ""
+      }
+    },
+    {
+      "name": "collision_SunkenCourt",
+      "passed": true,
+      "detail": {
+        "expected_z": -400,
+        "actual_z": -399.0,
+        "hit": ""
+      }
+    },
+    {
+      "name": "collision_EastWalk",
+      "passed": true,
+      "detail": {
+        "expected_z": 0,
+        "actual_z": -2e-06,
+        "hit": ""
+      }
+    },
+    {
+      "name": "collision_FirstTread",
+      "passed": true,
+      "detail": {
+        "expected_z": 20,
+        "actual_z": 18.910303,
+        "hit": ""
+      }
+    },
+    {
+      "name": "collision_TopTread",
+      "passed": true,
+      "detail": {
+        "expected_z": 1200,
+        "actual_z": 1198.9084,
+        "hit": ""
+      }
+    },
+    {
+      "name": "collision_StairLanding",
+      "passed": true,
+      "detail": {
+        "expected_z": 400,
+        "actual_z": 400.0,
+        "hit": ""
+      }
+    },
+    {
+      "name": "retaining_wall_collision_200",
+      "passed": true,
+      "detail": "<Struct 'HitResult' (0x0000018950EF6900) {}>"
+    },
+    {
+      "name": "retaining_wall_collision_1200",
+      "passed": true,
+      "detail": "<Struct 'HitResult' (0x0000018950EF4C40) {}>"
+    },
+    {
+      "name": "retaining_wall_collision_2200",
+      "passed": true,
+      "detail": "<Struct 'HitResult' (0x0000018950EF67C0) {}>"
+    },
+    {
+      "name": "four_independent_building_actors",
+      "passed": true,
+      "detail": [
+        "GT_Building_01",
+        "GT_Building_02",
+        "GT_Building_03",
+        "GT_Building_04"
+      ]
+    },
+    {
+      "name": "single_owner_GT_Building_01",
+      "passed": true,
+      "detail": [
+        "Building_Corners",
+        "Building_Doors",
+        "Building_Facades",
+        "Building_Floors",
+        "Building_Roofs"
+      ]
+    },
+    {
+      "name": "move_together_GT_Building_01",
+      "passed": true,
+      "detail": {
+        "max_translation_error_cm": 0.0
+      }
+    },
+    {
+      "name": "single_owner_GT_Building_02",
+      "passed": true,
+      "detail": [
+        "Building_Corners",
+        "Building_Doors",
+        "Building_Facades",
+        "Building_Floors",
+        "Building_Roofs"
+      ]
+    },
+    {
+      "name": "move_together_GT_Building_02",
+      "passed": true,
+      "detail": {
+        "max_translation_error_cm": 0.0
+      }
+    },
+    {
+      "name": "single_owner_GT_Building_03",
+      "passed": true,
+      "detail": [
+        "Building_Corners",
+        "Building_Doors",
+        "Building_Facades",
+        "Building_Floors",
+        "Building_Roofs"
+      ]
+    },
+    {
+      "name": "move_together_GT_Building_03",
+      "passed": true,
+      "detail": {
+        "max_translation_error_cm": 0.0
+      }
+    },
+    {
+      "name": "single_owner_GT_Building_04",
+      "passed": true,
+      "detail": [
+        "Building_Corners",
+        "Building_Doors",
+        "Building_Facades",
+        "Building_Floors",
+        "Building_Roofs"
+      ]
+    },
+    {
+      "name": "move_together_GT_Building_04",
+      "passed": true,
+      "detail": {
+        "max_translation_error_cm": 0.0
+      }
+    },
+    {
+      "name": "paths_connect_all_regions_and_buildings",
+      "passed": true,
+      "detail": {
+        "reachable_cells": 3696,
+        "total_cells": 3696,
+        "stair_links": 7,
+        "destinations": [
+          [
+            -5400,
+            -5750,
+            0
+          ],
+          [
+            -4500,
+            5950,
+            2600
+          ],
+          [
+            -300,
+            5950,
+            2600
+          ],
+          [
+            3900,
+            5950,
+            2600
+          ],
+          [
+            0,
+            3500,
+            1600
+          ],
+          [
+            3600,
+            -4000,
+            -400
+          ]
+        ]
+      }
+    },
+    {
+      "name": "path_surface_samples",
+      "passed": true,
+      "detail": []
+    },
+    {
+      "name": "path_centrelines_clear",
+      "passed": true,
+      "detail": []
+    }
+  ],
+  "screenshots": [
+    "D:\\MyProject\\UnrealProject\\UETest574_2\\Saved\\CodexGroundTerraces\\overview.png",
+    "D:\\MyProject\\UnrealProject\\UETest574_2\\Saved\\CodexGroundTerraces\\park_stairs.png",
+    "D:\\MyProject\\UnrealProject\\UETest574_2\\Saved\\CodexGroundTerraces\\high_wall.png",
+    "D:\\MyProject\\UnrealProject\\UETest574_2\\Saved\\CodexGroundTerraces\\sunken_court.png",
+    "D:\\MyProject\\UnrealProject\\UETest574_2\\Saved\\CodexGroundTerraces\\building_corners.png"
+  ],
+  "passed": true
+}

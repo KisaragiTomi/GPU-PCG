@@ -1,0 +1,1685 @@
+{
+  "level": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/L_GroundTerraces_28m",
+  "ground_levels_cm": [
+    -400,
+    0,
+    1200,
+    1600,
+    2400,
+    2600
+  ],
+  "main_ground_difference_cm": 2800,
+  "stair_rise_cm": 200.0,
+  "step_height_cm": 20.0,
+  "stair_scale": [
+    1,
+    1,
+    1
+  ],
+  "connections": [
+    {
+      "name": "LowToPark",
+      "x": [
+        -6000,
+        -4800
+      ],
+      "start_y": -3000,
+      "end_y": 0.0,
+      "low": 0,
+      "high": 1200.0,
+      "flights": 6,
+      "step_cm": 20.0
+    },
+    {
+      "name": "ParkToUpper",
+      "x": [
+        4800,
+        6000
+      ],
+      "start_y": 1200,
+      "end_y": 4200.0,
+      "low": 1200,
+      "high": 2400.0,
+      "flights": 6,
+      "step_cm": 20.0
+    },
+    {
+      "name": "CourtToPlaza",
+      "x": [
+        3000,
+        4200
+      ],
+      "start_y": -1800,
+      "end_y": -1200.0,
+      "low": -400,
+      "high": 0.0,
+      "flights": 2,
+      "step_cm": 20.0
+    },
+    {
+      "name": "ParkToGarden",
+      "x": [
+        -600,
+        600
+      ],
+      "start_y": 1800,
+      "end_y": 2400.0,
+      "low": 1200,
+      "high": 1600.0,
+      "flights": 2,
+      "step_cm": 20.0
+    },
+    {
+      "name": "BuildingEntry_-6000",
+      "x": [
+        -4800,
+        -4200
+      ],
+      "start_y": 5100,
+      "end_y": 5400.0,
+      "low": 2400,
+      "high": 2600.0,
+      "flights": 1,
+      "step_cm": 20.0
+    },
+    {
+      "name": "BuildingEntry_-1800",
+      "x": [
+        -600,
+        0
+      ],
+      "start_y": 5100,
+      "end_y": 5400.0,
+      "low": 2400,
+      "high": 2600.0,
+      "flights": 1,
+      "step_cm": 20.0
+    },
+    {
+      "name": "BuildingEntry_2400",
+      "x": [
+        3600,
+        4200
+      ],
+      "start_y": 5100,
+      "end_y": 5400.0,
+      "low": 2400,
+      "high": 2600.0,
+      "flights": 1,
+      "step_cm": 20.0
+    }
+  ],
+  "groups": [
+    {
+      "actor": "GT_Bench_Legs_0_0",
+      "category": "Bench_Legs",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_DarkMetal",
+      "instances": 28
+    },
+    {
+      "actor": "GT_Bench_Seat_0_0",
+      "category": "Bench_Seat",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_BenchWood",
+      "instances": 14
+    },
+    {
+      "actor": "GT_Ground_BuildingPlinth_-3_2",
+      "category": "Ground_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 3
+    },
+    {
+      "actor": "GT_Ground_BuildingPlinth_-3_3",
+      "category": "Ground_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 2
+    },
+    {
+      "actor": "GT_Ground_BuildingPlinth_-2_2",
+      "category": "Ground_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_BuildingPlinth_-2_3",
+      "category": "Ground_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_BuildingPlinth_-1_2",
+      "category": "Ground_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Ground_BuildingPlinth_-1_3",
+      "category": "Ground_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_BuildingPlinth_0_2",
+      "category": "Ground_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 9
+    },
+    {
+      "actor": "GT_Ground_BuildingPlinth_0_3",
+      "category": "Ground_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Ground_BuildingPlinth_1_2",
+      "category": "Ground_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 9
+    },
+    {
+      "actor": "GT_Ground_BuildingPlinth_1_3",
+      "category": "Ground_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Ground_BuildingPlinth_2_2",
+      "category": "Ground_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Ground_BuildingPlinth_2_3",
+      "category": "Ground_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_EastPromenade_3_-3",
+      "category": "Ground_EastPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Ground_EastPromenade_3_-2",
+      "category": "Ground_EastPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_EastPromenade_3_-1",
+      "category": "Ground_EastPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_EastPromenade_3_0",
+      "category": "Ground_EastPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_EastPromenade_3_1",
+      "category": "Ground_EastPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_EastPromenade_3_2",
+      "category": "Ground_EastPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_EastPromenade_3_3",
+      "category": "Ground_EastPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_-3_-3",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_-3_-2",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_-3_-1",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_-2_-3",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_-2_-2",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_-2_-1",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_-1_-3",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_-1_-2",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_-1_-1",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_0_-3",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_0_-2",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_0_-1",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_1_-3",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_1_-1",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_2_-3",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_2_-2",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_2_-1",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_3_-3",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 2
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_3_-2",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_LowPlaza_3_-1",
+      "category": "Ground_LowPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_NorthPromenade_-4_3",
+      "category": "Ground_NorthPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_NorthPromenade_-3_3",
+      "category": "Ground_NorthPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_NorthPromenade_-2_3",
+      "category": "Ground_NorthPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_NorthPromenade_-1_3",
+      "category": "Ground_NorthPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_NorthPromenade_0_3",
+      "category": "Ground_NorthPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_NorthPromenade_1_3",
+      "category": "Ground_NorthPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_NorthPromenade_2_3",
+      "category": "Ground_NorthPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_NorthPromenade_3_3",
+      "category": "Ground_NorthPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_Park12m_-3_0",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_Park12m_-3_1",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 9
+    },
+    {
+      "actor": "GT_Ground_Park12m_-2_0",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_Park12m_-2_1",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_Park12m_-1_0",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_Park12m_-1_1",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_Park12m_0_0",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_Park12m_0_1",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_Park12m_1_0",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_Park12m_1_1",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_Park12m_2_0",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_Park12m_2_1",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_Park12m_3_0",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_Park12m_3_1",
+      "category": "Ground_Park12m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 3
+    },
+    {
+      "actor": "GT_Ground_RaisedGarden_-1_1",
+      "category": "Ground_RaisedGarden",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Ground_RaisedGarden_0_1",
+      "category": "Ground_RaisedGarden",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_StairLandings_-3_-1",
+      "category": "Ground_StairLandings",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 2
+    },
+    {
+      "actor": "GT_Ground_StairLandings_2_0",
+      "category": "Ground_StairLandings",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Ground_StairLandings_2_1",
+      "category": "Ground_StairLandings",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Ground_SunkenCourt_1_-2",
+      "category": "Ground_SunkenCourt",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_SunkenCourt_1_-1",
+      "category": "Ground_SunkenCourt",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_SunkenCourt_2_-2",
+      "category": "Ground_SunkenCourt",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_SunkenCourt_2_-1",
+      "category": "Ground_SunkenCourt",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_Upper24m_-3_1",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 3
+    },
+    {
+      "actor": "GT_Ground_Upper24m_-3_2",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Ground_Upper24m_-3_3",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Ground_Upper24m_-2_1",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_Upper24m_-2_2",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_Upper24m_-2_3",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_Upper24m_-1_1",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_Upper24m_-1_2",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_Upper24m_-1_3",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_Upper24m_0_1",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_Upper24m_0_2",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_Upper24m_0_3",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_Upper24m_1_1",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_Upper24m_1_2",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_Upper24m_1_3",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_Upper24m_2_1",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_Upper24m_2_2",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Ground_Upper24m_2_3",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_Upper24m_3_1",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Ground_Upper24m_3_2",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_Upper24m_3_3",
+      "category": "Ground_Upper24m",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 2
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-4_-3",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-4_-2",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-4_-1",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-4_0",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-4_1",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-4_2",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-4_3",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-3_-3",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 2
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-3_-2",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-3_-1",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-3_0",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-3_1",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-3_2",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Ground_WestPromenade_-3_3",
+      "category": "Ground_WestPromenade",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_GroundTile_600",
+      "material": "",
+      "instances": 2
+    },
+    {
+      "actor": "GT_Planter_Edges_0_0",
+      "category": "Planter_Edges",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 56
+    },
+    {
+      "actor": "GT_Planter_Soil_0_0",
+      "category": "Planter_Soil",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_GardenSoil",
+      "instances": 14
+    },
+    {
+      "actor": "GT_Rail_Beams_0_0",
+      "category": "Rail_Beams",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_DarkMetal",
+      "instances": 332
+    },
+    {
+      "actor": "GT_Rail_Posts_0_0",
+      "category": "Rail_Posts",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_DarkMetal",
+      "instances": 830
+    },
+    {
+      "actor": "GT_Stair_EndClosures_0_0",
+      "category": "Stair_EndClosures",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 7
+    },
+    {
+      "actor": "GT_Stair_Handrails_0_0",
+      "category": "Stair_Handrails",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_DarkMetal",
+      "instances": 38
+    },
+    {
+      "actor": "GT_Stair_Posts_0_0",
+      "category": "Stair_Posts",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_DarkMetal",
+      "instances": 76
+    },
+    {
+      "actor": "GT_Stair_Supports_0_0",
+      "category": "Stair_Supports",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Stairs_BuildingEntry_-1800_0_0",
+      "category": "Stairs_BuildingEntry_-1800",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_Stair_300x300_Rise200",
+      "material": "",
+      "instances": 2
+    },
+    {
+      "actor": "GT_Stairs_BuildingEntry_-6000_0_0",
+      "category": "Stairs_BuildingEntry_-6000",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_Stair_300x300_Rise200",
+      "material": "",
+      "instances": 2
+    },
+    {
+      "actor": "GT_Stairs_BuildingEntry_2400_0_0",
+      "category": "Stairs_BuildingEntry_2400",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_Stair_300x300_Rise200",
+      "material": "",
+      "instances": 2
+    },
+    {
+      "actor": "GT_Stairs_CourtToPlaza_0_0",
+      "category": "Stairs_CourtToPlaza",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_Stair_300x300_Rise200",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Stairs_LowToPark_0_0",
+      "category": "Stairs_LowToPark",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_Stair_300x300_Rise200",
+      "material": "",
+      "instances": 24
+    },
+    {
+      "actor": "GT_Stairs_ParkToGarden_0_0",
+      "category": "Stairs_ParkToGarden",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_Stair_300x300_Rise200",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Stairs_ParkToUpper_0_0",
+      "category": "Stairs_ParkToUpper",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_Stair_300x300_Rise200",
+      "material": "",
+      "instances": 24
+    },
+    {
+      "actor": "GT_Trees_Park_0_0",
+      "category": "Trees_Park",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Meshes/20/SM_207FF5952CF86936",
+      "material": "",
+      "instances": 14
+    },
+    {
+      "actor": "GT_Wall_Caps_0_0",
+      "category": "Wall_Caps",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 170
+    },
+    {
+      "actor": "GT_Walls_BuildingPlinth_0_0",
+      "category": "Walls_BuildingPlinth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 42
+    },
+    {
+      "actor": "GT_Walls_CourtEast_0_0",
+      "category": "Walls_CourtEast",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Walls_CourtNorth_0_0",
+      "category": "Walls_CourtNorth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Walls_CourtSouth_0_0",
+      "category": "Walls_CourtSouth",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Walls_CourtWest_0_0",
+      "category": "Walls_CourtWest",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Walls_GardenEast_0_0",
+      "category": "Walls_GardenEast",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 3
+    },
+    {
+      "actor": "GT_Walls_GardenFront_0_0",
+      "category": "Walls_GardenFront",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 4
+    },
+    {
+      "actor": "GT_Walls_GardenWest_0_0",
+      "category": "Walls_GardenWest",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 3
+    },
+    {
+      "actor": "GT_Walls_ParkFront_0_0",
+      "category": "Walls_ParkFront",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 44
+    },
+    {
+      "actor": "GT_Walls_ParkSide_0_0",
+      "category": "Walls_ParkSide",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 28
+    },
+    {
+      "actor": "GT_Walls_UpperBack_0_0",
+      "category": "Walls_UpperBack",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 72
+    },
+    {
+      "actor": "GT_Walls_UpperFront_0_0",
+      "category": "Walls_UpperFront",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 44
+    },
+    {
+      "actor": "GT_Walls_UpperSide_0_0",
+      "category": "Walls_UpperSide",
+      "mesh": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Meshes/SM_RetainingWall_600x800",
+      "material": "",
+      "instances": 42
+    },
+    {
+      "actor": "GT_Building_01",
+      "component": "InstancedStaticMesh",
+      "category": "Building_Corners",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_CornerWrap_H400",
+      "material": "",
+      "instances": 20
+    },
+    {
+      "actor": "GT_Building_02",
+      "component": "InstancedStaticMesh",
+      "category": "Building_Corners",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_CornerWrap_H400",
+      "material": "",
+      "instances": 28
+    },
+    {
+      "actor": "GT_Building_03",
+      "component": "InstancedStaticMesh",
+      "category": "Building_Corners",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_CornerWrap_H400",
+      "material": "",
+      "instances": 16
+    },
+    {
+      "actor": "GT_Building_04",
+      "component": "InstancedStaticMesh",
+      "category": "Building_Corners",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_CornerWrap_H400",
+      "material": "",
+      "instances": 8
+    },
+    {
+      "actor": "GT_Building_01",
+      "component": "InstancedStaticMesh1",
+      "category": "Building_Doors",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_Door_W300_H400",
+      "material": "",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Building_02",
+      "component": "InstancedStaticMesh1",
+      "category": "Building_Doors",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_Door_W300_H400",
+      "material": "",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Building_03",
+      "component": "InstancedStaticMesh1",
+      "category": "Building_Doors",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_Door_W300_H400",
+      "material": "",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Building_04",
+      "component": "InstancedStaticMesh1",
+      "category": "Building_Doors",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_Door_W300_H400",
+      "material": "",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Building_01",
+      "component": "InstancedStaticMesh2",
+      "category": "Building_Facades",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_Wall_W600_H400",
+      "material": "",
+      "instances": 15
+    },
+    {
+      "actor": "GT_Building_02",
+      "component": "InstancedStaticMesh2",
+      "category": "Building_Facades",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_Wall_W600_H400",
+      "material": "",
+      "instances": 21
+    },
+    {
+      "actor": "GT_Building_03",
+      "component": "InstancedStaticMesh2",
+      "category": "Building_Facades",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_Wall_W600_H400",
+      "material": "",
+      "instances": 12
+    },
+    {
+      "actor": "GT_Building_04",
+      "component": "InstancedStaticMesh2",
+      "category": "Building_Facades",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_Wall_W600_H400",
+      "material": "",
+      "instances": 6
+    },
+    {
+      "actor": "GT_Building_01",
+      "component": "InstancedStaticMesh3",
+      "category": "Building_Facades",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_Window_W600_H400",
+      "material": "",
+      "instances": 36
+    },
+    {
+      "actor": "GT_Building_02",
+      "component": "InstancedStaticMesh3",
+      "category": "Building_Facades",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_Window_W600_H400",
+      "material": "",
+      "instances": 50
+    },
+    {
+      "actor": "GT_Building_03",
+      "component": "InstancedStaticMesh3",
+      "category": "Building_Facades",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_Window_W600_H400",
+      "material": "",
+      "instances": 29
+    },
+    {
+      "actor": "GT_Building_04",
+      "component": "InstancedStaticMesh3",
+      "category": "Building_Facades",
+      "mesh": "/PCGPlugins/CSRoadNet/Houses/NCSimple/SM_NC_Window_W600_H400",
+      "material": "",
+      "instances": 15
+    },
+    {
+      "actor": "GT_Building_01",
+      "component": "InstancedStaticMesh4",
+      "category": "Building_Floors",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Building_02",
+      "component": "InstancedStaticMesh4",
+      "category": "Building_Floors",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Building_03",
+      "component": "InstancedStaticMesh4",
+      "category": "Building_Floors",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Building_04",
+      "component": "InstancedStaticMesh4",
+      "category": "Building_Floors",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Building_01",
+      "component": "InstancedStaticMesh5",
+      "category": "Building_Roofs",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Building_02",
+      "component": "InstancedStaticMesh5",
+      "category": "Building_Roofs",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Building_03",
+      "component": "InstancedStaticMesh5",
+      "category": "Building_Roofs",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Building_04",
+      "component": "InstancedStaticMesh5",
+      "category": "Building_Roofs",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_ConcreteTrim",
+      "instances": 1
+    },
+    {
+      "actor": "GT_Paths_Edges_0_0",
+      "component": "Instances",
+      "category": "Paths_Edges",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_PathBorder",
+      "instances": 1944
+    },
+    {
+      "actor": "GT_Paths_Paving_0_0",
+      "component": "Instances",
+      "category": "Paths_Paving",
+      "mesh": "/Engine/BasicShapes/Cube",
+      "material": "/Game/BuildingGenerator/Cyberpunk2077/Tests/GroundTerraces/Materials/M_PathPaving",
+      "instances": 3696
+    }
+  ],
+  "instance_count": 8746,
+  "ism_components": 163,
+  "source_assets_unchanged": true,
+  "revision": "2026-11-06-paths-corners",
+  "building_actors": [
+    "GT_Building_01",
+    "GT_Building_02",
+    "GT_Building_03",
+    "GT_Building_04"
+  ],
+  "path_segments": [
+    {
+      "name": "LowWestBranch",
+      "a": [
+        -7800,
+        -3400,
+        0
+      ],
+      "b": [
+        1200,
+        -3400,
+        0
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "CourtWestBypass",
+      "a": [
+        1200,
+        -3400,
+        0
+      ],
+      "b": [
+        1200,
+        -600,
+        0
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "LowNorthWalk",
+      "a": [
+        1200,
+        -600,
+        0
+      ],
+      "b": [
+        7800,
+        -600,
+        0
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "LowEastBranch",
+      "a": [
+        7800,
+        -600,
+        0
+      ],
+      "b": [
+        7800,
+        -3400,
+        0
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "MainStairApproach",
+      "a": [
+        -5400,
+        -3400,
+        0
+      ],
+      "b": [
+        -5400,
+        -3200,
+        0
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "LowBuildingSide",
+      "a": [
+        -6900,
+        -3400,
+        0
+      ],
+      "b": [
+        -6900,
+        -5900,
+        0
+      ],
+      "width_cm": 200
+    },
+    {
+      "name": "LowBuildingFront",
+      "a": [
+        -6900,
+        -5900,
+        0
+      ],
+      "b": [
+        -5400,
+        -5900,
+        0
+      ],
+      "width_cm": 200
+    },
+    {
+      "name": "LowBuildingEntry",
+      "a": [
+        -5400,
+        -5900,
+        0
+      ],
+      "b": [
+        -5400,
+        -5800,
+        0
+      ],
+      "width_cm": 200
+    },
+    {
+      "name": "CourtStairApproach",
+      "a": [
+        3600,
+        -600,
+        0
+      ],
+      "b": [
+        3600,
+        -1000,
+        0
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "WestPerimeter",
+      "a": [
+        -7800,
+        -3400,
+        0
+      ],
+      "b": [
+        -7800,
+        9000,
+        0
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "EastPerimeter",
+      "a": [
+        7800,
+        -3400,
+        0
+      ],
+      "b": [
+        7800,
+        9000,
+        0
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "NorthPerimeter",
+      "a": [
+        -7800,
+        9000,
+        0
+      ],
+      "b": [
+        7800,
+        9000,
+        0
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "ParkStairArrival",
+      "a": [
+        -5400,
+        200,
+        1200
+      ],
+      "b": [
+        -5400,
+        1600,
+        1200
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "ParkCrosswalk",
+      "a": [
+        -5400,
+        1600,
+        1200
+      ],
+      "b": [
+        4200,
+        1600,
+        1200
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "UpperStairBypass",
+      "a": [
+        4200,
+        1600,
+        1200
+      ],
+      "b": [
+        4200,
+        800,
+        1200
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "UpperStairFront",
+      "a": [
+        4200,
+        800,
+        1200
+      ],
+      "b": [
+        5400,
+        800,
+        1200
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "UpperStairApproach",
+      "a": [
+        5400,
+        800,
+        1200
+      ],
+      "b": [
+        5400,
+        1000,
+        1200
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "GardenStairApproach",
+      "a": [
+        0,
+        1600,
+        1200
+      ],
+      "b": [
+        0,
+        1600,
+        1200
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "UpperStairArrival",
+      "a": [
+        5400,
+        4400,
+        2400
+      ],
+      "b": [
+        5400,
+        4800,
+        2400
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "UpperCrosswalk",
+      "a": [
+        -4500,
+        4800,
+        2400
+      ],
+      "b": [
+        5400,
+        4800,
+        2400
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "UpperEntry_-4500",
+      "a": [
+        -4500,
+        4800,
+        2400
+      ],
+      "b": [
+        -4500,
+        4900,
+        2400
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "PlinthEntry_-4500",
+      "a": [
+        -4500,
+        5600,
+        2600
+      ],
+      "b": [
+        -4500,
+        5800,
+        2600
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "UpperEntry_-300",
+      "a": [
+        -300,
+        4800,
+        2400
+      ],
+      "b": [
+        -300,
+        4900,
+        2400
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "PlinthEntry_-300",
+      "a": [
+        -300,
+        5600,
+        2600
+      ],
+      "b": [
+        -300,
+        5800,
+        2600
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "UpperEntry_3900",
+      "a": [
+        3900,
+        4800,
+        2400
+      ],
+      "b": [
+        3900,
+        4900,
+        2400
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "PlinthEntry_3900",
+      "a": [
+        3900,
+        5600,
+        2600
+      ],
+      "b": [
+        3900,
+        5800,
+        2600
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "RaisedGardenWalk",
+      "a": [
+        0,
+        2600,
+        1600
+      ],
+      "b": [
+        0,
+        3800,
+        1600
+      ],
+      "width_cm": 400
+    },
+    {
+      "name": "CourtWalk",
+      "a": [
+        3600,
+        -4600,
+        -400
+      ],
+      "b": [
+        3600,
+        -2000,
+        -400
+      ],
+      "width_cm": 400
+    }
+  ]
+}
