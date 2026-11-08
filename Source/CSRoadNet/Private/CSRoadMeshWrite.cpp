@@ -12,6 +12,7 @@ namespace
 {
 // Writes queued whose OnLanded has not run yet (game thread).
 int32 GCSRoadMeshWrites = 0;
+void (*GCSRoadLandPump)() = nullptr;
 
 // Run now, unless the world is in its end-of-frame component update, where render state may not change (a flush
 // there runs game-thread tasks, a write's landing among them): then at the core ticker's next tick.
@@ -110,6 +111,16 @@ void AfterRenderThread(UWorld* World, TFunction<void()> Land)
 	});
 }
 
+void AddWriteInFlight(int32 Delta)
+{
+	GCSRoadMeshWrites += Delta;
+}
+
+void SetLandPump(void (*Pump)())
+{
+	GCSRoadLandPump = Pump;
+}
+
 int32 MeshWritesInFlight()
 {
 	return GCSRoadMeshWrites;
@@ -121,6 +132,7 @@ void LandMeshWrites()
 	// game-thread tasks only while it waits).
 	for (int32 Round = 0; Round < 100 && GCSRoadMeshWrites > 0; Round++)
 	{
+		if (GCSRoadLandPump) GCSRoadLandPump();
 		UCSMesh::CountedBlockingFlush();
 		if (!FTaskGraphInterface::Get().IsThreadProcessingTasks(ENamedThreads::GameThread)) FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
 	}

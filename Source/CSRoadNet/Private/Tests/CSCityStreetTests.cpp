@@ -48,7 +48,8 @@ int32 CSCityStreetTests_Overlaps(const TArray<CSCity::FPolygon>& Plots)
 
 // A street on its own (no road network): a fabric's plots on one side of its spline, kept apart, their storeys within
 // the fabric's range; plots set by hand; a special building dropped on it taking its place; nothing written again when
-// nothing changed.
+// nothing changed. On a street that slopes each building stands higher than the last, and stands level: only the road
+// slopes.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityStreetTest, "PCGPlugins.CSRoadNet.City.Street",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
 
@@ -115,6 +116,40 @@ bool FCSCityStreetTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("high-rise core taller than the street wall"), CoreMedian > WallMedian);
 	TestTrue(TEXT("high-rise core: modules drawn"), CSCityStreetTests_Modules(Street) > 0);
 	AddInfo(FString::Printf(TEXT("street wall median %d storeys, high-rise core %d; %d buildings"), WallMedian, CoreMedian, Street->NumBuildings));
+
+	// Rising 12 m over the 120 m street (with overhangs, so the columns are looked at too).
+	Special->Destroy();
+	Street->ApplyFabric(ECSCityFabric::StreetWall);
+	Street->Vacancy = 0.0f;
+	Street->OverhangChance = 1.0f;
+	Street->Street->SetSplinePoints({ FVector(0.0, 0.0, 0.0), FVector(12000.0, 0.0, 1200.0) }, ESplineCoordinateSpace::World);
+	Street->Rebuild();
+	TestTrue(TEXT("slope: buildings"), Street->NumBuildings >= 5);
+	CSRoad::LandMeshWrites();
+	int32 Rows = 0;
+	int32 Tilted = 0;
+	float Lowest = TNumericLimits<float>::Max();
+	float Highest = TNumericLimits<float>::Lowest();
+	for (const UCSGpuInstancedMeshComponent* Component : Street->Facade)
+	{
+		TArray<FVector4f> Instances;
+		if (!Component || !Component->HasInstanceSourceGPU() || !Component->DebugReadInstanceRowsSync(Instances)) continue;
+		const int32 Drawn = FMath::Min(Component->DebugReadDrawnInstanceCountSync(), Instances.Num() / 5);
+		for (int32 I = 0; I < Drawn; I++)
+		{
+			const FVector4f& AxisX = Instances[I * 5];
+			const FVector4f& AxisY = Instances[I * 5 + 1];
+			const FVector4f& AxisZ = Instances[I * 5 + 2];
+			const FVector4f& Origin = Instances[I * 5 + 3];
+			Rows++;
+			Tilted += FMath::Abs(AxisX.Z) > 1e-3f || FMath::Abs(AxisY.Z) > 1e-3f || FMath::Abs(AxisZ.X) > 1e-3f || FMath::Abs(AxisZ.Y) > 1e-3f ? 1 : 0;
+			Lowest = FMath::Min(Lowest, Origin.Z);
+			Highest = FMath::Max(Highest, Origin.Z);
+		}
+	}
+	TestTrue(TEXT("slope: modules drawn"), Rows > 0);
+	TestEqual(TEXT("slope: modules tilted"), Tilted, 0);
+	TestTrue(TEXT("slope: the buildings step up with the street"), Highest - Lowest > 900.0f);
 	return true;
 }
 
@@ -140,6 +175,8 @@ bool FCSCityStreetOnRoadTest::RunTest(const FString& Parameters)
 	Network->TileSize = 128.0f;
 	Network->bBatchBuildings = true;
 	Network->MaxTilesPerBatch = 0;
+	// What it looks at is the layout, whatever else is using the video memory.
+	Network->MinFreeVideoMemory = 0;
 
 	ACSRoadSplineActor* Main = World->SpawnActor<ACSRoadSplineActor>();
 	Main->AttachToActor(Network, FAttachmentTransformRules::KeepRelativeTransform);

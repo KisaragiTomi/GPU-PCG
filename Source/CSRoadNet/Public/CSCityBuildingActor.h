@@ -64,6 +64,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building")
 	ECSCityMassStack MassStack = ECSCityMassStack::Auto;
 
+	/** With an overhang: which sides of the upper storeys stand out past the base (the outline is theirs). Auto: drawn from
+	 *  the building's name. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building")
+	ECSCityMassOverhang MassOverhang = ECSCityMassOverhang::Auto;
+
+	/** Its outer corners. Auto: as the city's field has them (ACSCityFieldActor), else the kit's own. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Building")
+	ECSCityCornerStyle CornerStyle = ECSCityCornerStyle::Auto;
+
 	/** A garage: the road network joins it to the nearest main road in front of it (within GarageReach) with a driveway of
 	 *  GarageRoad, which batch buildings keep clear of but do not line. With no main road there, to the nearest small road
 	 *  in front of it, which counts as joined when it leads on to a main road. */
@@ -100,9 +109,11 @@ public:
 	// without a garage or a footprint.
 	bool GarageDoor(FVector& OutDoor, FVector& OutFacing) const;
 
-	// Writes its modules again (drawn a frame or two later, no wait for the render thread), and tells the road network its
-	// plot may have moved.
+	// Writes its modules again (drawn a few frames later, no wait for the render thread or the GPU), and tells the road network
+	// its plot may have moved.
 	void Rebuild();
+	// Only writes them: what the field asks of it may have changed.
+	void WriteModules();
 
 	UFUNCTION()
 	TArray<FString> GetRoadPrefabOptions() const;

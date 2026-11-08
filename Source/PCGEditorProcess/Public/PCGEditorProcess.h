@@ -8,6 +8,7 @@
 #include "ComputeShaderDebugParams.h"
 
 class AComputeShaderMeshGenerator;
+class ACSCityFieldActor;
 class ACSGroundActor;
 class ACSPointBrushActor;
 class AGPUSkeletalTree;
@@ -27,6 +28,7 @@ private:
 	void StartInstanceBrush(AComputeShaderMeshGenerator* TargetActor);
 	void StartPointBrush(ACSPointBrushActor* TargetActor);
 	void StartGroundPaint(ACSGroundActor* TargetActor);
+	void StartCityFieldPaint(ACSCityFieldActor* TargetActor);
 
 	/** 应答 `ACSHouseActor::OnWindowBrushRequest`：激活窗笔刷并把目标房交给它。 */
 	void StartWindowBrush(class ACSHouseActor* TargetActor);
@@ -39,5 +41,6 @@ private:
 	bool bEditorModeRegistered = false;
 	bool bPointBrushModeRegistered = false;
 	bool bGroundPaintModeRegistered = false;
+	bool bCityFieldPaintModeRegistered = false;
 	bool bWindowBrushModeRegistered = false;
 };

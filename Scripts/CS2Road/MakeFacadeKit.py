@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Creates the facade kit the CS2 road network and the city buildings put their buildings together from when none is
-set (UCSCityFacadeKit::Default, CSCityFacadeKit.h): six modules made of plain boxes, Nanite on, so that their copies
+set (UCSCityFacadeKit::Default, CSCityFacadeKit.h): nine modules made of plain boxes, Nanite on, so that their copies
 go into GPU-Scene and no building makes or uploads a mesh of its own.
 
   /PCGPlugins/CSRoadNet/Houses/Facade/SM_Facade_Wall      300 x 25 x 400   plain bay
@@ -9,6 +9,9 @@ go into GPU-Scene and no building makes or uploads a mesh of its own.
   /PCGPlugins/CSRoadNet/Houses/Facade/SM_Facade_Corner     40 x 40 x 400   pilaster up each corner
   /PCGPlugins/CSRoadNet/Houses/Facade/SM_Facade_Parapet   300 x 25 x 110   wall round the roof with a coping
   /PCGPlugins/CSRoadNet/Houses/Facade/SM_Facade_Roof      300 x 300 x 20   roof tile
+  /PCGPlugins/CSRoadNet/Houses/Facade/SM_Facade_Plinth    300 x 25 x 100   under the walls, stretched down to the ground
+  /PCGPlugins/CSRoadNet/Houses/Facade/SM_Facade_Platform  300 x 300 x 15   the floor of the platform in front, on a slope
+  /PCGPlugins/CSRoadNet/Houses/Facade/SM_Facade_Stair     300 x 150 x 75   five steps down from that floor's edge
   /PCGPlugins/CSRoadNet/Houses/Facade/M_FacadeKit + MI_Facade_*            one colour per part
   /PCGPlugins/CSRoadNet/Houses/Facade/DA_FacadeKit_Simple                   the kit
 
@@ -18,7 +21,8 @@ spans X and Y from 0 with its top at Z = 0.
 
   UnrealEditor-Cmd.exe <project> -ExecutePythonScript=<this file> -unattended -RenderOffscreen
 
-Builds the meshes again in place every run (the kit and the levels keep pointing at the same objects).
+Makes the meshes that do not exist (delete one to make it again: building a mesh again in place trips FRenderResource's
+check once it is loaded and has render data), and updates the kit in place.
 """
 import unreal
 
@@ -176,11 +180,17 @@ def module_boxes():
     out["Parapet"] = [("Plaster", (0, -T, 0), (W, 0, 100)),
                       ("Trim", (0, -T, 100), (W, 0, 110))]           # coping
     out["Roof"] = [("Roof", (0, 0, -20), (W, W, 0))]
+    # Under the base, where the ground falls away (GroundJoin_Plan.md 11.1). The steps' top is at the box's top at -Y.
+    out["Plinth"] = [("Trim", (0, -T, 0), (W, 0, 100))]
+    out["Platform"] = [("Trim", (0, 0, -15), (W, W, 0))]
+    out["Stair"] = [("Trim", (0, k * 30, -75), (W, (k + 1) * 30, -k * 15)) for k in range(5)]
     return out
 
 
 def build_mesh(name, boxes, materials):
     path = "{}/SM_Facade_{}".format(FOLDER, name)
+    if ASSETS.does_asset_exist(path):
+        return ASSETS.load_asset(path)
     desc = unreal.StaticMesh.create_static_mesh_description()
     # One polygon group per part, in the order of the mesh's material slots (a group the builder finds no slot
     # name for takes the slot of its index).
@@ -196,7 +206,7 @@ def build_mesh(name, boxes, materials):
     for part, lo, hi in boxes:
         box(desc, groups[part], lo, hi)
 
-    mesh = ASSETS.load_asset(path) if ASSETS.does_asset_exist(path) else TOOLS.create_asset("SM_Facade_" + name, FOLDER, unreal.StaticMesh, None)
+    mesh = TOOLS.create_asset("SM_Facade_" + name, FOLDER, unreal.StaticMesh, None)
     if not mesh:
         fail("could not make " + path)
         return None
@@ -217,6 +227,9 @@ def build_mesh(name, boxes, materials):
     return mesh
 
 
+SLOTS = ("Wall", "Window", "Door", "Corner", "Parapet", "Roof", "Plinth", "Platform", "Stair")
+
+
 def make_kit(meshes):
     path = FOLDER + "/" + KIT
     if ASSETS.does_asset_exist(path):
@@ -229,7 +242,7 @@ def make_kit(meshes):
     if not kit:
         fail("could not make " + path)
         return None
-    for slot in ("Wall", "Window", "Door", "Corner", "Parapet", "Roof"):
+    for slot in SLOTS:
         module = unreal.CSCityFacadeModule()
         module.set_editor_property("mesh", meshes[slot])
         module.set_editor_property("quarter_turns", 0)
@@ -238,7 +251,7 @@ def make_kit(meshes):
     kit.set_editor_property("storey_height", H)
     kit.set_editor_property("window_chance", 0.6)
     ASSETS.save_loaded_asset(kit, False)
-    for slot in ("Wall", "Window", "Door", "Corner", "Parapet", "Roof"):
+    for slot in SLOTS:
         got = kit.get_editor_property(slot.lower()).get_editor_property("mesh")
         if got != meshes[slot]:
             fail("{}: slot {} reads back {}".format(path, slot, got))

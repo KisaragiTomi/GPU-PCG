@@ -40,13 +40,15 @@
 - [Palmsland 道路关卡](CS2Roads.md)（CS2 Road Lab 场景的静态网格导入）
 - [CS2 道路逻辑的 GPU 移植](CS2RoadsGpu.md)（`CSRoadNet` 模块：快照或样条输入，CPU 组合与车道图 + GPU 几何、参数、路口接缝、细分、变形与标线贴花，直写 `UCSMesh`；验证方法与精度结论）
 - [道路、建筑与属性场局部更新系统](../LocalUpdateSystem_Plan.md)（插件根；第一版已在 `CSRoadNet` 落地，其余为设计提案；编号示意图 [LocalUpdateSystem_Ids.svg](../LocalUpdateSystem_Ids.svg)）
-- [通用地面与房屋生态衔接方案](../GroundJoin_Plan.md)（插件根；2026-11-04 设计提案，未实现）
-- [夜之城房屋群落、通用分件与 GPU 立面生成](../NightCity_BuildingKit.md)（插件根；群落与分件调研、`UCSCityFacadeKit` GPU 立面、沿街楼带 `ACSCityStreetActor`（单独摆放或挂路下接管一段路，A–D 群落预设）；2026-11-05 已实现，CSRoadNet 44/44，未提交）
+- [通用地面与房屋生态衔接方案](../GroundJoin_Plan.md)（插件根；2026-11-04 设计提案；11-06 高度函数和通用地面已在 GPU 上实现第一版：铺板、挡墙、楼间空地按属性场放花坛或推车，见第 13 节；整平、挖空区、自带区未做）
+- [夜之城房屋群落、通用分件与 GPU 立面生成](../NightCity_BuildingKit.md)（插件根；群落与分件调研、`UCSCityFacadeKit` GPU 立面、沿街楼带 `ACSCityStreetActor`（单独摆放或挂路下接管一段路，A–D 群落预设）；2026-11-06 加圆角、斜角和上部悬挑出底座，楼体始终水平；坡路上的底高、底座、楼前平台和台阶；房子的体量和布局搬上 GPU，全局属性场控制悬挑、转角风格、空地风格和地面高度，带视口笔刷和地图，小关卡实测）
 - [夜之城建筑的程序化生成与分块](NightCity_ProceduralBuildings_Partitioning.md)（2026-11-04 MCP 实测：模块复用、建筑语法、空间输出与 World Partition 分块；含证据和实施顺序，尚未实施）
 - [夜之城附属物：放置、跨楼互斥与连接](NightCity_Attachments_And_Links.md)（2026-11-05 设计补充：空调与招牌安装语义、实体与净空裁决、复用 Tiny Glade 关系协议；尚未实施）
 - [夜之城附属物：模块锚点与生成后 GPU 搜索评估](NightCity_Attachment_Placement_Evaluation.md)（2026-11-05 数据审计：模块复用与变体、模板及 GPU 求解接口、网络输入输出；附统计脚本与结果，求解器尚未实施）
 - [可放置区域网格与源 Mesh 的资产关系](NightCity_Placement_Surface_Assets.md)（2026-11-05：Profile 和源默认关联已实现；Kit 覆盖、GPU 输出与自动失效仍为设计）
-- [夜之城常用模型：第一批可放置区域](NightCity_Placement_Batch01.md)（2026-11-05 已处理 24 个模型：22 个有区域、2 个待复核；71 个区域 / 352 个三角形，含绑定、预览关卡、重载验证及重建脚本）
+- [夜之城常用模型：第一批可放置区域](NightCity_Placement_Batch01.md)（2026-11-05 已处理 24 个模型，71 个区域 / 352 个三角形；11-06 限定为模块几何实验，不能直接作为最终安装许可）
+- [从夜之城成品建筑提取外部安装区域](NightCity_AssembledBuilding_Placement.md)（2026-11-06 方向修正：先做建筑内外分类；原场景立面复核含 4 台空调及 4 个独立安装件，完整外表面筛选器尚未实现）
+- [附属物连接锚点 Data Asset](NightCity_Attachment_Anchor_Assets.md)（2026-11-06：独立 Profile、接口配对与刚性候选姿态；4 个空调/支架待审核样例，场景占用图及外表面求解器尚未实现）
 - [CSSceneDirty3D：场景级三维 Dirty 区域系统](cs-scene-dirty-3d-design.md)（当前范围与设计见正文）
 
 ## 生成器与网格工具

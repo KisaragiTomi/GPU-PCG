@@ -8,6 +8,13 @@
 // facade once its QuarterTurns are applied; its pivot can be anywhere. The modules are drawn as GPU instances that a
 // compute pass writes (CSCityFacade.h), so a building makes no mesh of its own; give the meshes Nanite, or each
 // component uploads a copy of its mesh and waits for the render thread to.
+//
+// An outer corner piece about as wide as a bay or wider takes whole bays of both sides and is stretched to fit them, so
+// a quarter cylinder or a cut-off wall makes round or chamfered corners (with RoofCorner to match); a narrower one is a
+// pilaster that the end bays give its width. The upper storeys can stand out past a smaller base (ECSCityMassStack::
+// Overhang), whole bays at a time. A building stands level, whatever the road beside it does (GroundJoin_Plan.md): its base
+// at the top of the road along its front, a plinth down to the ground round it, and where the road falls away a platform in
+// front, its sides and steps standing on down into the ground, so that as much of them shows as the slope leaves.
 #pragma once
 
 #include "CoreMinimal.h"
@@ -61,6 +68,55 @@ enum class ECSCityMassStack : uint8
 	Setback,
 	/** A low podium on the whole footprint with a narrower tower on it. */
 	PodiumTower,
+	/** The upper storeys stand out past a smaller base, on columns over a flat soffit (ECSCityMassOverhang says where). */
+	Overhang,
+};
+
+/** Which sides of the upper storeys stand out past the base. */
+UENUM(BlueprintType)
+enum class ECSCityMassOverhang : uint8
+{
+	/** Drawn from the building's seed. */
+	Auto,
+	/** Over the street. */
+	Front,
+	/** The two side walls stand out past the base; front and back stay flush. */
+	Sides,
+	FrontAndSides,
+	AllRound,
+};
+
+/** Which pieces an outer corner takes. The city's field (ACSCityFieldActor) can ask for one corner by corner, a building for one
+ *  all round; a style the kit has no Corner for is the kit's own. In order: a new style goes at the end, the field stores them. */
+UENUM(BlueprintType)
+enum class ECSCityCornerStyle : uint8
+{
+	/** The field's, else the kit's own Corner and its pieces. */
+	Auto,
+	Square,
+	Chamfer,
+	Round,
+	RoundLarge,
+};
+
+/** A corner style's pieces, placed as the kit's own Corner, RoofCorner, ParapetCorner and PlinthCorner are. */
+USTRUCT(BlueprintType)
+struct CSROADNET_API FCSCityCornerSet
+{
+	GENERATED_BODY()
+
+	/** Empty: the kit has no such style. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade")
+	FCSCityFacadeModule Corner;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade")
+	FCSCityFacadeModule RoofCorner;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade")
+	FCSCityFacadeModule ParapetCorner;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade")
+	FCSCityFacadeModule PlinthCorner;
 };
 
 UCLASS(BlueprintType)
@@ -105,6 +161,58 @@ public:
 	/** The ground storey's glazed bays, shop fronts, GroundWindowChance of them. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Ground")
 	FCSCityFacadeModule GroundWindow;
+
+	/** The roof over an outer corner when Corner is round or cut off (Night City's corner_round_floor): over the corner's
+	 *  square, placed as Corner is, its top at the storey's top; the roof tiles keep out of that square. Empty: the tiles
+	 *  cover the corner's bays and stand out past a round corner. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Corners")
+	FCSCityFacadeModule RoofCorner;
+
+	/** The piece on top of an outer corner, as wide as Corner, at the parapet's height (Night City's
+	 *  facade_top_w600_corner_round). Empty: Corner stretched to that height. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Corners")
+	FCSCityFacadeModule ParapetCorner;
+
+	/** Under the storeys that stand out past the base, a bay square, its top at their floor (Night City's bottom_cover).
+	 *  Empty: the roof tile. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Overhang")
+	FCSCityFacadeModule Soffit;
+
+	/** Under the outer edge of a flat overhang, ColumnEvery bays apart and at its corners, from the ground to the soffit;
+	 *  kept at its own width and depth. Empty: nothing holds it up. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Overhang")
+	FCSCityFacadeModule Column;
+
+	/** Under the walls, a bay at a time, its top at the building's base, stretched down to PlinthSink under the ground; along the
+	 *  platform's edges too. Empty: no plinth, and the building goes half a metre into the ground at its lowest instead. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Slope")
+	FCSCityFacadeModule Plinth;
+
+	/** Under an outer corner, placed as Corner is, its top at the base. Empty: Corner stretched down. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Slope")
+	FCSCityFacadeModule PlinthCorner;
+
+	/** The floor of the platform in front of a building the road falls away from, a bay wide, its top level with the base. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Slope")
+	FCSCityFacadeModule Platform;
+
+	/** A flight of steps down from the platform's edge: +X across it, +Y the way down from its top step at the box's -Y side,
+	 *  its top at the box's top. As many flights one after another as the drop asks and there is room for, the ground hiding
+	 *  what lies below it; steeper when the room runs out before the ground. Empty: no steps. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Slope")
+	FCSCityFacadeModule Stair;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Corner Styles")
+	FCSCityCornerSet SquareCorners;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Corner Styles")
+	FCSCityCornerSet ChamferCorners;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Corner Styles")
+	FCSCityCornerSet RoundCorners;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Corner Styles")
+	FCSCityCornerSet RoundLargeCorners;
 
 	/** The bays of each side come nearest this width (the modules stretch to fit); a building's footprint is a grid of them. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade", meta = (ClampMin = "50", Units = "cm"))
@@ -160,7 +268,39 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Massing", meta = (ClampMin = "2"))
 	int32 MinSetbackStoreys = 4;
 
-	// The slots in CSCity::EFacadeSlot's order.
+	/** How likely a building of three storeys or more stands out past its base (drawn after the tower, before the setback). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Massing", meta = (ClampMin = "0", ClampMax = "1"))
+	float OverhangChance = 0.0f;
+
+	/** How many bays the upper storeys stand out by. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Massing", meta = (ClampMin = "1", ClampMax = "4"))
+	int32 OverhangBays = 1;
+
+	/** Bays between columns along an overhang's edge. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Overhang", meta = (ClampMin = "1", ClampMax = "16"))
+	int32 ColumnEvery = 2;
+
+	/** How far the columns stand in from the overhang's edge. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Overhang", meta = (ClampMin = "0", Units = "cm"))
+	float ColumnInset = 0.0f;
+
+	/** How far the plinth, the platform's sides and the columns go on under the ground. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Slope", meta = (ClampMin = "0", Units = "cm"))
+	float PlinthSink = 50.0f;
+
+	/** How far the platform reaches out from the front, no further than the plot's room to the road leaves for a flight of steps. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Slope", meta = (ClampMin = "0", Units = "cm"))
+	float PlatformDepth = 150.0f;
+
+	/** The drop along the front under which there is no platform, and no steps where it comes to less. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Slope", meta = (ClampMin = "0", Units = "cm"))
+	float PlatformMinDrop = 15.0f;
+
+	/** Bays between flights of steps along the platform, counted from the door. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Facade|Slope", meta = (ClampMin = "1", ClampMax = "32"))
+	int32 StairEvery = 4;
+
+	// The slots in CSCity::EFacadeSlot's order, then the corner styles' pieces.
 	const FCSCityFacadeModule& Module(int32 Slot) const;
 
 	// /PCGPlugins/CSRoadNet/Houses/Facade/DA_FacadeKit_Simple: boxes put together (Scripts/CS2Road/MakeFacadeKit.py).

@@ -5,6 +5,8 @@
 #include "CSCityBuildingActor.h"
 #include "CSCityFacade.h"
 #include "CSCityFacadeKit.h"
+#include "CSCityFieldActor.h"
+#include "CSCityGround.h"
 #include "CSCityGarage.h"
 #include "CSCityLayout.h"
 #include "CSCityStreetActor.h"
@@ -647,6 +649,12 @@ void ACSRoadNetworkActor::RequestRebuild()
 {
 	bRebuildRequested = true;
 	bPendingOnly = false;
+}
+
+void ACSRoadNetworkActor::FieldChanged(const FBox2D& Box)
+{
+	FieldBoxes.Add(Box);
+	RequestRebuild();
 }
 
 void ACSRoadNetworkActor::Tick(float DeltaSeconds)
@@ -2408,6 +2416,7 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	FXxHash64Builder SignatureHash;
 	auto Sign = [&SignatureHash](const auto& Value) { SignatureHash.Update(&Value, sizeof(Value)); };
 	for (const double Value : { Settings.Frontage, Settings.Gap, Settings.Setback, Settings.MinDepth, Settings.MaxDepth, Settings.MinHeight, Settings.MaxHeight, Settings.FillDepth, TileCm }) Sign(Value);
+	Sign(Lots.Vacancy);
 	Sign(Settings.bFill);
 	Sign(Settings.Seed);
 	Sign(KitHash);
@@ -2573,6 +2582,8 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		auto Mark = [&Fresh](const FIntRect& Tiles) { for (int32 Y = Tiles.Min.Y; Y <= Tiles.Max.Y; Y++) for (int32 X = Tiles.Min.X; X <= Tiles.Max.X; X++) Fresh.Add(FIntPoint(X, Y)); };
 		for (const TPair<uint64, FIntRect>& Pair : Reach) if (!State.Reach.Contains(Pair.Key)) Mark(Pair.Value);
 		for (const TPair<uint64, FIntRect>& Pair : State.Reach) if (!Reach.Contains(Pair.Key)) Mark(Pair.Value);
+		// Plots whose faces or corners may lie over cells that changed.
+		for (const FBox2D& Box : FieldBoxes) Mark(TilesOf(Box, CSCity::LotStrip(Settings)));
 		Edited = Fresh;
 		for (const FIntPoint& Tile : State.Edited) if (State.Pending.Contains(Tile)) Edited.Add(Tile);
 		auto Rank = [&Fresh, &Edited](const FIntPoint& Tile) { return Fresh.Contains(Tile) ? 0 : Edited.Contains(Tile) ? 1 : 2; };
@@ -2592,6 +2603,7 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 			else Dirty.Add(Order[I]);
 		}
 	}
+	FieldBoxes.Reset();
 	auto Touches = [&Dirty](const FIntRect& Tiles)
 	{
 		for (int32 Y = Tiles.Min.Y; Y <= Tiles.Max.Y; Y++) for (int32 X = Tiles.Min.X; X <= Tiles.Max.X; X++) if (Dirty.Contains(FIntPoint(X, Y))) return true;
@@ -2628,25 +2640,33 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 		const double Height = Terrain->Sample(CSRoad::float3(static_cast<float>(Unity.X), 0.0f, static_cast<float>(Unity.Z)));
 		return NetworkToWorld.TransformPosition(CSRoadNetworkActor_ToUnreal(FVector3d(Unity.X, Height, Unity.Z))).Z;
 	};
-	auto Place = [Terrain, &GroundAt](CSCity::FLot& Lot)
+	// A kit with a plinth stands each building level at the top of the road along its front, and takes the difference to the
+	// ground up under it (GroundJoin_Plan.md). Meshes, and kits without a plinth, go half a metre into the ground as a whole.
+	const bool bPlinth = Meshes.Num() == 0 && Kit && Kit->Plinth.Mesh;
+	auto Place = [Terrain, &GroundAt, bPlinth](CSCity::FLot& Lot)
 	{
-		if (!Terrain)
+		double Lowest = TNumericLimits<double>::Max();
+		if (Terrain)
 		{
-			// The ground usually lies a little under the road's curve, and a mesh has a floor to show the gap under
-			// it: it goes as far into the ground as on terrain.
-			Lot.Base -= 50.0;
+			double Highest = TNumericLimits<double>::Lowest();
+			for (const FVector2D& Corner : Lot.Corners)
+			{
+				const double Ground = GroundAt(Corner);
+				Lowest = FMath::Min(Lowest, Ground);
+				Highest = FMath::Max(Highest, Ground);
+			}
+			if (Lot.Base - Highest > 300.0 || Lowest - Lot.Base > 300.0) return false;
+		}
+		if (bPlinth)
+		{
+			const double Top = FMath::Max(Lot.FrontHeightStart, Lot.FrontHeightEnd);
+			const CSCity::FLot& Seated = Lot;
+			if (Terrain) CSCity::SeatLot(Lot, Top, GroundAt);
+			else CSCity::SeatLot(Lot, Top, [&Seated](const FVector2D& Point) { return CSCity::LotRoadHeight(Seated, Point); });
 			return true;
 		}
-		double Lowest = TNumericLimits<double>::Max();
-		double Highest = TNumericLimits<double>::Lowest();
-		for (const FVector2D& Corner : Lot.Corners)
-		{
-			const double Ground = GroundAt(Corner);
-			Lowest = FMath::Min(Lowest, Ground);
-			Highest = FMath::Max(Highest, Ground);
-		}
-		if (Lot.Base - Highest > 300.0 || Lowest - Lot.Base > 300.0) return false;
-		Lot.Base = Lowest - 50.0;
+		// The ground usually lies a little under the road's curve, and a mesh has a floor to show the gap under it.
+		Lot.Base = Terrain ? Lowest - 50.0 : Lot.Base - 50.0;
 		return true;
 	};
 	const TArray<CSCity::FLot> Laid = CSCity::LayoutLots(Anchors, Lines, Reserved, Settings, Place);
@@ -2654,12 +2674,13 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	for (const CSCity::FLot& Lot : Laid)
 	{
 		const FIntPoint Tile = TileOf(Lot.Centre);
-		if (bFull || Dirty.Contains(Tile)) ByTile.FindOrAdd(Tile).Add(&Lot);
+		if ((bFull || Dirty.Contains(Tile)) && !CSCity::LotVacant(Lot, Settings.Seed, Lots.Vacancy)) ByTile.FindOrAdd(Tile).Add(&Lot);
 	}
 
 	// The tiles to write or remove, nearest the camera first: the dirty ones, or every one there is or
 	// was. A batch of them is written at most; the others stay pending and are laid out again later.
 	TArray<FIntPoint> Visit;
+	const ACSCityFieldActor* Field = ACSCityFieldActor::Find(GetWorld());
 	if (bFull)
 	{
 		ByTile.GetKeys(Visit);
@@ -2671,18 +2692,23 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	int32 Removed = 0;
 	State.Pending.Reset();
 	State.Pending.Append(Deferred);
+	if (bFull) State.TileLots.Reset();
 	for (const FIntPoint& Key : Visit)
 	{
 		TArray<const CSCity::FLot*>* TileLots = ByTile.Find(Key);
 		if (!TileLots)
 		{
 			FCSCityBuildingTile Gone;
+			State.TileLots.Remove(Key);
 			if (!BuildingTiles.RemoveAndCopyValue(Key, Gone)) continue;
 			CSRoadNetworkActor_DestroyBuildings(Gone);
 			Removed++;
 			continue;
 		}
 		TileLots->Sort([](const CSCity::FLot& A, const CSCity::FLot& B) { return A.Id < B.Id; });
+		TArray<CSCity::FLot>& Standing = State.TileLots.FindOrAdd(Key);
+		Standing.Reset(TileLots->Num());
+		for (const CSCity::FLot* Lot : *TileLots) Standing.Add(*Lot);
 		FXxHash64Builder Hash;
 		Hash.Update(&KitHash, sizeof(KitHash));
 		for (const UStaticMesh* House : Meshes) Hash.Update(&House, sizeof(House));
@@ -2692,11 +2718,20 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 			Hash.Update(&Lot->Id, sizeof(Lot->Id));
 			Hash.Update(&Lot->Base, sizeof(Lot->Base));
 			Hash.Update(&Lot->Height, sizeof(Lot->Height));
+			for (const double Value : { Lot->Drop, Lot->DropX, Lot->DropY, Lot->FrontRoom }) Hash.Update(&Value, sizeof(Value));
 			Hash.Update(Lot->Corners.GetData(), Lot->Corners.Num() * sizeof(FVector2D));
+			// The cells it may read. No field is the same as nothing painted.
+			if (Field)
+			{
+				FBox2D Around(ForceInit);
+				for (const FVector2D& Corner : Lot->Corners) Around += Corner;
+				const uint64 Cells = Field->HashBox(Around.ExpandBy(400.0));
+				if (Cells != 0) Hash.Update(&Cells, sizeof(Cells));
+			}
 		}
 		const uint64 Value = Hash.Finalize().Hash;
 		const FCSCityBuildingTile* Known = BuildingTiles.Find(Key);
-		if (Known && Known->Hash == Value && (Known->Instances.Num() > 0 || Known->Facade.Num() > 0)) continue;
+		if (Known && Known->Hash == Value && (Known->Instances.Num() > 0 || Known->bFacadeWritten)) continue;
 		if (MaxTilesPerBatch > 0 && Written >= MaxTilesPerBatch)
 		{
 			State.Pending.Add(Key);
@@ -2725,6 +2760,24 @@ void ACSRoadNetworkActor::BuildBatchBuildings(const TArray<CSRoad::FSplineRoad>&
 	BuildingTilesLaidOut = bFull ? ByTile.Num() : Dirty.Num();
 	NumBuildings = 0;
 	for (const TPair<FIntPoint, FCSCityBuildingTile>& Pair : BuildingTiles) NumBuildings += Pair.Value.Buildings;
+
+	// The ground goes by what stands: once every building tile is written.
+	GroundTilesRebuilt = 0;
+	if (!bBuildGround) ClearGroundTiles();
+	else if (State.Pending.Num() == 0)
+	{
+		TArray<CSCity::FGroundCurve> Curves;
+		Curves.Reserve(Inputs.Num());
+		for (const FInput& Input : Inputs)
+		{
+			if (Input.Kind != EInput::Road) continue;
+			CSCity::FGroundCurve& Curve = Curves.AddDefaulted_GetRef();
+			Curve.Key = Input.Key;
+			Curve.HalfWidth = Input.HalfWidth;
+			for (int32 I = 0; I < 4; I++) Curve.Curve[I] = Input.Curve[I];
+		}
+		PendingBuildingTiles += WriteGroundTiles(Curves, Plots, bPlinth, Near);
+	}
 	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d batch buildings in %d tiles around %d reserved plots; %d tiles laid out%s (%d inputs of %d), %d rebuilt, %d pending; %.0f ms"),
 		*GetName(), NumBuildings, BuildingTiles.Num(), Plots.Num(), BuildingTilesLaidOut, bFull ? TEXT(" from scratch") : TEXT(""), Anchors.Num() + Lines.Num() + Reserved.Num(), Inputs.Num(),
 		BuildingTilesRebuilt, PendingBuildingTiles, (FPlatformTime::Seconds() - StartTime) * 1000.0);
@@ -2753,6 +2806,7 @@ void ACSRoadNetworkActor::WriteBuildingTile(const FIntPoint& Key, FCSCityBuildin
 		if (!Kit)
 		{
 			CSCity::ReleaseFacade(Tile.Facade, Tile.FacadeGpu);
+			Tile.bFacadeWritten = false;
 			return;
 		}
 		TArray<CSCity::FFacadeBuilding> Buildings;
@@ -2760,11 +2814,18 @@ void ACSRoadNetworkActor::WriteBuildingTile(const FIntPoint& Key, FCSCityBuildin
 		for (const CSCity::FLot* Lot : TileLots) Buildings.Add(CSCity::LotBuilding(*Lot));
 		const double TileCm = double(TileSize) * 100.0;
 		const FVector Origin = GetActorTransform().TransformPosition(FVector((Key.X + 0.5) * TileCm, -(Key.Y + 0.5) * TileCm, 0.0));
-		CSCity::WriteFacade(*Content, Content->GetRootComponent(), Name, Origin, *Kit, Buildings, Tile.Facade, Tile.FacadeGpu);
+		// Found again by its key when it lands: the tiles' map may have moved it.
+		CSCity::WriteFacade(*Content, Content->GetRootComponent(), Name, Origin, *Kit, Buildings, [Self = TWeakObjectPtr<ACSRoadNetworkActor>(this), Key]() -> TArray<TObjectPtr<UCSGpuInstancedMeshComponent>>*
+		{
+			FCSCityBuildingTile* Found = Self.IsValid() ? Self->BuildingTiles.Find(Key) : nullptr;
+			return Found ? &Found->Facade : nullptr;
+		}, Tile.FacadeGpu);
+		Tile.bFacadeWritten = true;
 		return;
 	}
 	// Whole meshes, one a plot.
 	CSCity::ReleaseFacade(Tile.Facade, Tile.FacadeGpu);
+	Tile.bFacadeWritten = false;
 	TArray<TArray<FTransform>> ByMesh;
 	ByMesh.SetNum(Meshes.Num());
 	for (const CSCity::FLot* Lot : TileLots)
@@ -2888,8 +2949,193 @@ void ACSRoadNetworkActor::UpdateStreets(const TArray<CSRoad::FSplineRoad>& Splin
 	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d city streets laid out with the roads, %d rebuilt; %.1f ms"), *GetName(), NumStreets, StreetsRebuilt, (FPlatformTime::Seconds() - StartTime) * 1000.0);
 }
 
+void ACSRoadNetworkActor::ClearGroundTiles()
+{
+	for (TPair<FIntPoint, FCSCityGroundTile>& Pair : GroundTiles) CSCity::ReleaseFacade(Pair.Value.Ground, Pair.Value.Gpu);
+	GroundTiles.Reset();
+	NumGroundTiles = 0;
+	GroundTilesRebuilt = 0;
+}
+
+int32 ACSRoadNetworkActor::WriteGroundTiles(const TArray<CSCity::FGroundCurve>& Curves, const TArray<TArray<FVector2D>>& Reserved, bool bFollowPlots, const FVector2D* Focus)
+{
+	UCSCityGroundKit* Kit = GroundKit ? GroundKit.Get() : UCSCityGroundKit::Default();
+	if (!Kit)
+	{
+		UE_LOG(LogCSRoadNet, Warning, TEXT("%s: no ground kit (and the default one is missing): no ground"), *GetName());
+		ClearGroundTiles();
+		return 0;
+	}
+	if (!LotState || !EnsureContent()) return 0;
+	const double StartTime = FPlatformTime::Seconds();
+	const FTransform NetworkToWorld = GetActorTransform();
+	const CSCity::FGroundKitShape Shape = CSCity::GroundKitShape(*Kit);
+	const uint64 KitHash = CSCity::GroundKitHash(*Kit);
+	const double NetworkTileCm = double(TileSize) * 100.0;
+	const double TileCm = CSCity::GroundTileCm(NetworkTileCm);
+	auto TilesAround = [TileCm](const FBox2D& Box, double Reach)
+	{
+		return FIntRect(FMath::FloorToInt32((Box.Min.X - Reach) / TileCm), FMath::FloorToInt32((Box.Min.Y - Reach) / TileCm), FMath::FloorToInt32((Box.Max.X + Reach) / TileCm), FMath::FloorToInt32((Box.Max.Y + Reach) / TileCm));
+	};
+
+	// What bears on each tile, as indices, and a hash of it in any order. Nothing is sampled for a tile until it turns out to have changed.
+	struct FBucket
+	{
+		TArray<int32> Curves;
+		TArray<int32> Lots;
+		uint64 Hash = 0;
+	};
+	TMap<FIntPoint, FBucket> Buckets;
+	// A cell is drawn if any of it lies within Reach of a road, and has to know that road.
+	const double RoadReach = Shape.Reach + 2400.0;
+	for (int32 Index = 0; Index < Curves.Num(); Index++)
+	{
+		// A cubic Bezier lies within its control points' box.
+		FBox2D Box(ForceInit);
+		for (const FVector3d& Control : Curves[Index].Curve) Box += FVector2D(NetworkToWorld.TransformPosition(CSRoadNetworkActor_ToUnreal(Control)));
+		const FIntRect Covered = TilesAround(Box, RoadReach + Curves[Index].HalfWidth);
+		for (int32 Y = Covered.Min.Y; Y <= Covered.Max.Y; Y++)
+		{
+			for (int32 X = Covered.Min.X; X <= Covered.Max.X; X++)
+			{
+				FBucket& Bucket = Buckets.FindOrAdd(FIntPoint(X, Y));
+				Bucket.Curves.Add(Index);
+				Bucket.Hash += Curves[Index].Key;
+			}
+		}
+	}
+	TArray<CSCity::FGroundLot> Standing;
+	// A plot bears on what is within its blend or the clearance from it, and walls look half a cell past their tile.
+	const double LotReach = FMath::Max(Shape.PlotBlend, Shape.BuildingClearance) + 700.0;
+	auto AddLot = [&](const CSCity::FGroundLot& Lot)
+	{
+		const double Values[] = { Lot.Centre.X, Lot.Centre.Y, Lot.Front.X, Lot.Front.Y, Lot.HalfWidth, Lot.HalfDepth, Lot.Base, Lot.Drop, Lot.DropX, Lot.DropY, Lot.bLevel ? 1.0 : 0.0 };
+		const uint64 Hash = FXxHash64::HashBuffer(Values, sizeof(Values)).Hash;
+		const int32 Index = Standing.Add(Lot);
+		const double Radius = FMath::Sqrt(FMath::Square(Lot.HalfWidth) + FMath::Square(Lot.HalfDepth));
+		const FIntRect Covered = TilesAround(FBox2D(Lot.Centre, Lot.Centre), Radius + LotReach);
+		for (int32 Y = Covered.Min.Y; Y <= Covered.Max.Y; Y++)
+		{
+			for (int32 X = Covered.Min.X; X <= Covered.Max.X; X++)
+			{
+				FBucket* Bucket = Buckets.Find(FIntPoint(X, Y));
+				if (!Bucket) continue;
+				Bucket->Lots.Add(Index);
+				Bucket->Hash += Hash;
+			}
+		}
+	};
+	for (const TPair<FIntPoint, TArray<CSCity::FLot>>& Pair : LotState->TileLots) for (const CSCity::FLot& Lot : Pair.Value) AddLot(CSCity::GroundLot(Lot, bFollowPlots));
+	// What the city buildings and streets keep: nothing goes there, but the ground does not follow them.
+	for (const TArray<FVector2D>& Plot : Reserved)
+	{
+		const CSCity::FBlock Block = CSCity::HullBlock(Plot, 0.0, 1.0);
+		CSCity::FGroundLot Lot;
+		Lot.Centre = FVector2D(Block.Base);
+		Lot.Front = Block.Front;
+		Lot.HalfWidth = Block.Width * 0.5;
+		Lot.HalfDepth = Block.Depth * 0.5;
+		Lot.bLevel = false;
+		AddLot(Lot);
+	}
+
+	// The roads as pieces about 8 m long, on the first tile that wants them.
+	TArray<TArray<CSCity::FGroundRoad>> Pieces;
+	Pieces.SetNum(Curves.Num());
+	auto PiecesOf = [&](int32 Index) -> const TArray<CSCity::FGroundRoad>&
+	{
+		TArray<CSCity::FGroundRoad>& Out = Pieces[Index];
+		if (Out.Num() > 0) return Out;
+		TArray<FVector> Points;
+		CSRoadNetworkActor_Sample(NetworkToWorld, Curves[Index].Curve, Points);
+		constexpr int32 Stride = 4;
+		for (int32 I = 0; I + 1 < Points.Num(); I += Stride)
+		{
+			CSCity::FGroundRoad& Piece = Out.AddDefaulted_GetRef();
+			Piece.A = Points[I];
+			Piece.B = Points[FMath::Min(I + Stride, Points.Num() - 1)];
+			Piece.HalfWidth = Curves[Index].HalfWidth;
+		}
+		return Out;
+	};
+
+	TArray<FIntPoint> Keys;
+	Buckets.GetKeys(Keys);
+	FVector2D Camera = FVector2D::ZeroVector;
+	if (Focus) Camera = FVector2D(NetworkToWorld.TransformPosition(FVector(Focus->X * NetworkTileCm, -Focus->Y * NetworkTileCm, 0.0))) / TileCm;
+	const FVector2D* Nearest = Focus ? &Camera : nullptr;
+	Keys.Sort([Nearest](const FIntPoint& A, const FIntPoint& B) { return CSRoad::TileBefore(A, B, Nearest); });
+	const ACSCityFieldActor* Field = ACSCityFieldActor::Find(GetWorld());
+	int32 Written = 0;
+	int32 Pending = 0;
+	for (const FIntPoint& Key : Keys)
+	{
+		const FBucket& Bucket = Buckets[Key];
+		const FVector2D Min(Key.X * TileCm, Key.Y * TileCm);
+		const FBox2D Over(Min, Min + FVector2D(TileCm));
+		FXxHash64Builder Hash;
+		Hash.Update(&KitHash, sizeof(KitHash));
+		Hash.Update(&TileCm, sizeof(TileCm));
+		Hash.Update(&Bucket.Hash, sizeof(Bucket.Hash));
+		// The cells round its points, and those the walls look at past its edge. No field is the same as nothing painted.
+		const uint64 Cells = Field ? Field->HashBox(Over.ExpandBy(1000.0)) : 0;
+		Hash.Update(&Cells, sizeof(Cells));
+		const uint64 Value = Hash.Finalize().Hash;
+		const FCSCityGroundTile* Known = GroundTiles.Find(Key);
+		if (Known && Known->Hash == Value) continue;
+		if (MaxTilesPerBatch > 0 && Written >= MaxTilesPerBatch)
+		{
+			Pending++;
+			continue;
+		}
+		if (VideoMemoryShort(0))
+		{
+			bWaitingForVideoMemory = true;
+			Pending++;
+			continue;
+		}
+		CSCity::FGroundTile Input;
+		Input.Min = Min;
+		Input.Size = TileCm;
+		for (const int32 Index : Bucket.Curves)
+		{
+			const FBox2D Grown = Over.ExpandBy(RoadReach + Curves[Index].HalfWidth);
+			for (const CSCity::FGroundRoad& Piece : PiecesOf(Index))
+			{
+				FBox2D Box(ForceInit);
+				Box += FVector2D(Piece.A);
+				Box += FVector2D(Piece.B);
+				if (Box.Intersect(Grown)) Input.Roads.Add(Piece);
+			}
+		}
+		Input.Lots.Reserve(Bucket.Lots.Num());
+		for (const int32 Index : Bucket.Lots) Input.Lots.Add(Standing[Index]);
+		FCSCityGroundTile& Tile = GroundTiles.FindOrAdd(Key);
+		// Found again by its key when it lands: the tiles' map may have moved it.
+		CSCity::WriteGround(*Content, Content->GetRootComponent(), FString::Printf(TEXT("GroundTile_%d_%d"), Key.X, Key.Y), *Kit, Input, [Self = TWeakObjectPtr<ACSRoadNetworkActor>(this), Key]() -> TArray<TObjectPtr<UCSGpuInstancedMeshComponent>>*
+		{
+			FCSCityGroundTile* Found = Self.IsValid() ? Self->GroundTiles.Find(Key) : nullptr;
+			return Found ? &Found->Ground : nullptr;
+		}, Tile.Gpu);
+		Tile.Hash = Value;
+		Written++;
+	}
+	for (auto It = GroundTiles.CreateIterator(); It; ++It)
+	{
+		if (Buckets.Contains(It.Key())) continue;
+		CSCity::ReleaseFacade(It.Value().Ground, It.Value().Gpu);
+		It.RemoveCurrent();
+		Written++;
+	}
+	GroundTilesRebuilt = Written;
+	NumGroundTiles = GroundTiles.Num();
+	UE_LOG(LogCSRoadNet, Log, TEXT("%s: %d ground tiles of %.0f m, %d rebuilt, %d pending; %.1f ms"), *GetName(), NumGroundTiles, TileCm * 0.01, GroundTilesRebuilt, Pending, (FPlatformTime::Seconds() - StartTime) * 1000.0);
+	return Pending;
+}
+
 void ACSRoadNetworkActor::ClearBuildingTiles()
 {
+	ClearGroundTiles();
 	for (TPair<FIntPoint, FCSCityBuildingTile>& Pair : BuildingTiles) CSRoadNetworkActor_DestroyBuildings(Pair.Value);
 	BuildingTiles.Reset();
 	if (LotState) LotState->Reset();

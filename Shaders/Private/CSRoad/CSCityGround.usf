@@ -1,0 +1,505 @@
+// The city's ground, a tile at a time (CSCityGround.h): a thread per 12 m of the tile. It works out the ground's height, fills its square with
+// slabs, puts walls where the ground drops, and looks for free ground for planters and cart shops. It runs twice with the same logic:
+// GROUND_PASS_COUNT only counts what each slot gets (the CPU reads that back and sizes the buffers), GROUND_PASS_WRITE writes the instances.
+//
+// The height (GroundJoin_Plan.md 5.1), at a point of the world:
+// 1. what the roads around want: their heights weighted by distance, so that the ground between two roads at different heights slopes from one
+//    to the other; plus what the field raises or lowers there, fading out towards the roads;
+// 2. a plot's own level on the plot, coming back to the above within PlotBlend of it: what stands there stands on it;
+// 3. the road, which has the last word: under its mesh by its side, and back to the above within RoadShoulder.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/PCGPlugins/Shaders/Private/CSGpuSharedLayout.ush"
+
+#define GROUND_PASS_COUNT 1
+#define GROUND_PASS_WRITE 2
+
+// As CSCity::EGroundSlot and ECSCityGapStyle.
+#define GROUND_SLOTS 6
+#define SLOT_SLAB 0u
+#define SLOT_WALL 1u
+#define SLOT_PLANTER 2u
+#define SLOT_PLANTER2 3u
+#define SLOT_CART 4u
+#define SLOT_CART2 5u
+#define GAP_AUTO 0u
+#define GAP_PLANTER 1u
+#define GAP_MARKET 2u
+#define GAP_EMPTY 3u
+// As ACSCityFieldActor's cells.
+#define FIELD_CELL 400.0
+#define FIELD_HEIGHT_STEP 50.0
+
+// The cells: 12 m, split where the ground is not flat enough, down to 3 m.
+#define CELL_SIZE 1200.0
+// How far from flat a slab's corners may be.
+#define FLAT_ENOUGH 2.0
+// How far slabs reach over each other.
+#define SLAB_OVERLAP 1.01
+
+StructuredBuffer<float4> GroundRoads;       // 2 per piece: (a xyz relative to the origin, half width), (b xyz, 0)
+StructuredBuffer<float4> GroundLots;        // 3 per plot: (middle xy, front xy), (half width, half depth, base, drop), (drop per x, drop per y, 1 if the ground follows it, 0)
+StructuredBuffer<uint> GroundFieldTable;    // as FacadeFieldTable
+StructuredBuffer<uint> GroundFieldPages;    // as FacadeFieldPages
+StructuredBuffer<uint> GroundFieldHeights;  // the same cells' heights, half metres, signed
+int4 GroundFieldBox;
+uint GroundFieldOn;
+uint GroundFieldHeightsOn;
+float4 GroundOrigin;                        // world position everything is relative to
+float4 GroundTile;                          // the tile's corner xy, its size, 0
+uint GroundNumX;
+uint GroundNumRoads;
+uint GroundNumLots;
+uint GroundNumThreads;
+float4 GroundSlotMin[GROUND_SLOTS];         // the slot's module box once turned: min, .w quarter turns
+float4 GroundSlotSize[GROUND_SLOTS];        // its size, .w 1 when the slot has a mesh
+float GroundReach;
+float GroundEdgeSink;
+float GroundRoadMargin;
+float GroundRoadShoulder;
+float GroundPlotBlend;
+float GroundMaxSlope;
+float GroundWallMinStep;
+float GroundBuildingClearance;
+float GroundRoadClearance;
+float GroundMaxPropSlope;
+float GroundAutoPlanterChance;
+float GroundPlanterChance;
+float GroundCartChance;
+
+#if GROUND_PASS == GROUND_PASS_COUNT
+RWStructuredBuffer<uint> GroundCounts;
+#else
+uint4 GroundCapacityLo;
+uint4 GroundCapacityHi;
+RWBuffer<float4> GroundRows0;
+RWBuffer<float4> GroundRows1;
+RWBuffer<float4> GroundRows2;
+RWBuffer<float4> GroundRows3;
+RWBuffer<float4> GroundRows4;
+RWBuffer<float4> GroundRows5;
+RWBuffer<uint> GroundCounter0;
+RWBuffer<uint> GroundCounter1;
+RWBuffer<uint> GroundCounter2;
+RWBuffer<uint> GroundCounter3;
+RWBuffer<uint> GroundCounter4;
+RWBuffer<uint> GroundCounter5;
+#endif
+
+uint GroundHash(uint X)
+{
+	X ^= X >> 16;
+	X *= 0x7feb352du;
+	X ^= X >> 15;
+	X *= 0x846ca68bu;
+	X ^= X >> 16;
+	return X;
+}
+
+float GroundUnit(uint X)
+{
+	return float(GroundHash(X) >> 8) * (1.0 / 16777216.0);
+}
+
+bool GroundHas(uint Slot)
+{
+	return GroundSlotSize[Slot].w > 0.5;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The field.
+// ---------------------------------------------------------------------------------------------------------------------
+
+// The cell at a place in the table, or -1 outside any page.
+int GroundFieldIndex(int CellX, int CellY)
+{
+	if (GroundFieldOn == 0u) return -1;
+	const int PageX = (CellX >> 4) - GroundFieldBox.x;
+	const int PageY = (CellY >> 4) - GroundFieldBox.y;
+	if (PageX < 0 || PageY < 0 || PageX >= GroundFieldBox.z || PageY >= GroundFieldBox.w) return -1;
+	const uint Entry = GroundFieldTable[uint(PageY * GroundFieldBox.z + PageX)];
+	if (Entry == 0u) return -1;
+	return int((Entry - 1u) * 256u + uint((CellY & 15) * 16 + (CellX & 15)));
+}
+
+uint GroundFieldByte(int Index)
+{
+	return (GroundFieldPages[uint(Index) >> 2] >> ((uint(Index) & 3u) * 8u)) & 255u;
+}
+
+// How far a cell is raised (cm).
+float GroundCellHeight(int CellX, int CellY)
+{
+	if (GroundFieldHeightsOn == 0u) return 0.0;
+	const int Index = GroundFieldIndex(CellX, CellY);
+	if (Index < 0) return 0.0;
+	const int Byte = int((GroundFieldHeights[uint(Index) >> 2] >> ((uint(Index) & 3u) * 8u)) & 255u);
+	return float(Byte >= 128 ? Byte - 256 : Byte) * FIELD_HEIGHT_STEP;
+}
+
+// How far the field raises the ground at a point: between the four cells round it.
+float GroundFieldElevation(float2 P)
+{
+	if (GroundFieldHeightsOn == 0u) return 0.0;
+	const float2 World = (GroundOrigin.xy + P) / FIELD_CELL - 0.5;
+	const float2 Floor = floor(World);
+	const float2 F = World - Floor;
+	const int X = int(Floor.x);
+	const int Y = int(Floor.y);
+	return lerp(lerp(GroundCellHeight(X, Y), GroundCellHeight(X + 1, Y), F.x), lerp(GroundCellHeight(X, Y + 1), GroundCellHeight(X + 1, Y + 1), F.x), F.y);
+}
+
+// The gap style at a point: the one on at least half of the four cells round it, else Auto.
+uint GroundGapStyle(float2 P)
+{
+	if (GroundFieldOn == 0u) return GAP_AUTO;
+	const float2 World = (GroundOrigin.xy + P) / FIELD_CELL - 0.5;
+	const int X = int(floor(World.x));
+	const int Y = int(floor(World.y));
+	uint Votes = 0u;
+	for (int B = 0; B < 2; B++)
+	{
+		for (int A = 0; A < 2; A++)
+		{
+			const int Index = GroundFieldIndex(X + A, Y + B);
+			const uint Style = Index < 0 ? GAP_AUTO : (GroundFieldByte(Index) >> 5) & 3u;
+			Votes += 1u << (Style * 8u);
+		}
+	}
+	uint Best = GAP_AUTO;
+	uint Most = 1u;
+	for (uint Style = 1u; Style < 4u; Style++)
+	{
+		const uint Count = (Votes >> (Style * 8u)) & 255u;
+		if (Count > Most)
+		{
+			Most = Count;
+			Best = Style;
+		}
+	}
+	return Best;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The height.
+// ---------------------------------------------------------------------------------------------------------------------
+
+struct FGroundPoint
+{
+	float Height;       // the ground's height, under a road's mesh too
+	float SlabHeight;   // what a slab reaching here should take: on a road's edge rather than under its mesh
+	float RoadDist;     // to the nearest road's edge (negative under it)
+	float2 ToRoad;      // the way to its middle
+	float PlotDist;     // to the nearest thing standing (negative on it)
+	bool bOnPlot;       // on a plot whose level the ground follows
+};
+
+FGroundPoint GroundAt(float2 P)
+{
+	FGroundPoint Out;
+	// 1. What the roads around want.
+	float Near = 1e9;
+	float NearHeight = 0.0;
+	float2 ToRoad = float2(0.0, 1.0);
+	float Weights = 0.0;
+	float Weighted = 0.0;
+	for (uint R = 0u; R < GroundNumRoads; R++)
+	{
+		const float4 A = GroundRoads[R * 2u];
+		const float3 B = GroundRoads[R * 2u + 1u].xyz;
+		const float2 AB = B.xy - A.xy;
+		const float T = saturate(dot(P - A.xy, AB) / max(dot(AB, AB), 1.0));
+		const float2 Q = A.xy + AB * T;
+		const float Middle = length(P - Q);
+		const float Edge = Middle - A.w;
+		const float Z = lerp(A.z, B.z, T);
+		if (Edge < Near)
+		{
+			Near = Edge;
+			NearHeight = Z;
+			ToRoad = Middle > 1.0 ? (Q - P) / Middle : float2(0.0, 1.0);
+		}
+		// By the fourth power: the road next to it counts, and how many pieces a far one is cut into does not.
+		const float D = max(Edge, 100.0);
+		const float W = 1.0 / (D * D * D * D);
+		Weights += W;
+		Weighted += W * Z;
+	}
+	float Height = Weights > 0.0 ? Weighted / Weights : 0.0;
+	Height += GroundFieldElevation(P) * smoothstep(GroundRoadMargin, GroundRoadMargin + GroundRoadShoulder, Near);
+
+	// 2. A plot's level.
+	float Standing = 1e9;
+	float LevelDist = 1e9;
+	float LevelHeight = 0.0;
+	for (uint L = 0u; L < GroundNumLots; L++)
+	{
+		const float4 L0 = GroundLots[L * 3u];
+		const float4 L1 = GroundLots[L * 3u + 1u];
+		const float4 L2 = GroundLots[L * 3u + 2u];
+		const float2 AxisX = float2(L0.w, -L0.z);
+		const float2 Local = float2(dot(P - L0.xy, AxisX), dot(P - L0.xy, L0.zw));
+		const float2 Q = abs(Local) - L1.xy;
+		const float Dist = length(max(Q, 0.0)) + min(max(Q.x, Q.y), 0.0);
+		Standing = min(Standing, Dist);
+		if (L2.z > 0.5 && Dist < LevelDist)
+		{
+			LevelDist = Dist;
+			const float2 Clamped = clamp(Local, -L1.xy, L1.xy);
+			LevelHeight = L1.z - (L1.w + L2.x * Clamped.x + L2.y * Clamped.y);
+		}
+	}
+	if (LevelDist <= 0.0) Height = LevelHeight;
+	else if (LevelDist < GroundPlotBlend) Height = lerp(LevelHeight, Height, smoothstep(0.0, GroundPlotBlend, LevelDist));
+
+	// 3. The road.
+	const float EdgeHeight = NearHeight - GroundEdgeSink;
+	Out.SlabHeight = Height;
+	if (Near <= GroundRoadMargin) Out.SlabHeight = EdgeHeight;
+	else if (Near < GroundRoadMargin + GroundRoadShoulder && LevelDist > 0.0) Out.SlabHeight = lerp(EdgeHeight, Height, smoothstep(GroundRoadMargin, GroundRoadMargin + GroundRoadShoulder, Near));
+	Out.Height = Near <= 0.0 ? NearHeight - 30.0 : Out.SlabHeight;
+	Out.RoadDist = Near;
+	Out.ToRoad = ToRoad;
+	Out.PlotDist = Standing;
+	Out.bOnPlot = LevelDist <= 0.0;
+	return Out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Writing.
+// ---------------------------------------------------------------------------------------------------------------------
+
+#if GROUND_PASS == GROUND_PASS_WRITE
+#define GROUND_APPEND(N, Capacity) \
+	{ \
+		uint Index; \
+		InterlockedAdd(GroundCounter##N[0], 1u, Index); \
+		if (Index < Capacity) \
+		{ \
+			const uint At = Index * CS_GPU_INSTANCED_ROW_FLOAT4S; \
+			GroundRows##N[At + 0] = Row0; \
+			GroundRows##N[At + 1] = Row1; \
+			GroundRows##N[At + 2] = Row2; \
+			GroundRows##N[At + 3] = Row3; \
+			GroundRows##N[At + 4] = Row4; \
+		} \
+	}
+
+// A module-local vector turned by the slot's quarter turns, counter-clockwise from above.
+float3 GroundTurn(float3 V, uint Turns)
+{
+	if (Turns == 1u) return float3(-V.y, V.x, V.z);
+	if (Turns == 2u) return float3(-V.x, -V.y, V.z);
+	if (Turns == 3u) return float3(V.y, -V.x, V.z);
+	return V;
+}
+#endif
+
+// The slot's module with its box (once turned) along the axes given, each as long as one unit of the box is to be, its anchor (a fraction of
+// its box) on Point.
+void GroundEmit(uint Slot, float3 Point, float3 X, float3 Y, float3 Z, float3 Anchor, uint Key)
+{
+	if (!GroundHas(Slot)) return;
+#if GROUND_PASS == GROUND_PASS_COUNT
+	InterlockedAdd(GroundCounts[Slot], 1u);
+#else
+	const float3 Min = GroundSlotMin[Slot].xyz;
+	const float3 Size = max(GroundSlotSize[Slot].xyz, 1e-3);
+	const uint Turns = uint(GroundSlotMin[Slot].w + 0.5);
+	const float3 AnchorLocal = Min + Anchor * Size;
+	const float3 Origin = Point - (X * AnchorLocal.x + Y * AnchorLocal.y + Z * AnchorLocal.z);
+	float3 Axis[3];
+	for (uint I = 0u; I < 3u; I++)
+	{
+		const float3 Turned = GroundTurn(float3(I == 0u ? 1.0 : 0.0, I == 1u ? 1.0 : 0.0, I == 2u ? 1.0 : 0.0), Turns);
+		Axis[I] = X * Turned.x + Y * Turned.y + Z * Turned.z;
+	}
+	const float3 Middle = Min + 0.5 * Size;
+	const float3 Centre = Origin + X * Middle.x + Y * Middle.y + Z * Middle.z;
+	const float Radius = 0.5 * length(Size) * max(length(X), max(length(Y), length(Z)));
+	const float4 Row0 = float4(Axis[0], 0.0);
+	const float4 Row1 = float4(Axis[1], 0.0);
+	const float4 Row2 = float4(Axis[2], 0.0);
+	const float4 Row3 = float4(Origin, GroundUnit(Key ^ (Slot * 0x1000193u)));
+	const float4 Row4 = float4(Centre, Radius);
+	if (Slot == 0u) GROUND_APPEND(0, GroundCapacityLo.x)
+	else if (Slot == 1u) GROUND_APPEND(1, GroundCapacityLo.y)
+	else if (Slot == 2u) GROUND_APPEND(2, GroundCapacityLo.z)
+	else if (Slot == 3u) GROUND_APPEND(3, GroundCapacityLo.w)
+	else if (Slot == 4u) GROUND_APPEND(4, GroundCapacityHi.x)
+	else GROUND_APPEND(5, GroundCapacityHi.y)
+#endif
+}
+
+// A square of ground: its slab's plane from its corners, and whether it needs splitting.
+struct FGroundCell
+{
+	float Height;       // at its middle
+	float2 Slope;       // per cm along x and y; 0 when it is too steep to follow, and stays level
+	bool bFlat;         // its corners on one plane, and none of it across a road's edge
+	bool bAny;          // anything of it to draw: within reach of a road, and not all under one
+	bool bOnPlot;       // its middle on a plot, whose building hides its edges
+};
+
+FGroundCell GroundCellAt(float2 Min, float Size)
+{
+	FGroundCell Out;
+	// Its four corners, then its middle.
+	float H[5];
+	float Nearest = 1e9;
+	float Farthest = -1e9;
+	float MiddleRoad = 0.0;
+	Out.bOnPlot = false;
+	for (uint I = 0u; I < 5u; I++)
+	{
+		float2 P = Min + 0.5 * Size;
+		if (I < 4u) P = Min + float2(float(I & 1u), float(I >> 1u)) * Size;
+		const FGroundPoint G = GroundAt(P);
+		H[I] = G.SlabHeight;
+		Nearest = min(Nearest, G.RoadDist);
+		Farthest = max(Farthest, G.RoadDist);
+		MiddleRoad = G.RoadDist;
+		Out.bOnPlot = G.bOnPlot;
+	}
+	Out.bAny = Nearest <= GroundReach && Farthest >= -1.0;
+	Out.Height = H[4];
+	const float Sx = ((H[1] + H[3]) - (H[0] + H[2])) * 0.5 / Size;
+	const float Sy = ((H[2] + H[3]) - (H[0] + H[1])) * 0.5 / Size;
+	// How far the corners and the middle are off the plane through their average.
+	const float Average = (H[0] + H[1] + H[2] + H[3]) * 0.25;
+	const float Off = max(abs(Average - H[4]), abs((H[0] + H[3]) - (H[1] + H[2])) * 0.5);
+	// A road's edge may pass between the samples: anything it could lie in is split, whatever its samples say.
+	Out.bFlat = Off < FLAT_ENOUGH && MiddleRoad > 0.71 * Size + GroundRoadMargin;
+	Out.Slope = float2(Sx, Sy);
+	if (max(abs(Sx), abs(Sy)) > GroundMaxSlope)
+	{
+		Out.Slope = float2(0.0, 0.0);
+		Out.bFlat = Size <= 300.0;
+	}
+	return Out;
+}
+
+// The slab over a cell, turned to its plane, and walls on its edges that stand high over what is beyond them.
+void GroundEmitCell(float2 Min, float Size, FGroundCell Cell, uint Key)
+{
+	const float2 Middle = Min + 0.5 * Size;
+	const float3 N = normalize(float3(-Cell.Slope.x, -Cell.Slope.y, 1.0));
+	const float3 X = normalize(float3(1.0, 0.0, Cell.Slope.x));
+	const float3 Y = normalize(cross(N, X));
+	const float3 Box = max(GroundSlotSize[SLOT_SLAB].xyz, 1e-3);
+	// A slab is a rectangle on its plane, no shear: on a slope both ways its Y leans off the world's by this, which it covers by reaching further.
+	const float Lean = abs(Cell.Slope.x * Cell.Slope.y) / (1.0 + Cell.Slope.x * Cell.Slope.x);
+	const float StretchX = Size * sqrt(1.0 + Cell.Slope.x * Cell.Slope.x) * (SLAB_OVERLAP + Lean) / Box.x;
+	const float StretchY = Size * sqrt(1.0 + Cell.Slope.y * Cell.Slope.y) * SLAB_OVERLAP / Box.y;
+	GroundEmit(SLOT_SLAB, float3(Middle, Cell.Height), X * StretchX, Y * StretchY, N, float3(0.5, 0.5, 1.0), Key);
+	if (!GroundHas(SLOT_WALL) || Cell.bOnPlot) return;
+	const float3 WallBox = max(GroundSlotSize[SLOT_WALL].xyz, 1e-3);
+	for (uint Side = 0u; Side < 4u; Side++)
+	{
+		// Out of the side, and along it from its start.
+		float2 Out = float2(0.0, 1.0);
+		float2 Along = float2(1.0, 0.0);
+		float2 Start = Min + float2(0.0, Size);
+		if (Side == 1u)
+		{
+			Out = float2(1.0, 0.0);
+			Along = float2(0.0, -1.0);
+			Start = Min + float2(Size, Size);
+		}
+		else if (Side == 2u)
+		{
+			Out = float2(0.0, -1.0);
+			Along = float2(-1.0, 0.0);
+			Start = Min + float2(Size, 0.0);
+		}
+		else if (Side == 3u)
+		{
+			Out = float2(-1.0, 0.0);
+			Along = float2(0.0, 1.0);
+			Start = Min;
+		}
+		const float2 EdgeMiddle = Start + Along * (0.5 * Size);
+		const float EdgeHeight = Cell.Height + dot(Cell.Slope, EdgeMiddle - Middle);
+		// What is beyond it: a neighbour's middle, if it is one as big; near enough if not.
+		const FGroundPoint Beyond = GroundAt(EdgeMiddle + Out * (0.5 * Size));
+		if (Beyond.RoadDist <= GroundRoadMargin) continue;
+		const float Step = EdgeHeight - Beyond.SlabHeight;
+		if (Step < GroundWallMinStep) continue;
+		GroundEmit(SLOT_WALL, float3(Start, EdgeHeight), float3(Along * (Size / WallBox.x), 0.0), float3(Out, 0.0), float3(0.0, 0.0, (Step + 30.0) / WallBox.z), float3(0.0, 1.0, 1.0), Key + 0x51u + Side);
+	}
+}
+
+// What stands on a 6 m square of free ground, if it is free: well away from anything standing and from the roads, near level.
+void GroundProp(float2 Min, uint Key)
+{
+	const float2 Jitter = float2(GroundUnit(Key ^ 0x11u), GroundUnit(Key ^ 0x22u)) * 200.0;
+	const float2 P = Min + 200.0 + Jitter;
+	const FGroundPoint G = GroundAt(P);
+	if (G.PlotDist < GroundBuildingClearance || G.RoadDist < GroundRoadClearance || G.RoadDist > GroundReach) return;
+	float Lowest = G.Height;
+	float Highest = G.Height;
+	for (uint I = 0u; I < 4u; I++)
+	{
+		const float2 Round = float2(float(I & 1u) * 2.0 - 1.0, float(I >> 1u) * 2.0 - 1.0) * 200.0;
+		const float Height = GroundAt(P + Round).Height;
+		Lowest = min(Lowest, Height);
+		Highest = max(Highest, Height);
+	}
+	if (Highest - Lowest > GroundMaxPropSlope * 400.0) return;
+	const uint Style = GroundGapStyle(P);
+	if (Style == GAP_EMPTY) return;
+	const float Chance = Style == GAP_MARKET ? GroundCartChance : Style == GAP_PLANTER ? GroundPlanterChance : GroundAutoPlanterChance;
+	if (GroundUnit(Key ^ 0x33u) >= Chance) return;
+	const bool bSecond = GroundUnit(Key ^ 0x44u) < 0.5;
+	uint Slot;
+	if (Style == GAP_MARKET) Slot = (bSecond && GroundHas(SLOT_CART2)) || !GroundHas(SLOT_CART) ? SLOT_CART2 : SLOT_CART;
+	else Slot = (bSecond && GroundHas(SLOT_PLANTER2)) || !GroundHas(SLOT_PLANTER) ? SLOT_PLANTER2 : SLOT_PLANTER;
+	// Its front towards the road, its long side along it.
+	const float3 Y = float3(G.ToRoad, 0.0);
+	const float3 X = float3(G.ToRoad.y, -G.ToRoad.x, 0.0);
+	GroundEmit(Slot, float3(P, G.Height), X, Y, float3(0.0, 0.0, 1.0), float3(0.5, 0.5, 0.0), Key);
+}
+
+[numthreads(16, 1, 1)]
+void GroundCellCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint Thread = DispatchThreadId.x;
+	if (Thread >= GroundNumThreads) return;
+	const int I = int(Thread % GroundNumX);
+	const int J = int(Thread / GroundNumX);
+	const float2 Min = GroundTile.xy + float2(I, J) * CELL_SIZE;
+	// What makes a cell's random: where it is in the world, whichever tile it falls in.
+	const int WorldX = int(floor((GroundOrigin.x + Min.x) / CELL_SIZE + 0.5));
+	const int WorldY = int(floor((GroundOrigin.y + Min.y) / CELL_SIZE + 0.5));
+	const uint Key = GroundHash(uint(WorldX) * 0x1000193u + uint(WorldY));
+
+	// A 12 m slab if it can be, else four of 6 m, each else four of 3 m. The tree laid flat: node 0 the whole, 1..4 its quarters, 5..20 theirs, each
+	// looked at only if the one over it split. One loop rather than three nested keeps the height function inlined once here.
+	uint Split = 0u;
+	for (uint N = 0u; N < 21u; N++)
+	{
+		float2 At = Min;
+		float Size = CELL_SIZE;
+		if (N >= 5u)
+		{
+			const uint M = N - 5u;
+			if (((Split >> (1u + (M >> 2u))) & 1u) == 0u) continue;
+			Size = CELL_SIZE * 0.25;
+			At += float2(float((M >> 2u) & 1u), float(M >> 3u)) * (CELL_SIZE * 0.5) + float2(float(M & 1u), float((M >> 1u) & 1u)) * Size;
+		}
+		else if (N >= 1u)
+		{
+			if ((Split & 1u) == 0u) continue;
+			const uint M = N - 1u;
+			Size = CELL_SIZE * 0.5;
+			At += float2(float(M & 1u), float(M >> 1u)) * Size;
+		}
+		const FGroundCell Cell = GroundCellAt(At, Size);
+		if (!Cell.bAny) continue;
+		if (N >= 5u || Cell.bFlat) GroundEmitCell(At, Size, Cell, GroundHash(Key + N * 0x10001u + 1u));
+		else Split |= 1u << N;
+	}
+
+	// Free ground: every 6 m, each square looked at once, from the world's grid.
+	for (uint B = 0u; B < 4u; B++) GroundProp(Min + float2(float(B & 1u), float(B >> 1u)) * (CELL_SIZE * 0.5), GroundHash(Key + B * 0x20001u + 7u));
+}

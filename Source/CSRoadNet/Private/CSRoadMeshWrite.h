@@ -40,6 +40,11 @@ void ShowLatest(UCSMeshRenderComponent* Component, UCSMesh* Latest, UCSMesh* Lan
 // update: for work written on the render thread whose result the game thread takes up. Counted with the mesh writes.
 void AfterRenderThread(UWorld* World, TFunction<void()> Land);
 
+// Other writes that land on their own (a facade's count, then its modules): counted with the others while on their way, and Pump
+// run while LandMeshWrites waits: it should bring them on, from the game thread.
+void AddWriteInFlight(int32 Delta);
+void SetLandPump(void (*Pump)());
+
 // Writes queued and not yet landed, every mesh (OnLanded run), and AfterRenderThread's.
 int32 MeshWritesInFlight();
 // Waits until they have landed (tests, and builds that wait).

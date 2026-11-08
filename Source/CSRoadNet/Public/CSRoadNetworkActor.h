@@ -55,9 +55,11 @@ namespace CSCity
 {
 struct FLot;
 struct FLotState;
+struct FGroundCurve;
 class FFacadeGpu;
 }
 class UCSCityFacadeKit;
+class UCSCityGroundKit;
 
 USTRUCT()
 struct FCSRoadSplineSettings
@@ -130,8 +132,28 @@ struct FCSCityLotSettings
 	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (ClampMin = "1", Units = "m"))
 	float MaxHeight = 24.0f;
 
+	/** How many plots are left empty, drawn from their ids: the ground they leave is free for planters and cart shops. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road", meta = (ClampMin = "0", ClampMax = "1"))
+	float Vacancy = 0.0f;
+
 	UPROPERTY(EditAnywhere, Category = "CS2 Road")
 	int32 Seed = 1;
+};
+
+/** The ground of one tile: instances only, written on the GPU (CSCityGround.h). */
+USTRUCT()
+struct FCSCityGroundTile
+{
+	GENERATED_BODY()
+
+	/** A component per slot of the ground kit with anything in it. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UCSGpuInstancedMeshComponent>> Ground;
+
+	TSharedPtr<CSCity::FFacadeGpu> Gpu;
+
+	// What went into it: equal hashes, same ground.
+	uint64 Hash = 0;
 };
 
 /** The batch buildings of one tile: instances only, no mesh of their own. */
@@ -147,6 +169,9 @@ struct FCSCityBuildingTile
 	/** Without: the facade kit's modules, a component per slot (null where the kit has none), written on the GPU. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UCSGpuInstancedMeshComponent>> Facade;
+
+	/** Written with a kit: its components come when the write lands, if any. */
+	bool bFacadeWritten = false;
 
 	TSharedPtr<CSCity::FFacadeGpu> FacadeGpu;
 
@@ -366,6 +391,24 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CS2 Road|Buildings", meta = (EditCondition = "bBatchBuildings", Units = "deg"))
 	float BuildingMeshFrontYaw = 90.0f;
 
+	/** Ground over everything within the kit's Reach of a road, written on the GPU as instances in squares of the world about TileSize wide: its
+	 *  height follows the roads, the buildings' levels and what the city's field (ACSCityFieldActor) raises or lowers, with walls where it drops;
+	 *  the free ground between the buildings has planters or, where the field says it is a night market, cart shops. Being the GPU's alone it has
+	 *  no collision and no Lumen cards. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Ground", meta = (EditCondition = "bBatchBuildings"))
+	bool bBuildGround = false;
+
+	/** Empty: UCSCityGroundKit::Default. */
+	UPROPERTY(EditAnywhere, Category = "CS2 Road|Ground", meta = (EditCondition = "bBuildGround"))
+	TObjectPtr<UCSCityGroundKit> GroundKit;
+
+	/** Ground tiles the last rebuild wrote or removed. */
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 GroundTilesRebuilt = 0;
+
+	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
+	int32 NumGroundTiles = 0;
+
 	UPROPERTY(VisibleAnywhere, Transient, Category = "CS2 Road|Stats")
 	int32 NumBuildings = 0;
 
@@ -547,6 +590,8 @@ public:
 
 	// Rebuilds on the next tick: spline roads call it as they change, many times a frame.
 	void RequestRebuild();
+	// What the field says over a world box has changed: the buildings there are written again.
+	void FieldChanged(const FBox2D& Box);
 
 	/** What the network has built, in an actor of its own (null before its first build). */
 	UFUNCTION(BlueprintPure, Category = "CS2 Road")
@@ -637,6 +682,7 @@ private:
 	TMap<FString, TObjectPtr<UMaterialInstanceDynamic>> DecalSurfaces;
 
 	bool bRebuildRequested = false;
+	TArray<FBox2D> FieldBoxes;
 	TUniquePtr<FCSRoadNetworkPreview> Preview;
 	void BuildPreview(const CSRoad::FGraph& Graph, const CSRoad::FRoadLanes& Lanes, const CSRoad::FGpuGeometryResult& Geometry, const CSRoad::FSavedTerrain* Terrain);
 	void TickPreview(float DeltaSeconds);
@@ -786,6 +832,10 @@ private:
 	UPROPERTY(Transient, NonTransactional)
 	TMap<FIntPoint, FCSCityBuildingTile> BuildingTiles;
 
+	// By the ground's own (column, row): CSCity::GroundTileCm squares of the world.
+	UPROPERTY(Transient, NonTransactional)
+	TMap<FIntPoint, FCSCityGroundTile> GroundTiles;
+
 	// Building tiles whose buildings changed but were left for a later batch.
 	int32 PendingBuildingTiles = 0;
 
@@ -800,6 +850,10 @@ private:
 	// network's space) near it and the width of the road it follows; before the batch buildings, which keep out of them.
 	void UpdateStreets(const TArray<CSRoad::FSplineRoad>& Splines, const TArray<CSRoad::FRoadSpec>& Roads, CSRoad::FAssets& Assets);
 	void ClearBuildingTiles();
+	void ClearGroundTiles();
+	// Writes the ground tiles whose roads, plots or field cells changed, a batch at most (nearest Focus first: the camera in the network's tiles, if
+	// any), and removes those no road is near any more. Returns how many are left for later.
+	int32 WriteGroundTiles(const TArray<CSCity::FGroundCurve>& Curves, const TArray<TArray<FVector2D>>& Reserved, bool bFollowPlots, const FVector2D* Focus);
 	// BuildingMeshes that are set.
 	TArray<UStaticMesh*> ResolveBuildingMeshes() const;
 	// BuildingKit, else the default one.

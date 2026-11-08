@@ -3,6 +3,7 @@
 #include "CSCityBuildingActor.h"
 #include "CSCityFacade.h"
 #include "CSCityFacadeKit.h"
+#include "CSCityFieldActor.h"
 #include "CSCityLayout.h"
 #include "CSGpuInstancedMeshComponent.h"
 #include "CSRoadNet.h"
@@ -75,6 +76,7 @@ const TCHAR* CSCityStreet_StackName(ECSCityMassStack Stack)
 	{
 	case ECSCityMassStack::Setback: return TEXT(", setback");
 	case ECSCityMassStack::PodiumTower: return TEXT(", tower on a podium");
+	case ECSCityMassStack::Overhang: return TEXT(", overhang on columns");
 	default: return TEXT("");
 	}
 }
@@ -239,21 +241,46 @@ bool ACSCityStreetActor::Relayout()
 		for (CSCity::FPolygon& Plot : Other->PlotCorners()) if (Plot.Num() >= 3) Reserved.Add(MoveTemp(Plot));
 	}
 
-	// Each plot on the ground below it, else on the street.
+	// Each building stands level. With a plinth, its base at the top of what is along its front: the road it follows, else
+	// the ground (or, with none under it, the street). Without one, half a metre into the ground at its lowest, so that
+	// nothing shows under it.
 	FCollisionQueryParams Query(SCENE_QUERY_STAT(CSCityStreetGround), false, this);
 	if (Road) Query.AddIgnoredActor(Road);
-	auto Place = [this, World, &Query](CSCity::FLot& Lot)
+	const bool bPlinth = Used && Used->Plinth.Mesh;
+	const bool bFollowsRoad = Road != nullptr;
+	auto Place = [this, World, &Query, bPlinth, bFollowsRoad](CSCity::FLot& Lot)
 	{
-		if (!bOnGround) return true;
-		double Lowest = TNumericLimits<double>::Max();
-		TArray<FVector2D> Probes = Lot.Corners;
-		Probes.Add(Lot.Centre);
-		for (const FVector2D& Probe : Probes)
+		const double NearBase = Lot.Base;
+		auto Trace = [&](const FVector2D& Point, double& OutHeight)
 		{
 			FHitResult Hit;
-			if (World->LineTraceSingleByChannel(Hit, FVector(Probe, Lot.Base + 5000.0), FVector(Probe, Lot.Base - 10000.0), ECC_WorldStatic, Query)) Lowest = FMath::Min(Lowest, Hit.ImpactPoint.Z);
+			if (!bOnGround || !World->LineTraceSingleByChannel(Hit, FVector(Point, NearBase + 5000.0), FVector(Point, NearBase - 10000.0), ECC_WorldStatic, Query)) return false;
+			OutHeight = Hit.ImpactPoint.Z;
+			return true;
+		};
+		if (!bPlinth)
+		{
+			double Lowest = TNumericLimits<double>::Max();
+			TArray<FVector2D> Probes = Lot.Corners;
+			Probes.Add(Lot.Centre);
+			for (const FVector2D& Probe : Probes)
+			{
+				double Height = 0.0;
+				if (Trace(Probe, Height)) Lowest = FMath::Min(Lowest, Height);
+			}
+			if (Lowest < TNumericLimits<double>::Max()) Lot.Base = Lowest - 50.0;
+			return true;
 		}
-		if (Lowest < TNumericLimits<double>::Max()) Lot.Base = Lowest - 50.0;
+		auto Ground = [&](const FVector2D& Point)
+		{
+			double Height = 0.0;
+			return Trace(Point, Height) ? Height : CSCity::LotRoadHeight(Lot, Point);
+		};
+		const FVector2D Front = Lot.Front.GetSafeNormal();
+		const FVector2D HalfX = FVector2D(Front.Y, -Front.X) * (Lot.Width * 0.5);
+		const FVector2D FrontMiddle = Lot.Centre + Front * (Lot.Depth * 0.5);
+		const double Top = bFollowsRoad ? FMath::Max(Lot.FrontHeightStart, Lot.FrontHeightEnd) : FMath::Max(Ground(FrontMiddle - HalfX), Ground(FrontMiddle + HalfX));
+		CSCity::SeatLot(Lot, Top, Ground);
 		return true;
 	};
 	State.Lots = Anchor.Points.Num() >= 2 && Settings.Frontage > Settings.Gap ? CSCity::LayoutLots({ Anchor }, State.Roads, Reserved, Settings, Place) : TArray<CSCity::FLot>();
@@ -276,9 +303,11 @@ bool ACSCityStreetActor::Relayout()
 	const double Median = FMath::Max(double(MedianStoreys), 1.0);
 	const double Spread = FMath::Loge(FMath::Max(double(P90Storeys) / Median, 1.0)) / 1.2815516;
 	const uint64 Salt = CSCityStreet_Mix(uint64(uint32(Seed)), 0x57EE7ull);
-	const CSCity::FFacadeKitShape Shape = Used ? CSCity::KitShape(*Used) : CSCity::FFacadeKitShape();
 	TArray<CSCity::FFacadeBuilding> Buildings;
 	Plots.Reset();
+	// Each building's line in Plots, for what the GPU draws of it.
+	TArray<int32> BuildingPlots;
+	const ACSCityFieldActor* Field = ACSCityFieldActor::Find(World);
 	FXxHash64Builder Signature;
 	const uint64 KitHash = Used ? CSCity::KitHash(*Used) : 0;
 	Signature.Update(&KitHash, sizeof(KitHash));
@@ -313,6 +342,9 @@ bool ACSCityStreetActor::Relayout()
 		Building.DoorAt = FMath::Lerp(0.2, 0.8, CSCityStreet_Unit(CSCityStreet_Mix(Draw, 4)));
 		Building.Shape = Override ? Override->MassShape : ECSCityMassShape::Auto;
 		Building.Stack = Override ? Override->MassStack : ECSCityMassStack::Auto;
+		Building.Overhang = Override ? Override->MassOverhang : ECSCityMassOverhang::Auto;
+		Building.bLockMassing = Override && Override->MassStack != ECSCityMassStack::Auto;
+		Building.CornerStyle = Override ? Override->CornerStyle : ECSCityCornerStyle::Auto;
 		if (Building.Stack == ECSCityMassStack::Auto && bOverrideStacking)
 		{
 			if (Storeys >= 6 && CSCityStreet_Unit(CSCityStreet_Mix(Draw, 5)) < double(PodiumChance))
@@ -321,15 +353,31 @@ bool ACSCityStreetActor::Relayout()
 				// A tower rises from a whole podium, as the kit's own draw has it.
 				if (Building.Shape == ECSCityMassShape::Auto) Building.Shape = ECSCityMassShape::Box;
 			}
+			else if (Storeys >= 3 && CSCityStreet_Unit(CSCityStreet_Mix(Draw, 7)) < double(OverhangChance))
+			{
+				Building.Stack = ECSCityMassStack::Overhang;
+				if (Building.Shape == ECSCityMassShape::Auto) Building.Shape = ECSCityMassShape::Box;
+			}
 			else Building.Stack = Storeys >= 4 && CSCityStreet_Unit(CSCityStreet_Mix(Draw, 6)) < double(SetbackChance) ? ECSCityMassStack::Setback : ECSCityMassStack::None;
 		}
-		const CSCity::FFacadeMassing Massing = CSCity::MassFacade(Shape, Building);
-		Plots.Add(FString::Printf(TEXT("%s: %d storeys, %.1f x %.1f m, %s%s"), *Name, Massing.Storeys, Lot.Width * 0.01, Lot.Depth * 0.01, CSCityStreet_ShapeName(Massing.Shape), CSCityStreet_StackName(Massing.Stack)));
+		BuildingPlots.Add(Plots.Add(FString::Printf(TEXT("%s: %d storeys, %.1f x %.1f m"), *Name, Storeys, Lot.Width * 0.01, Lot.Depth * 0.01)));
 		Signature.Update(&Building.Block, sizeof(Building.Block));
 		Signature.Update(&Building.Seed, sizeof(Building.Seed));
 		Signature.Update(&Building.DoorAt, sizeof(Building.DoorAt));
 		Signature.Update(&Building.Shape, sizeof(Building.Shape));
 		Signature.Update(&Building.Stack, sizeof(Building.Stack));
+		Signature.Update(&Building.Overhang, sizeof(Building.Overhang));
+		Signature.Update(&Building.bLockMassing, sizeof(Building.bLockMassing));
+		Signature.Update(&Building.CornerStyle, sizeof(Building.CornerStyle));
+		// The cells it may read: it is written again when they change.
+		if (Field)
+		{
+			FBox2D Around(ForceInit);
+			for (const FVector2D& Corner : Lot.Corners) Around += Corner;
+			const uint64 Cells = Field->HashBox(Around.ExpandBy(400.0));
+			Signature.Update(&Cells, sizeof(Cells));
+		}
+		for (const double Value : { Building.Drop, Building.DropX, Building.DropY, Building.FrontRoom }) Signature.Update(&Value, sizeof(Value));
 		Buildings.Add(Building);
 	}
 	NumBuildings = Buildings.Num();
@@ -358,7 +406,7 @@ bool ACSCityStreetActor::Relayout()
 	for (const CSCity::FLot& Lot : State.Lots) if (Lot.Corners.Num() >= 3) State.Reservations.Add(Lot.Corners);
 
 	const uint64 Value = Signature.Finalize().Hash;
-	bool bComponents = Buildings.Num() == 0;
+	bool bComponents = Buildings.Num() == 0 || CSCity::FacadeWritePending(FacadeGpu);
 	for (const UCSGpuInstancedMeshComponent* Component : Facade) bComponents |= IsValid(Component);
 	if (State.bWritten && State.Signature == Value && bComponents) return false;
 	State.Signature = Value;
@@ -368,8 +416,24 @@ bool ACSCityStreetActor::Relayout()
 		CSCity::ReleaseFacade(Facade, FacadeGpu);
 		return true;
 	}
-	CSCity::WriteFacade(*this, Street, TEXT("Facade"), Origin, *Used, Buildings, Facade, FacadeGpu, /*bFollowParent*/ true);
+	CSCity::WriteFacade(*this, Street, TEXT("Facade"), Origin, *Used, Buildings, [Self = TWeakObjectPtr<ACSCityStreetActor>(this)]() { return Self.IsValid() ? &Self->Facade : nullptr; }, FacadeGpu, /*bFollowParent*/ true,
+		[Self = TWeakObjectPtr<ACSCityStreetActor>(this), BuildingPlots = MoveTemp(BuildingPlots)](TConstArrayView<CSCity::FFacadeMassing> Massing)
+		{
+			ACSCityStreetActor* Street = Self.Get();
+			if (!Street) return;
+			// As the GPU drew it.
+			for (int32 I = 0; I < Massing.Num() && I < BuildingPlots.Num(); I++)
+			{
+				if (!Street->Plots.IsValidIndex(BuildingPlots[I])) continue;
+				Street->Plots[BuildingPlots[I]] += FString::Printf(TEXT(", %s%s"), CSCityStreet_ShapeName(Massing[I].Shape), CSCityStreet_StackName(Massing[I].Stack));
+			}
+		});
 	return true;
+}
+
+void ACSCityStreetActor::FieldChanged()
+{
+	Relayout();
 }
 
 void ACSCityStreetActor::ApplyFabric(ECSCityFabric Preset)

@@ -112,7 +112,28 @@ struct FLot
 	FVector2D Front = FVector2D::UnitX();
 	double Width = 0.0;
 	double Depth = 0.0;
+	// The road's height at the two ends of the stretch of its front it takes, at the -X and +X ends of its building's frame
+	// (FBlock::Front turned clockwise is +X), and how far its front stands from the road's edge.
+	double FrontHeightStart = 0.0;
+	double FrontHeightEnd = 0.0;
+	double FrontRoom = 0.0;
+	// How far the ground lies under its base, as a plane in the building's frame from the middle of the Width by Depth
+	// rectangle: Drop + DropX * x + DropY * y (cm). None until it is seated (SeatLot).
+	double Drop = 0.0;
+	double DropX = 0.0;
+	double DropY = 0.0;
 };
+
+// Whether a plot is left empty: Vacancy of them are, drawn from its id.
+bool LotVacant(const FLot& Lot, int32 Seed, double Vacancy);
+
+// The road's height under a point of a plot's Width by Depth rectangle, going on past its ends: what the ground is taken to
+// be where nothing else says.
+double LotRoadHeight(const FLot& Lot, const FVector2D& Point);
+// Seats a plot: its base at Base, and the ground under it the plane through Ground at the rectangle's corners. A building
+// stands level whatever the road beside it does; what lies between its base and the ground is left to its plinth and
+// platform (CSCityFacade.h).
+void SeatLot(FLot& Lot, double Base, TFunctionRef<double(const FVector2D&)> Ground);
 
 // Plots on both sides of each anchor line, one every Frontage along it, standing the anchor's setback from its edge.
 // A plot stays clear of every road (Roads: as built, alleys already cut back under main roads; by half the road's
@@ -148,6 +169,8 @@ struct FLotState
 	TMap<uint64, FIntRect> Reach;
 	TSet<FIntPoint> Pending;
 	TSet<FIntPoint> Edited;
+	// The plots with a building on them, by tile: what the ground of a tile and its neighbours goes by.
+	TMap<FIntPoint, TArray<FLot>> TileLots;
 
 	void Reset()
 	{
@@ -156,6 +179,7 @@ struct FLotState
 		Reach.Reset();
 		Pending.Reset();
 		Edited.Reset();
+		TileLots.Reset();
 	}
 };
 

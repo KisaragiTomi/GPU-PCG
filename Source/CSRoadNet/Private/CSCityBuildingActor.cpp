@@ -81,11 +81,17 @@ TArray<FString> ACSCityBuildingActor::GetRoadPrefabOptions() const
 void ACSCityBuildingActor::Rebuild()
 {
 	if (!Outline || IsTemplate() || !GetWorld()) return;
+	WriteModules();
+	NotifyNetwork();
+}
+
+void ACSCityBuildingActor::WriteModules()
+{
+	if (!Outline || IsTemplate() || !GetWorld()) return;
 	UCSCityFacadeKit* Used = Kit ? Kit.Get() : UCSCityFacadeKit::Default();
 	if (!Used)
 	{
 		CSCity::ReleaseFacade(Facade, FacadeGpu);
-		NotifyNetwork();
 		return;
 	}
 	CSCity::FFacadeBuilding Building;
@@ -95,6 +101,9 @@ void ACSCityBuildingActor::Rebuild()
 	Building.Seed = uint32(FXxHash64::HashBuffer(*Identity, Identity.Len() * sizeof(TCHAR)).Hash);
 	Building.Shape = MassShape;
 	Building.Stack = MassStack;
+	Building.Overhang = MassOverhang;
+	Building.bLockMassing = MassStack != ECSCityMassStack::Auto;
+	Building.CornerStyle = CornerStyle;
 	// The door on the side facing the garage, where the garage is along it; else in the middle of the front.
 	FVector Door;
 	FVector Facing;
@@ -111,8 +120,7 @@ void ACSCityBuildingActor::Rebuild()
 		const FVector2D Along(Block.Front.Y, -Block.Front.X);
 		Building.DoorAt = Block.Width > 0.0 ? FMath::Clamp((FVector2D(Door - Block.Base).Dot(Along) + 0.5 * Block.Width) / Block.Width, 0.0, 1.0) : 0.5;
 	}
-	CSCity::WriteFacade(*this, Outline, TEXT("Facade"), Building.Block.Base, *Used, MakeArrayView(&Building, 1), Facade, FacadeGpu, /*bFollowParent*/ true);
-	NotifyNetwork();
+	CSCity::WriteFacade(*this, Outline, TEXT("Facade"), Building.Block.Base, *Used, MakeArrayView(&Building, 1), [Self = TWeakObjectPtr<ACSCityBuildingActor>(this)]() { return Self.IsValid() ? &Self->Facade : nullptr; }, FacadeGpu, /*bFollowParent*/ true);
 }
 
 void ACSCityBuildingActor::NotifyNetwork() const
@@ -132,7 +140,7 @@ void ACSCityBuildingActor::PostRegisterAllComponents()
 {
 	Super::PostRegisterAllComponents();
 	// The modules are made at build time and never saved: a loaded or copied building writes them.
-	if (!IsTemplate() && GetWorld() && Facade.Num() == 0) Rebuild();
+	if (!IsTemplate() && GetWorld() && Facade.Num() == 0 && !CSCity::FacadeWritePending(FacadeGpu)) Rebuild();
 }
 
 void ACSCityBuildingActor::Destroyed()

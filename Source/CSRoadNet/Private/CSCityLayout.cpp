@@ -833,6 +833,14 @@ TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine
 		const int32 Slots = !bFill ? FMath::FloorToInt32(Length / Frontage) : Length < SlotMinWidth + Settings.Gap ? 0 : FMath::Max(1, FMath::RoundToInt32(Length / Frontage));
 		const double Pitch = bFill && Slots > 0 ? Length / Slots : Frontage;
 		const double SlotHalf = (Pitch - Settings.Gap) * 0.5;
+		// The anchor's height a distance along it.
+		auto HeightAlong = [&Along, &Anchor](double Distance)
+		{
+			int32 K = 0;
+			while (K + 2 < Anchor.Points.Num() && Along[K + 1] < Distance) K++;
+			const double Span = FMath::Max(Along[K + 1] - Along[K], 1e-6);
+			return FMath::Lerp(Anchor.Points[K].Z, Anchor.Points[K + 1].Z, FMath::Clamp((Distance - Along[K]) / Span, 0.0, 1.0));
+		};
 		int32 Segment = 0;
 		for (int32 Slot = 0; Slot < Slots; Slot++)
 		{
@@ -868,6 +876,10 @@ TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine
 					if (bReserved) continue;
 				}
 				Lot.Base = Position.Z;
+				// The building's +X runs against the stretch's direction: its -X end is the stretch's far one.
+				Lot.FrontHeightStart = HeightAlong(At + Side * Candidate.S1);
+				Lot.FrontHeightEnd = HeightAlong(At + Side * Candidate.S0);
+				Lot.FrontRoom = SetbackOf(Anchor);
 				Lot.Height = FMath::Lerp(Settings.MinHeight, Settings.MaxHeight, CSCityLayout_Unit(Lot.Id ^ Seed ^ 2));
 				if (!Place(Lot)) continue;
 				Candidate.Box = CSCityLayout_Box(Lot.Corners);
@@ -922,7 +934,10 @@ TArray<FLot> LayoutLots(const TArray<FRoadLine>& Anchors, const TArray<FRoadLine
 			return false;
 		};
 		if (!Shrink(Given, Given.A, Hits)) continue;
+		const double DepthBefore = Given.Lot.Depth;
 		Finish(Given);
+		// Its middle came forward: the plane under it is the same one.
+		Given.Lot.Drop += Given.Lot.DropY * (DepthBefore - Given.Lot.Depth) * 0.5;
 		Out.Add(Given.Lot);
 	}
 	return Out;
@@ -959,6 +974,34 @@ double RoadReach(const FLotSettings& Settings, double HalfWidth, double Setback)
 double ReservedReach(const FLotSettings& Settings)
 {
 	return 2.0 * LotStrip(Settings) + 6.0 * Settings.Gap + 100.0;
+}
+
+bool LotVacant(const FLot& Lot, int32 Seed, double Vacancy)
+{
+	return Vacancy > 0.0 && CSCityLayout_Unit(Lot.Id ^ uint64(uint32(Seed)) ^ 0x7ull) < Vacancy;
+}
+
+double LotRoadHeight(const FLot& Lot, const FVector2D& Point)
+{
+	const FVector2D Front = Lot.Front.GetSafeNormal();
+	const FVector2D AlongX(Front.Y, -Front.X);
+	const double X = (Point - Lot.Centre).Dot(AlongX);
+	return Lot.Width > 0.0 ? FMath::Lerp(Lot.FrontHeightStart, Lot.FrontHeightEnd, X / Lot.Width + 0.5) : 0.5 * (Lot.FrontHeightStart + Lot.FrontHeightEnd);
+}
+
+void SeatLot(FLot& Lot, double Base, TFunctionRef<double(const FVector2D&)> Ground)
+{
+	Lot.Base = Base;
+	const FVector2D Front = Lot.Front.GetSafeNormal();
+	const FVector2D HalfX = FVector2D(Front.Y, -Front.X) * (Lot.Width * 0.5);
+	const FVector2D HalfY = Front * (Lot.Depth * 0.5);
+	const double FrontLeft = Base - Ground(Lot.Centre - HalfX + HalfY);
+	const double FrontRight = Base - Ground(Lot.Centre + HalfX + HalfY);
+	const double BackLeft = Base - Ground(Lot.Centre - HalfX - HalfY);
+	const double BackRight = Base - Ground(Lot.Centre + HalfX - HalfY);
+	Lot.Drop = 0.25 * (FrontLeft + FrontRight + BackLeft + BackRight);
+	Lot.DropX = Lot.Width > 0.0 ? 0.5 * (FrontRight + BackRight - FrontLeft - BackLeft) / Lot.Width : 0.0;
+	Lot.DropY = Lot.Depth > 0.0 ? 0.5 * (FrontLeft + FrontRight - BackLeft - BackRight) / Lot.Depth : 0.0;
 }
 
 FBlock LotBlock(const FLot& Lot)

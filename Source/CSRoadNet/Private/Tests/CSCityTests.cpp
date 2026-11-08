@@ -6,6 +6,8 @@
 #include "CSCityBuildingActor.h"
 #include "CSCityFacade.h"
 #include "CSCityFacadeKit.h"
+#include "CSCityFieldActor.h"
+#include "CSCityStreetActor.h"
 #include "CSCityLayout.h"
 #include "CSGpuInstancedMeshComponent.h"
 #include "CSGpuInstancedNaniteComponent.h"
@@ -265,12 +267,48 @@ FCSCityTestsOutline CSCityTests_Outline(const CSCity::FFacadeMassing& M, int32 T
 CSCity::FFacadeKitShape CSCityTests_Kit()
 {
 	CSCity::FFacadeKitShape Kit;
-	for (bool& bHas : Kit.bHas) bHas = true;
+	// The plain box's slots; round corners and overhangs have tests of their own.
+	for (int32 Slot = 0; Slot <= int32(CSCity::EFacadeSlot::GroundWindow); Slot++) Kit.bHas[Slot] = true;
 	Kit.Bay = 300.0;
 	Kit.Storey = 400.0;
-	Kit.Corner = 40.0;
 	Kit.Parapet = 110.0;
+	using CSCity::EFacadeSlot;
+	for (const EFacadeSlot Slot : { EFacadeSlot::Wall, EFacadeSlot::Window, EFacadeSlot::Door, EFacadeSlot::GroundWall, EFacadeSlot::GroundWindow }) Kit.Bounds[int32(Slot)] = FBox(FVector(0.0, -50.0, 0.0), FVector(300.0, 0.0, 400.0));
+	Kit.Bounds[int32(EFacadeSlot::Parapet)] = FBox(FVector(0.0, -40.0, 0.0), FVector(300.0, 0.0, 110.0));
+	Kit.Bounds[int32(EFacadeSlot::Roof)] = FBox(FVector(0.0, 0.0, -20.0), FVector(300.0, 300.0, 0.0));
+	Kit.Bounds[int32(EFacadeSlot::CornerInner)] = FBox(FVector(0.0, 0.0, 0.0), FVector(100.0, 100.0, 400.0));
+	Kit.Corner = 40.0;
+	Kit.CornerDepth = 40.0;
+	Kit.Bounds[int32(EFacadeSlot::Corner)] = FBox(FVector(0.0, -40.0, 0.0), FVector(40.0, 0.0, 400.0));
 	return Kit;
+}
+
+// The kit's corner: its piece's size and the numbers that go with it.
+void CSCityTests_SetCorner(CSCity::FFacadeKitShape& Kit, double Size)
+{
+	Kit.Corner = Size;
+	Kit.CornerDepth = Size;
+	Kit.Bounds[int32(CSCity::EFacadeSlot::Corner)] = FBox(FVector(0.0, -Size, 0.0), FVector(Size, 0.0, 400.0));
+}
+
+// Every wall, window and door cell's box.
+TArray<FBox> CSCityTests_Cells(const CSCity::FFacadeLayout& Layout)
+{
+	using CSCity::EFacadeSlot;
+	TArray<FBox> Out;
+	for (const EFacadeSlot Slot : { EFacadeSlot::Wall, EFacadeSlot::Window, EFacadeSlot::Door, EFacadeSlot::GroundWall, EFacadeSlot::GroundWindow }) Out.Append(Layout.Boxes[int32(Slot)]);
+	return Out;
+}
+
+// Those on the front (outside on Y = Depth / 2, their thickness along Y) and on the +X side.
+TArray<FBox> CSCityTests_OnFront(const TArray<FBox>& Boxes, double HalfDepth)
+{
+	return Boxes.FilterByPredicate([HalfDepth](const FBox& Box) { return FMath::IsNearlyEqual(Box.Max.Y, HalfDepth, 0.1) && FMath::IsNearlyEqual(Box.GetSize().Y, 50.0, 0.1); });
+}
+
+TArray<FBox> CSCityTests_OnRight(const TArray<FBox>& Boxes, double HalfWidth)
+{
+	return Boxes.FilterByPredicate([HalfWidth](const FBox& Box) { return FMath::IsNearlyEqual(Box.Max.X, HalfWidth, 0.1) && FMath::IsNearlyEqual(Box.GetSize().X, 50.0, 0.1); });
 }
 }
 
@@ -303,14 +341,21 @@ bool FCSCityFacadeLayoutTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("parapet bays"), Full.Parapets, 12u);
 	TestEqual(TEXT("roof tiles"), Full.Roofs, 8u);
 	TestEqual(TEXT("door: the front's middle bay"), Full.DoorCell, 2);
-	TestEqual(TEXT("threads"), Full.Threads(), 36u + 16u + 12u + 8u);
+	TestEqual(TEXT("modules"), Full.Modules(), 36u + 16u + 12u + 8u);
 	// The end bays give the corner piece its width; the others are a bay each.
-	for (const CSCity::FFacadeRun& Run : Full.Runs)
+	const TArray<FBox> FullCells = CSCityTests_Cells(Full);
+	const TArray<FBox> FullFront = CSCityTests_OnFront(FullCells, 340.0);
+	TestEqual(TEXT("front: the bays of 3 storeys"), FullFront.Num(), 12);
+	int32 Trimmed = 0;
+	for (const FBox& Box : FullFront)
 	{
-		if (Run.Kind != CSCity::EFacadeRun::Facade) continue;
-		TestTrue(TEXT("facade run: trimmed at both outer corners"), Run.bTrimStart && Run.bTrimEnd);
-		TestTrue(TEXT("facade run: the side's bays"), Run.Count == ((Run.Side & 1) == 0 ? 4 : 2) && FMath::IsNearlyEqual(Run.Cell, (Run.Side & 1) == 0 ? 310.0 : 340.0, 0.01));
+		const double Length = Box.GetSize().X;
+		TestTrue(TEXT("front: a bay, or an end bay short of the corner"), FMath::IsNearlyEqual(Length, 310.0, 0.1) || FMath::IsNearlyEqual(Length, 270.0, 0.1));
+		Trimmed += FMath::IsNearlyEqual(Length, 270.0, 0.1) ? 1 : 0;
+		TestTrue(TEXT("front: inside the corners"), Box.Min.X >= -620.0 + 40.0 - 0.1 && Box.Max.X <= 620.0 - 40.0 + 0.1);
 	}
+	TestEqual(TEXT("front: two end bays a storey"), Trimmed, 6);
+	for (const FBox& Box : CSCityTests_OnRight(FullCells, 620.0)) TestTrue(TEXT("side: its end bays short of the corners"), FMath::IsNearlyEqual(Box.GetSize().Y, 300.0, 0.1));
 
 	CSCity::FFacadeBuilding NoDoor = Building;
 	NoDoor.DoorAt = -1.0;
@@ -325,7 +370,7 @@ bool FCSCityFacadeLayoutTest::RunTest(const FString& Parameters)
 	Bare.Parapet = 0.0;
 	const CSCity::FFacadeLayout NoCorners = CSCity::LayoutFacade(Bare, Building);
 	TestTrue(TEXT("no corners: the bays run corner to corner"), NoCorners.FacadeCells == 36u && NoCorners.Corners == 0u && NoCorners.Parapets == 0u);
-	for (const CSCity::FFacadeRun& Run : NoCorners.Runs) TestFalse(TEXT("no corners: nothing trimmed"), Run.bTrimStart || Run.bTrimEnd);
+	for (const FBox& Box : CSCityTests_OnFront(CSCityTests_Cells(NoCorners), 340.0)) TestTrue(TEXT("no corners: nothing trimmed"), FMath::IsNearlyEqual(Box.GetSize().X, 310.0, 0.1));
 	CSCity::FFacadeKitShape NoParapet = Kit;
 	NoParapet.bHas[int32(CSCity::EFacadeSlot::Parapet)] = false;
 	TestEqual(TEXT("no parapet: corners a storey at a time only"), CSCity::LayoutFacade(NoParapet, Building).Corners, 12u);
@@ -336,7 +381,7 @@ bool FCSCityFacadeLayoutTest::RunTest(const FString& Parameters)
 	CSCity::FFacadeBuilding Narrow = Building;
 	Narrow.Block.Depth = 60.0;
 	TestEqual(TEXT("a side narrower than its corners: only the front and back have cells"), CSCity::LayoutFacade(Kit, Narrow).FacadeCells, 3u * 8u);
-	TestEqual(TEXT("an empty box: nothing"), CSCity::LayoutFacade(Kit, CSCity::FFacadeBuilding()).Threads(), 0u);
+	TestEqual(TEXT("an empty box: nothing"), CSCity::LayoutFacade(Kit, CSCity::FFacadeBuilding()).Modules(), 0u);
 
 	CSCity::FFacadeKitShape Tall = Kit;
 	Tall.Ground = 450.0;
@@ -505,6 +550,453 @@ bool FCSCityFacadeMassingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Outer corners that take whole bays (round or cut off): the wall gives up those bays, the piece is stretched to them along
+// both sides, the roof tiles leave its square to the corner's roof piece, also where a whole side is corners (a drum) and
+// on a narrow wall that two corners share. A piece narrower than the bays stays a pilaster, and with a roof piece the tiles
+// fill the rest of its bays exactly.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityFacadeRoundCornersTest, "PCGPlugins.CSRoadNet.City.FacadeRoundCorners",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSCityFacadeRoundCornersTest::RunTest(const FString& Parameters)
+{
+	using namespace CSCity;
+	FFacadeKitShape Kit = CSCityTests_Kit();
+	Kit.bHas[int32(EFacadeSlot::RoofCorner)] = true;
+	Kit.Bounds[int32(EFacadeSlot::RoofCorner)] = FBox(FVector(0.0, -300.0, -20.0), FVector(300.0, 0.0, 0.0));
+	CSCityTests_SetCorner(Kit, 300.0);
+	FFacadeBuilding Building;
+	Building.Block.Width = 1800.0;
+	Building.Block.Depth = 1200.0;
+	Building.Block.Height = 1200.0;
+	Building.Shape = ECSCityMassShape::Box;
+	Building.Stack = ECSCityMassStack::None;
+
+	// One bay: 6 x 4 bays, 3 storeys. The walls lose a bay at each end: (4 + 2) x 2 = 12 bays a storey.
+	const FFacadeLayout One = LayoutFacade(Kit, Building);
+	TestEqual(TEXT("one bay: facade cells"), One.FacadeCells, 3u * 12u);
+	TestEqual(TEXT("one bay: corners a storey at a time and the parapet's"), One.Corners, 4u * 4u);
+	TestEqual(TEXT("one bay: parapet bays"), One.Parapets, 12u);
+	TestEqual(TEXT("one bay: a roof piece a corner"), One.RoofCorners, 4u);
+	TestEqual(TEXT("one bay: roof tiles leave the corners"), One.Roofs, 24u - 4u);
+	const TArray<FBox> OneFront = CSCityTests_OnFront(CSCityTests_Cells(One), 600.0);
+	TestEqual(TEXT("one bay: the front's bays"), OneFront.Num(), 3 * 4);
+	for (const FBox& Box : OneFront) TestTrue(TEXT("one bay: nothing trimmed, the wall starts a bay in"), FMath::IsNearlyEqual(Box.GetSize().X, 300.0, 0.1) && Box.Min.X >= -600.0 - 0.1 && Box.Max.X <= 600.0 + 0.1);
+	for (const FBox& Box : One.Boxes[int32(EFacadeSlot::Corner)]) TestTrue(TEXT("one bay: the piece reaches a bay each way"), FMath::IsNearlyEqual(Box.GetSize().X, 300.0, 0.1) && FMath::IsNearlyEqual(Box.GetSize().Y, 300.0, 0.1));
+	TestTrue(TEXT("one bay: the door in a bay the corners left"), One.Doors == 1u && One.DoorCell >= 1 && One.DoorCell <= 4);
+
+	// A bay's width that is not the corner's: the piece is stretched to the bay, differently along each side.
+	Building.Block.Width = 1900.0;
+	const FFacadeLayout Stretched = LayoutFacade(Kit, Building);
+	const double CellX = 1900.0 / 6.0;
+	for (const FBox& Box : Stretched.Boxes[int32(EFacadeSlot::Corner)]) TestTrue(TEXT("stretched: to the bays"), FMath::IsNearlyEqual(Box.GetSize().X, CellX, 0.1) && FMath::IsNearlyEqual(Box.GetSize().Y, 300.0, 0.1));
+	Building.Block.Width = 1800.0;
+
+	// Two bays' radius: (2 + 0) x 2 = 4 bays a storey; the side walls are all corner.
+	FFacadeKitShape Big = Kit;
+	CSCityTests_SetCorner(Big, 600.0);
+	const FFacadeLayout Two = LayoutFacade(Big, Building);
+	TestEqual(TEXT("two bays: facade cells"), Two.FacadeCells, 3u * 4u);
+	TestEqual(TEXT("two bays: roof tiles leave 2 x 2 bays a corner"), Two.Roofs, 24u - 16u);
+	TestEqual(TEXT("two bays: a roof piece a corner"), Two.RoofCorners, 4u);
+
+	// A drum: 12 x 12 m with the 6 m radius. No walls at all, four corners, no tiles.
+	FFacadeBuilding Drum = Building;
+	Drum.Block.Width = 1200.0;
+	Drum.Block.Depth = 1200.0;
+	const FFacadeLayout Round = LayoutFacade(Big, Drum);
+	TestEqual(TEXT("drum: no walls"), Round.FacadeCells, 0u);
+	TestEqual(TEXT("drum: no parapet bays"), Round.Parapets, 0u);
+	TestEqual(TEXT("drum: four quarters"), Round.RoofCorners, 4u);
+	TestEqual(TEXT("drum: no tiles"), Round.Roofs, 0u);
+	TestEqual(TEXT("drum: corners a storey at a time and the parapet's"), Round.Corners, 4u * 4u);
+
+	// A wall too short for its two corners: they share it.
+	FFacadeBuilding Thin = Building;
+	Thin.Block.Depth = 300.0;
+	const FFacadeLayout Slim = LayoutFacade(Kit, Thin);
+	for (const FBox& Box : Slim.Boxes[int32(EFacadeSlot::Corner)]) TestTrue(TEXT("shared wall: half of it each"), FMath::IsNearlyEqual(Box.GetSize().Y, 150.0, 0.1));
+	TestEqual(TEXT("shared wall: only the long sides have bays"), Slim.FacadeCells, 3u * 8u);
+
+	// A pilaster with a roof piece: in a 300 cm bay a 100 cm piece keeps its size, and tiles fill the rest of the bay.
+	FFacadeKitShape Thinner = Kit;
+	CSCityTests_SetCorner(Thinner, 100.0);
+	const FFacadeLayout Pilaster = LayoutFacade(Thinner, Building);
+	TestEqual(TEXT("pilaster: the walls keep their bays"), Pilaster.FacadeCells, 3u * 20u);
+	double Area = 0.0;
+	for (const FBox& Box : Pilaster.Boxes[int32(EFacadeSlot::Roof)]) Area += Box.GetSize().X * Box.GetSize().Y;
+	for (const FBox& Box : Pilaster.Boxes[int32(EFacadeSlot::RoofCorner)]) Area += Box.GetSize().X * Box.GetSize().Y;
+	TestTrue(TEXT("pilaster: tiles and pieces cover the roof once"), FMath::IsNearlyEqual(Area, 1800.0 * 1200.0, 1.0));
+
+	// Without a roof piece the tiles cover the corners, as they always have.
+	FFacadeKitShape NoPiece = Kit;
+	NoPiece.bHas[int32(EFacadeSlot::RoofCorner)] = false;
+	const FFacadeLayout Tiled = LayoutFacade(NoPiece, Building);
+	TestTrue(TEXT("no roof piece: tiles everywhere"), Tiled.Roofs == 24u && Tiled.RoofCorners == 0u);
+	return true;
+}
+
+// The upper storeys standing out past a smaller base. Each overhang's base is the footprint less whole rows of bays on its
+// sides; the door moves to the base's front. A flat one has a soffit tile under every bay past the base and columns along
+// its outer edges (not along the flush walls), at its corners and every ColumnEvery bays, once each; the base's corners
+// have no parapet piece.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityFacadeOverhangTest, "PCGPlugins.CSRoadNet.City.FacadeOverhang",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSCityFacadeOverhangTest::RunTest(const FString& Parameters)
+{
+	using namespace CSCity;
+	FFacadeKitShape Kit = CSCityTests_Kit();
+	Kit.bHas[int32(EFacadeSlot::Soffit)] = true;
+	Kit.bHas[int32(EFacadeSlot::Column)] = true;
+	Kit.Bounds[int32(EFacadeSlot::Column)] = FBox(FVector(0.0, -80.0, 0.0), FVector(80.0, 0.0, 400.0));
+	Kit.ColumnEvery = 2;
+	FFacadeBuilding Building;
+	Building.Seed = 7;
+	Building.Block.Width = 1800.0;
+	Building.Block.Depth = 1200.0;
+	Building.Block.Height = 2400.0;
+	Building.Shape = ECSCityMassShape::Box;
+	Building.Stack = ECSCityMassStack::Overhang;
+
+	auto Check = [&](ECSCityMassOverhang Where, int32 BaseCells, uint32 PastCells, uint32 Columns)
+	{
+		const FString Name = StaticEnum<ECSCityMassOverhang>()->GetNameStringByValue(int64(Where));
+		Building.Overhang = Where;
+		const FFacadeLayout Layout = LayoutFacade(Kit, Building);
+		const FFacadeMassing& M = Layout.Massing;
+		TestTrue(Name + TEXT(": an overhang of two tiers"), M.Stack == ECSCityMassStack::Overhang && M.Tiers.Num() == 2 && M.OverhangDepth == 1);
+		if (M.Tiers.Num() != 2) return;
+		TestEqual(Name + TEXT(": base cells"), CSCityTests_Outline(M, 0).Cells, BaseCells);
+		TestEqual(Name + TEXT(": upper cells, the whole footprint"), CSCityTests_Outline(M, 1).Cells, 24);
+		TestTrue(Name + TEXT(": the base 1 or 2 storeys"), M.Tiers[0].End >= 1 && M.Tiers[0].End <= 2 && M.Tiers[1].First == M.Tiers[0].End && M.Tiers[1].End == M.Storeys);
+		TestEqual(Name + TEXT(": soffit tiles"), Layout.Soffits, PastCells);
+		TestEqual(Name + TEXT(": columns"), Layout.Columns, Columns);
+		TestEqual(Name + TEXT(": roof tiles only on top"), Layout.Roofs, 24u);
+		TestEqual(Name + TEXT(": one door"), Layout.Doors, 1u);
+		// The base's outline and the upper one's, at their storeys.
+		const FCSCityTestsOutline Lower = CSCityTests_Outline(M, 0);
+		const uint32 BaseStoreys = uint32(M.Tiers[0].End);
+		TestEqual(Name + TEXT(": facade cells"), Layout.FacadeCells, uint32(Lower.Edges) * BaseStoreys + 20u * (uint32(M.Storeys) - BaseStoreys));
+		TestEqual(Name + TEXT(": parapet bays, none on the base"), Layout.Parapets, 20u);
+		TestEqual(Name + TEXT(": corners, the base's without a parapet piece"), Layout.Corners, uint32(Lower.Outer) * BaseStoreys + 4u * (uint32(M.Storeys) - BaseStoreys + 1u));
+		// Every column stands under the upper outline, none inside the base.
+		for (const FBox& Box : Layout.Boxes[int32(EFacadeSlot::Column)])
+		{
+			TestTrue(Name + TEXT(": a column from the ground to the soffit"), FMath::IsNearlyZero(Box.Min.Z, 0.1) && FMath::IsNearlyEqual(Box.Max.Z, Kit.StoreyBase(M.Tiers[1].First), 0.1));
+			TestTrue(Name + TEXT(": a column on the edge"), FMath::IsNearlyEqual(Box.Max.Y, 600.0, 0.1) || FMath::IsNearlyEqual(Box.Min.Y, -600.0, 0.1) || FMath::IsNearlyEqual(Box.Max.X, 900.0, 0.1) || FMath::IsNearlyEqual(Box.Min.X, -900.0, 0.1));
+		}
+		// The door is on the base's front row.
+		const int32 BaseFront = Where == ECSCityMassOverhang::Sides ? 3 : 2;
+		TestTrue(Name + TEXT(": a door cell"), Layout.DoorCell != INDEX_NONE && M.At(0, Layout.DoorCell, BaseFront));
+		for (const FBox& Box : Layout.Boxes[int32(EFacadeSlot::Door)]) TestTrue(Name + TEXT(": the door on the base, at the ground"), FMath::IsNearlyZero(Box.Min.Z, 0.1) && FMath::IsNearlyEqual(Box.Max.Y, -600.0 + (BaseFront + 1) * 300.0, 0.1));
+	};
+	// 6 x 4 bays, a column every two along the edges that face out, one at each vertex: the front's 4 (0, 2, 4, 6); each
+	// side's 3 (0, 2, 4), sharing their corners with the front or back when those stand out too.
+	Check(ECSCityMassOverhang::Front, 18, 6u, 4u);
+	Check(ECSCityMassOverhang::Sides, 16, 8u, 6u);
+	Check(ECSCityMassOverhang::FrontAndSides, 12, 12u, 8u);
+	Check(ECSCityMassOverhang::AllRound, 8, 16u, 10u);
+
+	// The grid too small for the overhang asked: the sides that do not fit stay flush.
+	FFacadeBuilding Small = Building;
+	Small.Block.Width = 600.0;
+	Small.Block.Depth = 300.0;
+	Small.Overhang = ECSCityMassOverhang::AllRound;
+	TestTrue(TEXT("no room: no overhang"), MassFacade(Kit, Small).Stack == ECSCityMassStack::None);
+	Small.Block.Depth = 600.0;
+	Small.Overhang = ECSCityMassOverhang::Front;
+	TestTrue(TEXT("room at the front: an overhang"), MassFacade(Kit, Small).Stack == ECSCityMassStack::Overhang);
+
+	// Auto: a kit with the odds draws overhangs; without, its buildings stay as they were.
+	FFacadeKitShape Odds = Kit;
+	Odds.OverhangChance = 0.5f;
+	Building.Stack = ECSCityMassStack::Auto;
+	Building.Overhang = ECSCityMassOverhang::Auto;
+	TSet<int32> Wheres;
+	int32 Moved = 0;
+	for (uint32 Seed = 1; Seed <= 200; Seed++)
+	{
+		Building.Seed = Seed * 0x27D4EB2Fu;
+		const FFacadeMassing A = MassFacade(Odds, Building);
+		if (A.OverhangDepth > 0) Wheres.Add(int32(A.OverhangFaces));
+		FFacadeKitShape None = Kit;
+		None.OverhangChance = 0.0f;
+		Moved += MassFacade(None, Building).OverhangDepth;
+	}
+	TestEqual(TEXT("auto: every side drawn"), Wheres.Num(), 4);
+	TestEqual(TEXT("auto: no odds, no overhang"), Moved, 0);
+	return true;
+}
+
+// Under the base. Plots on a sloping street know the road's height at the ends of their fronts, and a seated plot stands at
+// the higher end with the ground falling away from it. With a plinth a building has a cell under every wall and a piece under
+// every corner, whatever the ground; where the road falls away along its front and there is room, a platform as wide as the
+// building, its edges plinth cells too, and flights of steps from the door every StairEvery bays where the drop asks, as many
+// one after another as there is room for. Without a plinth, none of it.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityFacadePlinthTest, "PCGPlugins.CSRoadNet.City.FacadePlinth",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCSCityFacadePlinthTest::RunTest(const FString& Parameters)
+{
+	using namespace CSCity;
+	// A street rising 5 cm a metre along +X, plots on both sides.
+	FRoadLine Street = CSCityTests_Street(11, FVector(0.0, 0.0, 0.0), FVector(20000.0, 0.0, 1000.0), 500.0);
+	FLotSettings Settings;
+	Settings.Frontage = 1800.0;
+	Settings.Gap = 0.0;
+	Settings.bFill = false;
+	Settings.Setback = 300.0;
+	const TArray<FLot> Lots = LayoutLots({ Street }, {}, {}, Settings);
+	TestTrue(TEXT("sloping street: plots"), Lots.Num() >= 16);
+	int32 WrongHeights = 0;
+	int32 WrongSeats = 0;
+	for (const FLot& Plain : Lots)
+	{
+		const FVector2D Front = Plain.Front.GetSafeNormal();
+		const FVector2D HalfX = FVector2D(Front.Y, -Front.X) * (Plain.Width * 0.5);
+		const FVector2D Near = Plain.Centre + Front * (Plain.Depth * 0.5);
+		// The road's height there is 5 cm a metre of world X, on both sides of the street.
+		const double WantStart = (Near - HalfX).X * 0.05;
+		const double WantEnd = (Near + HalfX).X * 0.05;
+		WrongHeights += FMath::IsNearlyEqual(Plain.FrontHeightStart, WantStart, 1.0) && FMath::IsNearlyEqual(Plain.FrontHeightEnd, WantEnd, 1.0) && FMath::IsNearlyEqual(Plain.FrontRoom, 300.0) ? 0 : 1;
+		FLot Lot = Plain;
+		const double Top = FMath::Max(Lot.FrontHeightStart, Lot.FrontHeightEnd);
+		const FLot& Seated = Lot;
+		SeatLot(Lot, Top, [&Seated](const FVector2D& P) { return LotRoadHeight(Seated, P); });
+		// At the high end the ground is at the base; at the low end a frontage's rise (90 cm) under it.
+		const double DropStart = Lot.Drop - Lot.DropX * Lot.Width * 0.5;
+		const double DropEnd = Lot.Drop + Lot.DropX * Lot.Width * 0.5;
+		WrongSeats += Lot.Base == Top && FMath::IsNearlyZero(FMath::Min(DropStart, DropEnd), 0.01) && FMath::IsNearlyEqual(FMath::Max(DropStart, DropEnd), 90.0, 1.0) && FMath::IsNearlyZero(Lot.DropY, 1e-6) ? 0 : 1;
+	}
+	TestEqual(TEXT("sloping street: the road's height at each end of the front"), WrongHeights, 0);
+	TestEqual(TEXT("sloping street: seated at the high end, the ground falling away"), WrongSeats, 0);
+
+	FFacadeKitShape Kit = CSCityTests_Kit();
+	Kit.bHas[int32(EFacadeSlot::Plinth)] = true;
+	Kit.bHas[int32(EFacadeSlot::Platform)] = true;
+	Kit.bHas[int32(EFacadeSlot::Stair)] = true;
+	Kit.Bounds[int32(EFacadeSlot::Plinth)] = FBox(FVector(0.0, -50.0, 0.0), FVector(300.0, 0.0, 100.0));
+	Kit.Bounds[int32(EFacadeSlot::Stair)] = FBox(FVector(0.0, 0.0, -75.0), FVector(300.0, 150.0, 0.0));
+	Kit.Bounds[int32(EFacadeSlot::Platform)] = FBox(FVector(0.0, 0.0, -15.0), FVector(300.0, 300.0, 0.0));
+	Kit.PlinthSink = 50.0;
+	Kit.PlatformDepth = 150.0;
+	Kit.PlatformMinDrop = 15.0;
+	Kit.StairEvery = 2;
+	FFacadeBuilding Building;
+	Building.Block.Width = 1800.0;
+	Building.Block.Depth = 1200.0;
+	Building.Block.Height = 1200.0;
+	Building.Shape = ECSCityMassShape::Box;
+	Building.Stack = ECSCityMassStack::None;
+	Building.FrontRoom = 300.0;
+
+	// Flat: only the plinth, on the outline, and a piece under each corner (Corner stretched, with no PlinthCorner).
+	const FFacadeLayout Flat = LayoutFacade(Kit, Building);
+	TestEqual(TEXT("flat: plinth cells"), Flat.Plinths, 20u);
+	TestEqual(TEXT("flat: corners and those under them"), Flat.Corners, 4u * 4u + 4u);
+	TestTrue(TEXT("flat: no platform, no steps"), Flat.Platforms == 0u && Flat.Stairs == 0u && Flat.PlatformDepth == 0.0);
+	FFacadeKitShape NoPlinth = Kit;
+	NoPlinth.bHas[int32(EFacadeSlot::Plinth)] = false;
+	Building.Drop = 60.0;
+	Building.DropX = 0.04;
+	const FFacadeLayout Bare = LayoutFacade(NoPlinth, Building);
+	TestTrue(TEXT("no plinth: nothing under the base"), Bare.Plinths == 0u && Bare.Platforms == 0u && Bare.Stairs == 0u && Bare.Corners == 16u);
+
+	// The ground falling 24 to 96 cm under the base along the front: a platform; door in bay 3, flights at bays 1, 3 and 5.
+	const FFacadeLayout Sloped = LayoutFacade(Kit, Building);
+	TestEqual(TEXT("slope: a platform tile a bay"), Sloped.Platforms, 6u);
+	TestEqual(TEXT("slope: plinth cells, the platform's edges too"), Sloped.Plinths, 20u + 6u + 2u);
+	TestEqual(TEXT("slope: flights of steps, room for one each"), Sloped.Stairs, 3u);
+	TestTrue(TEXT("slope: the platform takes what room the steps leave"), FMath::IsNearlyEqual(Sloped.PlatformDepth, 150.0, 0.1));
+	double FloorLeft = TNumericLimits<double>::Max();
+	for (const FBox& Box : Sloped.Boxes[int32(EFacadeSlot::Platform)])
+	{
+		// Stopping at the 50 cm edge cells round it, on every side but the building's.
+		FloorLeft = FMath::Min(FloorLeft, Box.Min.X);
+		TestTrue(TEXT("slope: the platform from the front out, inside its edges"), FMath::IsNearlyEqual(Box.Min.Y, 600.0, 0.1) && FMath::IsNearlyEqual(Box.GetSize().Y, 100.0, 0.1) && FMath::IsNearlyEqual(Box.GetSize().X, 1700.0 / 6.0, 0.1) && FMath::IsNearlyZero(Box.Max.Z, 0.1));
+	}
+	TestTrue(TEXT("slope: the platform inside its side edges"), FMath::IsNearlyEqual(FloorLeft, -850.0, 0.1));
+	for (const FBox& Box : Sloped.Boxes[int32(EFacadeSlot::Stair)])
+	{
+		// Their own rise where one flight reaches the ground, steeper at the deepest (90 cm), with room for only one.
+		const double Rise = FMath::Max(75.0, 60.0 + 0.04 * Box.GetCenter().X);
+		TestTrue(TEXT("slope: steps from the platform's edge, down to the ground"), FMath::IsNearlyEqual(Box.Min.Y, 750.0, 0.1) && FMath::IsNearlyEqual(Box.GetSize().Y, 150.0, 0.1) && FMath::IsNearlyEqual(Box.GetSize().Z, Rise, 0.1) && FMath::IsNearlyZero(Box.Max.Z, 0.1));
+	}
+
+	// More room: the deepest drop (90 cm at bay 5) takes two flights.
+	Building.FrontRoom = 450.0;
+	TestEqual(TEXT("room for two: flights"), LayoutFacade(Kit, Building).Stairs, 4u);
+	// Too little room for steps: the platform alone. None at all: nothing in front.
+	Building.FrontRoom = 100.0;
+	const FFacadeLayout Tight = LayoutFacade(Kit, Building);
+	TestTrue(TEXT("no room for steps: a platform alone"), Tight.Platforms == 6u && Tight.Stairs == 0u && FMath::IsNearlyEqual(Tight.PlatformDepth, 100.0, 0.1));
+	Building.FrontRoom = 0.0;
+	TestEqual(TEXT("no room: no platform"), LayoutFacade(Kit, Building).Platforms, 0u);
+	// A slope too small to matter, and steps only where the drop asks.
+	Building.FrontRoom = 300.0;
+	Building.Drop = 5.0;
+	Building.DropX = 0.0;
+	TestEqual(TEXT("next to no drop: no platform"), LayoutFacade(Kit, Building).Platforms, 0u);
+	Building.Drop = 15.0;
+	Building.DropX = 0.04;
+	// At the flights' bays the drop is -3, 21 and 45 cm.
+	TestEqual(TEXT("steps only where the drop asks"), LayoutFacade(Kit, Building).Stairs, 2u);
+	// Over an overhang's recessed base the platform starts at the base's front.
+	Building.Stack = ECSCityMassStack::Overhang;
+	Building.Overhang = ECSCityMassOverhang::Front;
+	Building.Seed = 3;
+	Building.Drop = 60.0;
+	for (const FBox& Box : LayoutFacade(Kit, Building).Boxes[int32(EFacadeSlot::Platform)]) TestTrue(TEXT("overhang: the platform from the base's front"), FMath::IsNearlyEqual(Box.Min.Y, 300.0, 0.1) && FMath::IsNearlyEqual(Box.GetSize().Y, 400.0, 0.1));
+	// Behind a corner piece taking a bay, the floor and the platform's sides go back as far, so no ground shows behind it.
+	Building.Stack = ECSCityMassStack::None;
+	FFacadeKitShape Round = Kit;
+	CSCityTests_SetCorner(Round, 300.0);
+	const FFacadeLayout Rounded = LayoutFacade(Round, Building);
+	for (const FBox& Box : Rounded.Boxes[int32(EFacadeSlot::Platform)]) TestTrue(TEXT("round corners: the floor goes back a bay"), FMath::IsNearlyEqual(Box.Min.Y, 300.0, 0.1) && FMath::IsNearlyEqual(Box.GetSize().Y, 400.0, 0.1));
+	int32 Sides = 0;
+	for (const FBox& Box : Rounded.Boxes[int32(EFacadeSlot::Plinth)]) Sides += FMath::IsNearlyEqual(Box.GetSize().Y, 450.0, 0.1) ? 1 : 0;
+	TestEqual(TEXT("round corners: the platform's sides go back as far"), Sides, 2);
+	return true;
+}
+
+// The city's field, read on the GPU as each building is put together. A face stands out when the cells along it say so on average
+// (half of it or more), each face on its own; a face it will not have stays flush, whatever was drawn; massing set by hand is left
+// alone. A corner takes the style on at least half of the cells round it, or the kit's own if the kit has no such piece, and the
+// walls beside it give it their bays; a style set on the building wins. Painting tells whatever stands there, and only that is
+// written again. Nothing painted takes nothing on the GPU, and a page only its 256 bytes.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCSCityFacadeFieldTest, "PCGPlugins.CSRoadNet.City.FacadeField",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
+
+bool FCSCityFacadeFieldTest::RunTest(const FString& Parameters)
+{
+	using namespace CSCity;
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	if (!TestNotNull(TEXT("editor world"), World)) return false;
+	ACSCityFieldActor* Field = World->SpawnActor<ACSCityFieldActor>();
+	if (!TestNotNull(TEXT("field"), Field)) return false;
+	TestTrue(TEXT("nothing painted: nothing on the GPU"), Field->GpuBytes() == 0 && !Field->GpuField().IsValid());
+
+	FFacadeKitShape Kit = CSCityTests_Kit();
+	Kit.bHas[int32(EFacadeSlot::Soffit)] = true;
+	Kit.Bounds[int32(EFacadeSlot::Soffit)] = FBox(FVector(0.0, 0.0, -25.0), FVector(300.0, 300.0, 0.0));
+	// 18 x 12 m, front +Y, six storeys, in the middle of a field cell's page.
+	FFacadeBuilding Building;
+	Building.Block.Base = FVector(3200.0, 3200.0, 0.0);
+	Building.Block.Front = FVector2D(0.0, 1.0);
+	Building.Block.Width = 1800.0;
+	Building.Block.Depth = 1200.0;
+	Building.Block.Height = 2400.0;
+	Building.Seed = 11;
+	Building.Shape = ECSCityMassShape::Box;
+	Building.Stack = ECSCityMassStack::None;
+	const FVector2D Middle(Building.Block.Base);
+
+	auto Faces = [&](const FFacadeBuilding& Asked) { return MassFacade(Kit, Asked, Field->GpuField()).OverhangFaces; };
+	auto Paint = [&](double X0, double Y0, double X1, double Y1, ECSCityOverhangField Value) { Field->SetOverhangInBox(Middle + FVector2D(X0, Y0), Middle + FVector2D(X1, Y1), Value); };
+	TestEqual(TEXT("nothing painted: drawn as it was"), Faces(Building), 0u);
+
+	// Each face on its own.
+	Paint(-900.0, 500.0, 900.0, 700.0, ECSCityOverhangField::Always);
+	TestEqual(TEXT("over the front: the front"), Faces(Building), 1u);
+	TestTrue(TEXT("a page or two on the GPU"), Field->GpuBytes() > 0 && Field->GpuBytes() <= 16 * 256 + 16 * 4);
+	Field->ClearField();
+	TestEqual(TEXT("cleared: none"), Faces(Building), 0u);
+	Paint(800.0, -500.0, 1000.0, 500.0, ECSCityOverhangField::Always);
+	TestEqual(TEXT("over the +X side: that one"), Faces(Building), 2u);
+	Field->ClearField();
+	Paint(-900.0, -700.0, 900.0, -500.0, ECSCityOverhangField::Always);
+	TestEqual(TEXT("over the back: the back"), Faces(Building), 4u);
+	Field->ClearField();
+	Paint(-1000.0, -500.0, -800.0, 500.0, ECSCityOverhangField::Always);
+	TestEqual(TEXT("over the -X side: that one"), Faces(Building), 8u);
+	Field->ClearField();
+
+	// The average along a face: a quarter of it is not enough, three quarters are.
+	Paint(-900.0, 500.0, -500.0, 700.0, ECSCityOverhangField::Always);
+	TestEqual(TEXT("a quarter of the front: no"), Faces(Building), 0u);
+	Field->ClearField();
+	Paint(-900.0, 500.0, 500.0, 700.0, ECSCityOverhangField::Always);
+	TestEqual(TEXT("three quarters of the front: yes"), Faces(Building), 1u);
+	Field->ClearField();
+
+	// What it will not have, and what was set by hand.
+	FFacadeBuilding Drawn = Building;
+	Drawn.Stack = ECSCityMassStack::Overhang;
+	Drawn.Overhang = ECSCityMassOverhang::FrontAndSides;
+	TestEqual(TEXT("drawn front and sides"), Faces(Drawn), 11u);
+	Paint(-900.0, 500.0, 900.0, 700.0, ECSCityOverhangField::Never);
+	TestEqual(TEXT("never over the front: the sides only"), Faces(Drawn), 10u);
+	Paint(800.0, -700.0, 1000.0, 700.0, ECSCityOverhangField::Never);
+	Paint(-1000.0, -700.0, -800.0, 700.0, ECSCityOverhangField::Never);
+	TestTrue(TEXT("never all round: no overhang"), MassFacade(Kit, Drawn, Field->GpuField()).Stack == ECSCityMassStack::None);
+	FFacadeBuilding Locked = Drawn;
+	Locked.bLockMassing = true;
+	TestEqual(TEXT("set by hand: as set"), Faces(Locked), 11u);
+	Field->ClearField();
+	Paint(-900.0, 500.0, 900.0, 700.0, ECSCityOverhangField::Always);
+	FFacadeBuilding Flat = Building;
+	Flat.bLockMassing = true;
+	TestEqual(TEXT("set flat by hand: flat"), Faces(Flat), 0u);
+	// The modules follow: a soffit tile a bay along the front, the base a row back.
+	const FFacadeLayout Out = LayoutFacade(Kit, Building, Field->GpuField());
+	TestEqual(TEXT("the front out: soffit tiles"), Out.Soffits, 6u);
+	TestTrue(TEXT("the front out: two tiers"), Out.Massing.Tiers.Num() == 2 && Out.Massing.OverhangDepth == 1 && !Out.Massing.At(0, 3, 3) && Out.Massing.At(0, 3, 2) && Out.Massing.At(1, 3, 3));
+	Field->ClearField();
+
+	// Corner styles: a kit with a round one a bay wide.
+	const int32 RoundSlot = FacadeCornerSlot(ECSCityCornerStyle::Round, EFacadeCornerPiece::Corner);
+	Kit.bHas[RoundSlot] = true;
+	Kit.Bounds[RoundSlot] = FBox(FVector(0.0, -300.0, 0.0), FVector(300.0, 0.0, 400.0));
+	Kit.StyleCorner[int32(ECSCityCornerStyle::Round) - 1] = 300.0;
+	Kit.StyleDepth[int32(ECSCityCornerStyle::Round) - 1] = 300.0;
+	const uint32 Storeys = 6u;
+	const FFacadeLayout Plain = LayoutFacade(Kit, Building, Field->GpuField());
+	TestEqual(TEXT("no style painted: the kit's corners"), Plain.Corners, 4u * (Storeys + 1u));
+	TestEqual(TEXT("no style painted: no round ones"), Plain.Counts[RoundSlot], 0u);
+	TestEqual(TEXT("no style painted: every bay a wall"), Plain.FacadeCells, 20u * Storeys);
+	// Round over the front -X corner only: its two walls give up a bay each.
+	Field->SetCornerStyleInBox(Middle + FVector2D(-1100.0, 400.0), Middle + FVector2D(-700.0, 800.0), ECSCityCornerStyle::Round);
+	const FFacadeLayout OneRound = LayoutFacade(Kit, Building, Field->GpuField());
+	TestEqual(TEXT("one corner painted: one round column"), OneRound.Counts[RoundSlot], Storeys + 1u);
+	TestEqual(TEXT("one corner painted: three of the kit's"), OneRound.Corners, 3u * (Storeys + 1u));
+	TestEqual(TEXT("one corner painted: its walls give up a bay each"), OneRound.FacadeCells, 18u * Storeys);
+	for (const FBox& Box : OneRound.Boxes[RoundSlot]) TestTrue(TEXT("one corner painted: on that corner"), FMath::IsNearlyEqual(Box.Min.X, -900.0, 0.1) && FMath::IsNearlyEqual(Box.Max.Y, 600.0, 0.1));
+	// A style the kit has no piece for: its own.
+	Field->SetCornerStyleInBox(Middle + FVector2D(-1100.0, 400.0), Middle + FVector2D(-700.0, 800.0), ECSCityCornerStyle::Chamfer);
+	TestEqual(TEXT("a style it does not have: the kit's corners"), LayoutFacade(Kit, Building, Field->GpuField()).Corners, 4u * (Storeys + 1u));
+	// Set on the building: all round, whatever is painted.
+	FFacadeBuilding AllRound = Building;
+	AllRound.CornerStyle = ECSCityCornerStyle::Round;
+	TestEqual(TEXT("set on the building: all four round"), LayoutFacade(Kit, AllRound, Field->GpuField()).Counts[RoundSlot], 4u * (Storeys + 1u));
+	Field->ClearField();
+
+	// A street on it: painting all of it brings overhangs, and nothing else is written again.
+	ACSCityStreetActor* Street = World->SpawnActor<ACSCityStreetActor>();
+	if (!TestNotNull(TEXT("street"), Street)) return false;
+	Street->ApplyFabric(ECSCityFabric::StreetWall);
+	Street->Vacancy = 0.0f;
+	Street->OverhangChance = 0.0f;
+	Street->SetbackChance = 0.0f;
+	Street->PodiumChance = 0.0f;
+	Street->bOnGround = false;
+	Street->Sides = ECSCityStreetSides::Right;
+	Street->StreetWidth = 10.0f;
+	Street->Street->SetSplinePoints({ FVector(0.0, 0.0, 0.0), FVector(12000.0, 0.0, 0.0) }, ESplineCoordinateSpace::World);
+	Street->Rebuild();
+	CSRoad::LandMeshWrites();
+	auto Lines = [&Street](const TCHAR* What) { int32 Count = 0; for (const FString& Line : Street->Plots) Count += Line.Contains(What) ? 1 : 0; return Count; };
+	TestTrue(TEXT("street: buildings"), Street->NumBuildings >= 5);
+	TestEqual(TEXT("street: no overhangs drawn"), Lines(TEXT("overhang")), 0);
+	TestFalse(TEXT("street: unchanged, nothing written"), Street->UpdateFromNetwork({}, 0.0));
+	Field->SetOverhangInBox(FVector2D(-2000.0, -5000.0), FVector2D(14000.0, 8000.0), ECSCityOverhangField::Always);
+	CSRoad::LandMeshWrites();
+	TestEqual(TEXT("street: painted over, all of them stand out"), Lines(TEXT("overhang")), Street->NumBuildings);
+	Field->ClearField();
+	CSRoad::LandMeshWrites();
+	TestEqual(TEXT("street: cleared, none again"), Lines(TEXT("overhang")), 0);
+	return true;
+}
+
 // Plots laid out along two streets and written as a build writes them, with no prefab data, so it runs anywhere: two
 // Nanite meshes draw them as GPU instances through Nanite, one component per mesh, every instance within its plot.
 // Fewer plots rewrite the components in place; a mesh no plot takes loses its component; no meshes, the tile goes
@@ -603,7 +1095,7 @@ bool FCSCityInstancedTileTest::RunTest(const FString& Parameters)
 	Again = CSRoadTest::Built<UCSGpuInstancedMeshComponent>(Network);
 	int32 Slots = 0;
 	for (const bool bHas : Shape.bHas) Slots += bHas ? 1 : 0;
-	TestEqual(TEXT("kit: a component per slot"), Again.Num(), Slots);
+	TestTrue(TEXT("kit: a component per slot with anything in it"), Again.Num() > 0 && Again.Num() <= Slots);
 	// What each slot must hold: the layout's cells (each plot's massing drawn from its seed, as the network draws it), the
 	// windows and walls sharing the facade's but for the doors.
 	uint32 Want[CSCity::FacadeSlots] = {};
@@ -1202,8 +1694,9 @@ bool FCSCityActorTest::RunTest(const FString& Parameters)
 	Network->bLocalUpdate = true;
 	Network->TileSize = 128.0f;
 	Network->bBatchBuildings = true;
-	// Every tile in one rebuild: the counts below are per rebuild.
+	// Every tile in one rebuild: the counts below are per rebuild, whatever else is using the video memory.
 	Network->MaxTilesPerBatch = 0;
+	Network->MinFreeVideoMemory = 0;
 
 	ACSCityBuildingActor* Special = World->SpawnActor<ACSCityBuildingActor>(FVector(-3000.0, 2000.0, 0.0), FRotator(0.0, 20.0, 0.0));
 	ACSCityAlleyRegion* Region = World->SpawnActor<ACSCityAlleyRegion>();
@@ -1320,6 +1813,7 @@ bool FCSCityLocalUpdateTest::RunTest(const FString& Parameters)
 	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
 	if (!TestNotNull(TEXT("editor world"), World)) return false;
 	ACSRoadNetworkActor* Network = World->SpawnActor<ACSRoadNetworkActor>(FVector(2000.0, -1500.0, 0.0), FRotator(0.0, 10.0, 0.0));
+	Network->MinFreeVideoMemory = 0;
 	if (!TestNotNull(TEXT("network actor"), Network)) return false;
 	Network->bLocalUpdate = true;
 	Network->TileSize = 64.0f;

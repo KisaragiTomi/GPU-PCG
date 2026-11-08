@@ -86,6 +86,14 @@ struct CSROADNET_API FCSCityStreetLot
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Plot", meta = (EditCondition = "!bEmpty"))
 	ECSCityMassStack MassStack = ECSCityMassStack::Auto;
+
+	/** With an overhang: which sides stand out past the base. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Plot", meta = (EditCondition = "!bEmpty"))
+	ECSCityMassOverhang MassOverhang = ECSCityMassOverhang::Auto;
+
+	/** Auto: as the city's field has them (ACSCityFieldActor), else the kit's own. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Plot", meta = (EditCondition = "!bEmpty"))
+	ECSCityCornerStyle CornerStyle = ECSCityCornerStyle::Auto;
 };
 
 /** The street of an ACSCityStreetActor: only its points' x and y count for the plots; their scale's Z scales the storeys
@@ -177,12 +185,15 @@ public:
 	int32 MaxStoreys = 60;
 
 	/** The chances below instead of the kit's: whether a building is a tower on a podium (six storeys or more), else
-	 *  steps back (four or more). */
+	 *  stands out past its base (three or more), else steps back (four or more). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Street|Massing")
 	bool bOverrideStacking = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Street|Massing", meta = (ClampMin = "0", ClampMax = "1", EditCondition = "bOverrideStacking"))
 	float PodiumChance = 0.15f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Street|Massing", meta = (ClampMin = "0", ClampMax = "1", EditCondition = "bOverrideStacking"))
+	float OverhangChance = 0.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Street|Massing", meta = (ClampMin = "0", ClampMax = "1", EditCondition = "bOverrideStacking"))
 	float SetbackChance = 0.35f;
@@ -234,6 +245,8 @@ public:
 	// Lays the plots out again and, when they or what stands on them changed, writes the modules (drawn a frame or two
 	// later, no wait for the render thread); then has the network (or, with none, the streets after it) follow.
 	void Rebuild();
+	// What the field asks of its buildings may have changed: written again if so.
+	void FieldChanged();
 	// The network's part (NetworkOf): its roads as built (world space) near the street, and the width of the road it
 	// follows (0: none). Lays the plots out with them; false when nothing changed. The network's batch plots come after.
 	bool UpdateFromNetwork(const TArray<CSCity::FRoadLine>& Roads, double FollowedWidth);

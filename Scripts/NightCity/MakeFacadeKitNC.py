@@ -5,6 +5,10 @@ City content folder (NightCity_BuildingKit.md section 4.4):
   /Game/BuildingGenerator/Cyberpunk2077/Tests/FacadeKit/DA_FacadeKit_CharterHillA   wbr_cha_building_a parts
   /Game/BuildingGenerator/Cyberpunk2077/Tests/FacadeKit/DA_FacadeKit_CharterHillB   wbr_cha_building_b walls and cornice
   /Game/BuildingGenerator/Cyberpunk2077/Tests/FacadeKit/L_FacadeKit_CharterHill     buildings of three sizes per kit
+  /Game/BuildingGenerator/Cyberpunk2077/Tests/FacadeKit/DA_FacadeKit_LchRound       wat_lch_building_d, round corners a bay in radius
+  /Game/BuildingGenerator/Cyberpunk2077/Tests/FacadeKit/DA_FacadeKit_LchRound900    the same, three bays in radius
+  /Game/BuildingGenerator/Cyberpunk2077/Tests/FacadeKit/DA_FacadeKit_CorpPlaza      cct_cpz_building_a, 6 m bays, 8 m storeys, overhangs
+  /Game/BuildingGenerator/Cyberpunk2077/Tests/FacadeKit/L_FacadeKit_Types           round corners and overhangs from those
   /Game/BuildingGenerator/Cyberpunk2077/Tests/FacadeKit/Meshes/SM_*_Nanite          copies with Nanite on, only of
                                                                                     parts that have none
 
@@ -14,6 +18,10 @@ Nanite is copied with Nanite on, so that its instances go into GPU-Scene like th
 QuarterTurns: which side of a part faces the street, from how Night City places it (Scripts/NightCity/nc_orient.py,
 run on the instance dumps): the floor tiles next to each placed copy lie inside the building. building_a's windows
 and cornices have their outside at -Y (two quarter turns); building_b's walls and doors at +Y.
+
+The round corner pieces say the same of their kits: uf_round_w300_l300's box is (-322, -22) .. (0, 300), a quarter ring about
+(0, 300) joining the walls at (0, -22..0) and (-322..-300, 300), so those walls' outside is -Y (two turns) and the corner takes
+three, which brings the ring's centre to the box's +X, -Y corner.
 
   UnrealEditor-Cmd.exe <project> -ExecutePythonScript=<this file> -unattended -RenderOffscreen
 
@@ -44,6 +52,51 @@ PARTS = {
     "b_door": ("SM_EC5A1AF92817B42A", "wbr_cha_building_b_wall_w200_h400_door_ac", 0),
     "b_cornice": ("SM_225E25A0A90F8038", "wbr_cha_building_b_wall_cornice_w_300_aa", 2),
 }
+
+# The kits of L_FacadeKit_Types: part -> (Night City mesh, source name, quarter turns), then slot -> part.
+PARTS.update({
+    "lch_wall": ("SM_5FAECE77FD00473A", "wat_lch_building_d_uf_solid_aa", 2),
+    "lch_window": ("SM_BFA789F31A93794E", "wat_lch_building_d_uf_aa", 2),
+    "lch_ground": ("SM_516C115D46368D64", "wat_lch_building_d_gf_aa", 2),
+    "lch_round": ("SM_79FE75888DD4CFEC", "wat_lch_building_d_uf_round_w300_l300_aa", 3),
+    "lch_round900": ("SM_4B80E9747E699E60", "wat_lch_building_d_uf_round_w900_l900_aa", 3),
+    "lch_ceiling_r300": ("SM_B36A9087AE71BC6B", "wat_lch_building_d_ceiling_r300_a", 3),
+    "lch_ceiling_r900": ("SM_4161DB32E977C961", "wat_lch_building_d_ceiling_r900_a", 3),
+    "lch_ledge": ("SM_803BB6F1B17B3E46", "wat_lch_building_d_ledge_aa", 2),
+    "lch_ledge_round": ("SM_209130419EB587C4", "wat_lch_building_d_ledge_round_w300_l300_aa", 3),
+    "lch_ledge_round900": ("SM_74A3C6FB6FB90D18", "wat_lch_building_d_ledge_round_w900_l900_aa", 3),
+    "cpz_wall": ("SM_00CA3C7834FCFF68", "cct_cpz_building_a_f_6m", 2),
+    "cpz_window": ("SM_C21C1CD5D6C8BE95", "cct_cpz_building_a_b_6m_window", 2),
+    "cpz_corner": ("SM_91C369D2CA38B5D8", "cct_cpz_building_a_3m_corner_a", 3),
+    "cpz_parapet": ("SM_F9A552737C7749D1", "wat_lch_building_c_facade_top_w600", 2),
+    "cpz_roof": ("SM_F8A12C5A97B4C485", "wbr_cha_building_a_roof_w600_aa", 0),
+    "cpz_soffit": ("SM_E53BDC3C4157ABAB", "cct_cpz_building_a_a_bottom_cover_6m", 0),
+    "cpz_column": ("SM_CA952D4D80694F7A", "cct_cpz_building_c_column_a", 0),
+})
+TYPE_KITS = {
+    "DA_FacadeKit_LchRound": {
+        "slots": {"wall": "lch_wall", "window": "lch_window", "corner": "lch_round", "parapet": "lch_ledge", "roof": "a_roof", "ground_wall": "lch_ground",
+                  "roof_corner": "lch_ceiling_r300", "parapet_corner": "lch_ledge_round"},
+        "bay_width": 300.0, "storey_height": 400.0, "ground_storey_height": 800.0, "window_chance": 0.7,
+    },
+    "DA_FacadeKit_LchRound900": {
+        "slots": {"wall": "lch_wall", "window": "lch_window", "corner": "lch_round900", "parapet": "lch_ledge", "roof": "a_roof", "ground_wall": "lch_ground",
+                  "roof_corner": "lch_ceiling_r900", "parapet_corner": "lch_ledge_round900"},
+        "bay_width": 300.0, "storey_height": 400.0, "ground_storey_height": 800.0, "window_chance": 0.7,
+    },
+    "DA_FacadeKit_CorpPlaza": {
+        "slots": {"wall": "cpz_wall", "window": "cpz_window", "corner": "cpz_corner", "parapet": "cpz_parapet", "roof": "cpz_roof",
+                  "soffit": "cpz_soffit", "column": "cpz_column"},
+        "bay_width": 600.0, "storey_height": 800.0, "ground_storey_height": 0.0, "window_chance": 0.6, "column_group": 2, "column_every": 2, "column_inset": 40.0,
+    },
+}
+# L_FacadeKit_Types, row by row: (kit, [(label, width, depth, height, shape, stack, overhang)]), 60 m apart along X, 70 m along Y.
+TYPE_ROWS = (
+    ("DA_FacadeKit_LchRound", [("Lch box", 24, 18, 20, "BOX", "NONE", "AUTO"), ("Lch L", 24, 18, 20, "L", "NONE", "AUTO"), ("Lch setback", 24, 18, 40, "BOX", "SETBACK", "AUTO"), ("Lch tower", 24, 24, 48, "BOX", "PODIUM_TOWER", "AUTO")]),
+    ("DA_FacadeKit_LchRound900", [("Lch 9 m box", 36, 24, 24, "BOX", "NONE", "AUTO"), ("Lch 9 m drum", 18, 18, 40, "BOX", "NONE", "AUTO"), ("Lch 9 m capsule", 36, 18, 32, "BOX", "NONE", "AUTO"), ("Lch 9 m setback", 36, 30, 40, "BOX", "SETBACK", "AUTO")]),
+    ("DA_FacadeKit_CorpPlaza", [("Plaza front", 48, 30, 40, "BOX", "OVERHANG", "FRONT"), ("Plaza sides", 48, 30, 40, "BOX", "OVERHANG", "SIDES"), ("Plaza front sides", 48, 30, 40, "BOX", "OVERHANG", "FRONT_AND_SIDES"), ("Plaza all round", 48, 30, 40, "BOX", "OVERHANG", "ALL_ROUND")]),
+)
+
 
 KITS = {
     "DA_FacadeKit_CharterHillA": {"wall": "a_wall", "window": "a_window", "door": "b_door", "corner": "a_pillar", "parapet": "a_cornice", "roof": "a_roof", "window_chance": 0.55},
@@ -119,6 +172,76 @@ def make_kits(meshes):
     return kits
 
 
+def make_type_kits(meshes):
+    kits = {}
+    for name, spec in TYPE_KITS.items():
+        path = FOLDER + "/" + name
+        if ASSETS.does_asset_exist(path):
+            kit = ASSETS.load_asset(path)
+        else:
+            factory = unreal.DataAssetFactory()
+            factory.set_editor_property("data_asset_class", unreal.CSCityFacadeKit.static_class())
+            kit = TOOLS.create_asset(name, FOLDER, unreal.CSCityFacadeKit, factory)
+            log("made " + path)
+        if not kit:
+            fail("could not make " + path)
+            continue
+        for slot, key in spec["slots"].items():
+            module = unreal.CSCityFacadeModule()
+            module.set_editor_property("mesh", meshes[key])
+            module.set_editor_property("quarter_turns", PARTS[key][2])
+            kit.set_editor_property(slot, module)
+        for prop, value in spec.items():
+            if prop != "slots":
+                kit.set_editor_property(prop, value)
+        ASSETS.save_loaded_asset(kit, False)
+        kits[name] = kit
+    return kits
+
+
+def make_types_level(kits):
+    path = FOLDER + "/L_FacadeKit_Types"
+    if ASSETS.does_asset_exist(path):
+        log("{} exists; delete it to make it again".format(path))
+        return
+    if not LEVELS.new_level_from_template(path, TEMPLATE):
+        fail("could not create {} from {}".format(path, TEMPLATE))
+        return
+    for actor in ACTORS.get_all_level_actors():
+        component = actor.get_component_by_class(unreal.StaticMeshComponent) if isinstance(actor, unreal.StaticMeshActor) else None
+        mesh = component.get_editor_property("static_mesh") if component else None
+        if mesh and mesh.get_name() == "SM_Template_Map_Floor":
+            ACTORS.destroy_actor(actor)
+    ground = ACTORS.spawn_actor_from_class(unreal.StaticMeshActor, unreal.Vector(9000.0, 10500.0, 0.0))
+    ground.set_actor_label("Ground")
+    ground.set_actor_scale3d(unreal.Vector(350.0, 400.0, 1.0))
+    component = ground.get_component_by_class(unreal.StaticMeshComponent)
+    component.set_editor_property("static_mesh", unreal.load_asset("/Engine/BasicShapes/Plane"))
+    component.set_material(0, unreal.load_asset("/Engine/BasicShapes/BasicShapeMaterial"))
+    building_class = unreal.load_class(None, "/Script/CSRoadNet.CSCityBuildingActor")
+    for r, (kit_name, row) in enumerate(TYPE_ROWS):
+        for c, (label, width, depth, height, shape, stack, overhang) in enumerate(row):
+            actor = ACTORS.spawn_actor_from_class(building_class, unreal.Vector(c * 6000.0, r * 7000.0, 0.0), unreal.Rotator(0.0, 0.0, 0.0))
+            actor.set_actor_label(label)
+            actor.set_editor_property("height", float(height), notify_mode=NEVER)
+            actor.set_editor_property("kit", kits[kit_name], notify_mode=NEVER)
+            actor.set_editor_property("mass_shape", getattr(unreal.CSCityMassShape, shape), notify_mode=NEVER)
+            actor.set_editor_property("mass_stack", getattr(unreal.CSCityMassStack, stack), notify_mode=NEVER)
+            actor.set_editor_property("mass_overhang", getattr(unreal.CSCityMassOverhang, overhang), notify_mode=NEVER)
+            outline = actor.get_editor_property("outline")
+            outline.clear_spline_points(False)
+            half_x, half_y = width * 50.0, depth * 50.0
+            for x, y in ((-half_x, -half_y), (half_x, -half_y), (half_x, half_y), (-half_x, half_y)):
+                outline.add_spline_point(unreal.Vector(x, y, 0.0), unreal.SplineCoordinateSpace.LOCAL, False)
+                outline.set_spline_point_type(outline.get_number_of_spline_points() - 1, unreal.SplinePointType.LINEAR, False)
+            outline.set_closed_loop(True, False)
+            outline.update_spline()
+    if not LEVELS.save_current_level():
+        fail("could not save " + path)
+        return
+    log("saved " + path)
+
+
 def make_level(kits):
     if ASSETS.does_asset_exist(LEVEL):
         log("{} exists; delete it to make it again".format(LEVEL))
@@ -178,6 +301,7 @@ def run():
     for name, kit in kits.items():
         log("kit {} {}".format(name, kit.get_path_name()))
     make_level(kits)
+    make_types_level(make_type_kits(meshes))
 
 
 run()

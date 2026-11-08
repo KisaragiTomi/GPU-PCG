@@ -2,6 +2,8 @@
 
 #include "PCGEditorProcess.h"
 #include "CSGroundActor.h"
+#include "CSCityFieldActor.h"
+#include "CSCityFieldPaintEdMode.h"
 #include "CSGroundPaintEdMode.h"
 #include "CSHouseActor.h"
 #include "CSWindowBrushEdMode.h"
@@ -156,6 +158,7 @@ void FPCGEditorProcessModule::StartupModule()
 	AMeshGeneratorBrushCache::OnInstanceBrushEditorRequest.AddRaw(this, &FPCGEditorProcessModule::StartInstanceBrush);
 	ACSPointBrushActor::OnPointBrushEditorRequest.AddRaw(this, &FPCGEditorProcessModule::StartPointBrush);
 	ACSGroundActor::OnGroundPaintEditorRequest.AddRaw(this, &FPCGEditorProcessModule::StartGroundPaint);
+	ACSCityFieldActor::OnPaintRequest.AddRaw(this, &FPCGEditorProcessModule::StartCityFieldPaint);
 	ACSHouseActor::OnWindowBrushRequest.AddRaw(this, &FPCGEditorProcessModule::StartWindowBrush);
 	AGPUSkeletalTree::OnGenerateTreeEditorRequest.BindRaw(this, &FPCGEditorProcessModule::GenerateGPUSkeletalTree);
 
@@ -196,6 +199,7 @@ void FPCGEditorProcessModule::ShutdownModule()
 	AMeshGeneratorBrushCache::OnInstanceBrushEditorRequest.RemoveAll(this);
 	ACSPointBrushActor::OnPointBrushEditorRequest.RemoveAll(this);
 	ACSGroundActor::OnGroundPaintEditorRequest.RemoveAll(this);
+	ACSCityFieldActor::OnPaintRequest.RemoveAll(this);
 	ACSHouseActor::OnWindowBrushRequest.RemoveAll(this);
 	AGPUSkeletalTree::OnGenerateTreeEditorRequest.Unbind();
 	if (!IsEngineExitRequested() && GEditor)
@@ -203,11 +207,13 @@ void FPCGEditorProcessModule::ShutdownModule()
 		if (bEditorModeRegistered) FEditorModeRegistry::Get().UnregisterMode(FCSInstanceBrushEdMode::EM_CSInstanceBrush);
 		if (bPointBrushModeRegistered) FEditorModeRegistry::Get().UnregisterMode(FCSPointBrushEdMode::EM_CSPointBrush);
 		if (bGroundPaintModeRegistered) FEditorModeRegistry::Get().UnregisterMode(FCSGroundPaintEdMode::EM_CSGroundPaint);
+		if (bCityFieldPaintModeRegistered) FEditorModeRegistry::Get().UnregisterMode(FCSCityFieldPaintEdMode::EM_CSCityFieldPaint);
 		if (bWindowBrushModeRegistered) FEditorModeRegistry::Get().UnregisterMode(FCSWindowBrushEdMode::EM_CSWindowBrush);
 	}
 	bEditorModeRegistered = false;
 	bPointBrushModeRegistered = false;
 	bGroundPaintModeRegistered = false;
+	bCityFieldPaintModeRegistered = false;
 	bWindowBrushModeRegistered = false;
 	ACSShallowWaterCapture::OnBakeResultMeshDelegate.Unbind();
 }
@@ -254,6 +260,16 @@ void FPCGEditorProcessModule::InitializeEditorUI()
 			FSlateIcon(),
 			false);
 		bGroundPaintModeRegistered = true;
+	}
+
+	if (!FEditorModeRegistry::Get().GetFactoryMap().Contains(FCSCityFieldPaintEdMode::EM_CSCityFieldPaint))
+	{
+		FEditorModeRegistry::Get().RegisterMode<FCSCityFieldPaintEdMode>(
+			FCSCityFieldPaintEdMode::EM_CSCityFieldPaint,
+			LOCTEXT("CSCityFieldPaintMode", "CS City Field Paint"),
+			FSlateIcon(),
+			false);
+		bCityFieldPaintModeRegistered = true;
 	}
 
 	if (!FEditorModeRegistry::Get().GetFactoryMap().Contains(FCSWindowBrushEdMode::EM_CSWindowBrush))
@@ -320,6 +336,15 @@ void FPCGEditorProcessModule::StartGroundPaint(ACSGroundActor* TargetActor)
 	{
 		BrushMode->SetTargetActor(TargetActor);
 	}
+}
+
+void FPCGEditorProcessModule::StartCityFieldPaint(ACSCityFieldActor* TargetActor)
+{
+	if (!TargetActor || !GEditor) return;
+
+	FEditorModeTools& ModeTools = GLevelEditorModeTools();
+	ModeTools.ActivateMode(FCSCityFieldPaintEdMode::EM_CSCityFieldPaint);
+	if (FCSCityFieldPaintEdMode* BrushMode = ModeTools.GetActiveModeTyped<FCSCityFieldPaintEdMode>(FCSCityFieldPaintEdMode::EM_CSCityFieldPaint)) BrushMode->SetTargetActor(TargetActor);
 }
 
 void FPCGEditorProcessModule::GenerateGPUSkeletalTree(AGPUSkeletalTree* TargetActor)
